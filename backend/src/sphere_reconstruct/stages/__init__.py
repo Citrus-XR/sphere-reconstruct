@@ -9,3 +9,4 @@ FastAPI 側からは import しない (Torch などを引きずり込まない�
 from . import inspect_source  # noqa: F401
 from . import extract_frames  # noqa: F401
 from . import reproject_views  # noqa: F401
+from . import generate_masks  # noqa: F401

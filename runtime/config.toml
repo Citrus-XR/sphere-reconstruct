@@ -28,9 +28,17 @@ colmap = ""
 repo_path = "/home/own/Models/sam3/sam3-main"
 checkpoint_path = "/home/own/Models/sam3/sam3.pt"
 config_path = ""
-# この機で CUDA 不可のため cpu. 実推論は極めて遅くなる想定.
+# この機で CUDA 不可のため cpu. 実推論は極めて遅くなる想定 (実測は 4070Ti 機で).
 device = "cpu"
 dtype = "float32"
+# デフォルトの検出 prompt (comma 区切り, 各語を個別に推論して mask を union する).
+# nekostreaming:D:/3DGSWorkscope/sam3prompt.txt と同一内容.
+default_prompt = "person,camera operator,selfie stick,tripod,person shadow,selfie stick shadow,tripod shadow"
+# SAM3 に渡す前に長辺をこの画素数へ縮小する (8K 入力は極端に遅いため).
+# SAM3 は縮小画像で mask を出し, それを元解像度へ bilinear 拡大して使う.
+max_inference_size = 1024
+# 検出信頼度しきい値.
+confidence_threshold = 0.5
 
 [log]
 level = "INFO"

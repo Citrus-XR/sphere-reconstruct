@@ -18,11 +18,24 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# 重い依存 (Torch, OpenCV, ffmpeg-python, pycolmap) は Worker 側だけで使いたいので後段で分割する.
-# Phase 4 以降で torch を extra として追加予定.
+# 重い依存は Worker 側だけで使うため extra に分離する.
+# base の `uv sync` では入らない. CUDA が要る機だけ `--extra sam3` を付ける.
 imaging = [
     "opencv-python-headless>=4.10",
     "Pillow>=11.0",
+]
+# SAM3 推論. torch は cu128 index から. sam3 パッケージ本体は sys.path 経由で
+# import するので, ここではその実行時依存だけを入れる.
+sam3 = [
+    "torch>=2.5",
+    "torchvision>=0.20",
+    "timm>=1.0.17",
+    "ftfy",
+    "regex",
+    "iopath>=0.1.10",
+    "huggingface-hub",
+    "Pillow>=11.0",
+    "opencv-python-headless>=4.10",
 ]
 dev = [
     "pytest>=8.3",
@@ -41,6 +54,17 @@ packages = ["src/sphere_reconstruct"]
 
 [tool.uv]
 package = true
+
+# torch は CUDA 12.8 ビルドを明示 index から取る (Windows/Linux + NVIDIA).
+# CUDA の無い機では --extra sam3 を付けなければ torch は入らない.
+[tool.uv.sources]
+torch = [{ index = "pytorch-cu128" }]
+torchvision = [{ index = "pytorch-cu128" }]
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
 
 [tool.ruff]
 target-version = "py312"
