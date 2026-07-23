@@ -1,0 +1,93 @@
+"""projects API.
+
+CRUD 系. ここに書く HTTP モデルはあくまで API 用 DTO. domain.project.Project と
+1:1 マップだが, 内部モデルを直接 dump しない (外側に無用に露出させない).
+"""
+
+from __future__ import annotations
+
+from datetime import datetime
+from pathlib import Path
+
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
+
+from ..domain import project as project_domain
+from ..domain.pipeline_state import PipelineState
+from ..infrastructure.database import get_db
+from ..infrastructure.filesystem import PathNotAllowedError, ensure_within_any
+from ..settings import get_settings
+
+router = APIRouter(prefix="/api/projects", tags=["projects"])
+
+
+class ProjectCreate(BaseModel):
+    name: str
+
+
+class ProjectRead(BaseModel):
+    id: str
+    name: str
+    created_at: datetime
+    updated_at: datetime
+    source_kind: str | None
+    source_path: str | None
+    state: PipelineState
+
+
+class SetSourceBody(BaseModel):
+    kind: project_domain.SourceKind
+    path: str  # 絶対パス. サーバサイドで allowed_roots チェック.
+
+
+def _to_read(p: project_domain.Project) -> ProjectRead:
+    return ProjectRead(
+        id=p.id,
+        name=p.name,
+        created_at=p.created_at,
+        updated_at=p.updated_at,
+        source_kind=p.source_kind.value if p.source_kind else None,
+        source_path=p.source_path,
+        state=p.state,
+    )
+
+
+@router.post("", response_model=ProjectRead)
+async def create_project(body: ProjectCreate) -> ProjectRead:
+    db = get_db()
+    project = await project_domain.create_project(db, body.name)
+    return _to_read(project)
+
+
+@router.get("", response_model=list[ProjectRead])
+async def list_projects() -> list[ProjectRead]:
+    db = get_db()
+    return [_to_read(p) for p in await project_domain.list_projects(db)]
+
+
+@router.get("/{project_id}", response_model=ProjectRead)
+async def get_project(project_id: str) -> ProjectRead:
+    db = get_db()
+    p = await project_domain.get_project(db, project_id)
+    if p is None:
+        raise HTTPException(status_code=404, detail="project not found")
+    return _to_read(p)
+
+
+@router.post("/{project_id}/source", response_model=ProjectRead)
+async def set_source(project_id: str, body: SetSourceBody) -> ProjectRead:
+    db = get_db()
+    existing = await project_domain.get_project(db, project_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="project not found")
+
+    settings = get_settings()
+    try:
+        resolved = ensure_within_any(settings.filesystem.allowed_roots, Path(body.path))
+    except PathNotAllowedError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    if not resolved.exists():
+        raise HTTPException(status_code=404, detail=f"source not found: {resolved}")
+
+    p = await project_domain.set_source(db, project_id, kind=body.kind, path=str(resolved))
+    return _to_read(p)

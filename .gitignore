@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# uv
+.uv-cache/
+
+# Node
+node_modules/
+dist/
+.vite/
+*.local
+*.tsbuildinfo
+
+# ワークスペース (プロジェクト成果物)
+workspace/
+runtime/local.toml
+
+# エディタ
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# ログ / 一時
+*.log
+tmp/
+.tmp/
+
+# サンプル INSV は Git に入れない
+sample/*.insv
+sample/*.pb

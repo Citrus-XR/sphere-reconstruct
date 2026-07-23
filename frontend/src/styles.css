@@ -1,0 +1,113 @@
+:root {
+  color-scheme: light dark;
+  font-family: system-ui, -apple-system, 'Hiragino Sans', 'Noto Sans JP', sans-serif;
+  --fg: #1a1a1a;
+  --fg-mute: #6a6a6a;
+  --bg: #fdfdfd;
+  --bg-elev: #ffffff;
+  --border: #dcdcdc;
+  --accent: #3a6df0;
+  --error: #d9534f;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --fg: #eaeaea;
+    --fg-mute: #9a9a9a;
+    --bg: #171717;
+    --bg-elev: #212121;
+    --border: #303030;
+    --accent: #6c9dff;
+    --error: #ff7b78;
+  }
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--fg); }
+
+.app {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.app-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 12px;
+}
+
+.app-header h1 {
+  font-size: 20px;
+  margin: 0;
+  letter-spacing: 0.02em;
+}
+
+.app-header nav {
+  display: flex;
+  gap: 16px;
+}
+
+.app-header nav a {
+  color: var(--fg-mute);
+  text-decoration: none;
+}
+
+.app-header nav a:hover {
+  color: var(--accent);
+}
+
+.card {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px;
+}
+
+.btn {
+  background: var(--accent);
+  color: white;
+  border: none;
+  padding: 8px 16px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 14px;
+}
+.btn:disabled { opacity: 0.5; cursor: default; }
+
+.btn-secondary {
+  background: transparent;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+}
+
+.input {
+  border: 1px solid var(--border);
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--fg);
+  font-size: 14px;
+  width: 100%;
+}
+
+.list-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.list-row:first-child {
+  border-top: none;
+}
+
+.mono { font-family: ui-monospace, 'Menlo', monospace; font-size: 12px; color: var(--fg-mute); }
+
+.error { color: var(--error); }

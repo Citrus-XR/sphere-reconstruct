@@ -1,0 +1,36 @@
+# sphere-reconstruct 実行時設定
+# ローカル単一ユーザ向け. 127.0.0.1 のみ bind する.
+
+[server]
+host = "127.0.0.1"
+port = 8787
+
+[workspace]
+# プロジェクト成果物を置くルート. project-id ごとにサブディレクトリを作る.
+root = "./workspace"
+
+[filesystem]
+# サーバサイド file browser が列挙してよいディレクトリ. 未列挙のパスは弾く.
+# 絶対パスで指定する.
+allowed_roots = [
+    "/home/own",
+    "/home/own/Downloads",
+]
+
+[binaries]
+# 外部バイナリのパス. 未指定なら PATH を見る.
+ffmpeg = ""
+ffprobe = ""
+colmap = ""
+
+[sam3]
+# SAM3 は手動配置方式. HuggingFace token 経由の自動 DL は行わない.
+repo_path = "/home/own/Models/sam3/sam3-main"
+checkpoint_path = "/home/own/Models/sam3/sam3.pt"
+config_path = ""
+# この機で CUDA 不可のため cpu. 実推論は極めて遅くなる想定.
+device = "cpu"
+dtype = "float32"
+
+[log]
+level = "INFO"
