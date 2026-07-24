@@ -33,6 +33,7 @@ class JobSupervisor:
         *,
         project_id: str,
         stage: str | None = None,
+        params_by_stage: dict[str, dict] | None = None,
     ) -> str:
         job_id = str(uuid.uuid4())
         now = datetime.now(UTC).isoformat()
@@ -62,7 +63,7 @@ class JobSupervisor:
                 "project_id": project_id,
                 "job_id": job_id,
                 "stage": stage,
-                "params_by_stage": None,
+                "params_by_stage": params_by_stage,
             },
         )
         # pid を job テーブルへ書き込む.

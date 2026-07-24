@@ -44,6 +44,7 @@ class Sam3Engine:
         self._model = None
         self._processor = None
         self._torch = None
+        self._autocast_dtype = None  # cuda + bf16/fp16 のとき torch.dtype, それ以外 None
 
     @classmethod
     def from_settings(cls) -> "Sam3Engine":
@@ -77,6 +78,13 @@ class Sam3Engine:
                 f"SAM3 device is '{device}' but CUDA is not available on this machine"
             )
 
+        # SAM3 の build_sam3_image_model 内 _setup_device_and_mode は device == "cuda"
+        # の完全一致でしか model.cuda() しない ("cuda:0" だと重みが CPU に残り, 入力
+        # (cuda) と型が食い違う). そのため cuda 系は "cuda" へ正規化する.
+        # 4070Ti など単一 GPU 前提. マルチ GPU で特定 index を使う要件が出たら,
+        # build 後に手動で .to(device) する対応を足す.
+        build_device = "cuda" if device.startswith("cuda") else device
+
         # Ampere 系で tf32 を有効化 (公式 demo に倣う). cpu では無害.
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
@@ -84,11 +92,19 @@ class Sam3Engine:
         self._model = build_sam3_image_model(
             checkpoint_path=str(self._paths.checkpoint_path),
             load_from_HF=False,
-            device=device,
+            device=build_device,
         )
         self._processor = Sam3Processor(
-            self._model, confidence_threshold=self._confidence, device=device
+            self._model, confidence_threshold=self._confidence, device=build_device
         )
+
+        # cuda では autocast で bf16/fp16 を使う (VRAM 節約 + 高速化). cpu は fp32 のまま.
+        if build_device == "cuda":
+            dt = self._paths.dtype.lower()
+            if dt in ("bfloat16", "bf16"):
+                self._autocast_dtype = torch.bfloat16
+            elif dt in ("float16", "fp16", "half"):
+                self._autocast_dtype = torch.float16
 
     def detect(self, image_rgb: np.ndarray, prompts: list[str]) -> list[Sam3Detection]:
         """RGB (H,W,3) uint8 画像に対し, prompt 各語で検出する.
@@ -103,22 +119,31 @@ class Sam3Engine:
         from PIL import Image  # noqa: PLC0415
 
         pil = Image.fromarray(image_rgb)
-        state = self._processor.set_image(pil)
 
-        results: list[Sam3Detection] = []
-        for term in prompts:
-            self._processor.reset_all_prompts(state)
-            state = self._processor.set_text_prompt(prompt=term, state=state)
-            det = Sam3Detection(prompt=term)
-            masks = state.get("masks")
-            scores = state.get("scores")
-            if masks is not None and len(masks) > 0:
-                # masks: (N,1,H,W) bool tensor at original resolution.
-                arr = masks.squeeze(1).detach().cpu().numpy().astype(np.uint8)
-                det.masks = [arr[i] for i in range(arr.shape[0])]
-                if scores is not None:
-                    det.scores = [float(s) for s in scores.detach().cpu().numpy().tolist()]
-            results.append(det)
+        import contextlib  # noqa: PLC0415
+
+        if self._autocast_dtype is not None:
+            autocast_ctx = self._torch.autocast("cuda", dtype=self._autocast_dtype)
+        else:
+            autocast_ctx = contextlib.nullcontext()
+
+        with autocast_ctx:
+            state = self._processor.set_image(pil)
+
+            results: list[Sam3Detection] = []
+            for term in prompts:
+                self._processor.reset_all_prompts(state)
+                state = self._processor.set_text_prompt(prompt=term, state=state)
+                det = Sam3Detection(prompt=term)
+                masks = state.get("masks")
+                scores = state.get("scores")
+                if masks is not None and len(masks) > 0:
+                    # masks: (N,1,H,W) bool tensor at original resolution.
+                    arr = masks.squeeze(1).detach().cpu().numpy().astype(np.uint8)
+                    det.masks = [arr[i] for i in range(arr.shape[0])]
+                    if scores is not None:
+                        det.scores = [float(s) for s in scores.detach().cpu().numpy().tolist()]
+                results.append(det)
         return results
 
     def unload(self) -> None:

@@ -39,19 +39,30 @@ class JobStarted(BaseModel):
     job_id: str
 
 
+class RunBody(BaseModel):
+    # ステージ名 -> パラメータ dict. 省略可.
+    # 例: {"reproject_views": {"size": 1024, "max_frames": 10},
+    #      "generate_masks": {"prompt": "person,tripod"}}
+    params_by_stage: dict[str, dict] | None = None
+
+
 @router.post("/api/projects/{project_id}/run", response_model=JobStarted)
-async def run_pipeline(project_id: str) -> JobStarted:
+async def run_pipeline(project_id: str, body: RunBody | None = None) -> JobStarted:
     db = get_db()
     p = await project_domain.get_project(db, project_id)
     if p is None:
         raise HTTPException(status_code=404, detail="project not found")
     sup = get_supervisor()
-    job_id = await sup.enqueue_run_pipeline(project_id=project_id, stage=None)
+    job_id = await sup.enqueue_run_pipeline(
+        project_id=project_id,
+        stage=None,
+        params_by_stage=body.params_by_stage if body else None,
+    )
     return JobStarted(job_id=job_id)
 
 
 @router.post("/api/projects/{project_id}/rerun/{stage}", response_model=JobStarted)
-async def rerun_stage(project_id: str, stage: str) -> JobStarted:
+async def rerun_stage(project_id: str, stage: str, body: RunBody | None = None) -> JobStarted:
     if stage not in [s.value for s in StageName]:
         raise HTTPException(status_code=400, detail=f"unknown stage: {stage}")
     db = get_db()
@@ -59,7 +70,11 @@ async def rerun_stage(project_id: str, stage: str) -> JobStarted:
     if p is None:
         raise HTTPException(status_code=404, detail="project not found")
     sup = get_supervisor()
-    job_id = await sup.enqueue_run_pipeline(project_id=project_id, stage=stage)
+    job_id = await sup.enqueue_run_pipeline(
+        project_id=project_id,
+        stage=stage,
+        params_by_stage=body.params_by_stage if body else None,
+    )
     return JobStarted(job_id=job_id)
 
 

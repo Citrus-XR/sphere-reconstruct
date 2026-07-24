@@ -26,16 +26,36 @@ imaging = [
 ]
 # SAM3 推論. torch は cu128 index から. sam3 パッケージ本体は sys.path 経由で
 # import するので, ここではその実行時依存だけを入れる.
+# SAM3 推論. torch は cu128 index から. sam3 パッケージ本体は sys.path 経由で
+# import するので, ここではその実行時依存を入れる. sam3 の pyproject が宣言する
+# 依存は不完全で, model_builder が tracker / train パスを無条件 import するため
+# einops / decord / triton / pandas / scipy 等まで必要になる (実機で確認済み).
 sam3 = [
     "torch>=2.5",
     "torchvision>=0.20",
     "timm>=1.0.17",
+    "einops>=0.8",
+    "decord>=0.6",
     "ftfy",
     "regex",
     "iopath>=0.1.10",
     "huggingface-hub",
     "Pillow>=11.0",
     "opencv-python-headless>=4.10",
+    "pandas",
+    "scipy",
+    "scikit-image",
+    "scikit-learn",
+    "pycocotools",
+    "torchmetrics",
+    "submitit",
+    "matplotlib",
+    "psutil",
+    "omegaconf",
+    "hydra-core",
+    "open-clip-torch",
+    # triton は Windows では triton-windows パッケージ. Linux は torch 同梱の triton.
+    "triton-windows; sys_platform == 'win32'",
 ]
 dev = [
     "pytest>=8.3",
