@@ -191,6 +191,7 @@ def mapper(
     image_path: Path,
     output_path: Path,
     refine_intrinsics: bool = True,
+    refine_rig: bool = True,
     log_path: Path | None = None,
     on_line: Callable[[str], None] | None = None,
 ) -> CommandResult:
@@ -208,4 +209,7 @@ def mapper(
             "--Mapper.ba_refine_principal_point", "0",
             "--Mapper.ba_refine_extra_params", "0",
         ]
+    if not refine_rig:
+        # rig 外参 (sensor_from_rig) を固定する. offset_v3 の校正を厳密に信頼する場合.
+        args += ["--Mapper.ba_refine_sensor_from_rig", "0"]
     return run_command(colmap_bin, args, log_path=log_path, on_line=on_line)

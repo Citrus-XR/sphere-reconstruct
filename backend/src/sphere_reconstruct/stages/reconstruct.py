@@ -43,7 +43,7 @@ from ..colmap import runner as colmap_runner
 @register
 class Reconstruct(Stage):
     name = StageName.RECONSTRUCT
-    impl_version = "0.4"
+    impl_version = "0.5"
 
     def collect_inputs(self, ctx: StageContext) -> list[FileRef]:
         rig = ctx.project_dir / "reproject_views" / "manifest_rig.json"
@@ -67,6 +67,9 @@ class Reconstruct(Stage):
             "refine_intrinsics": bool(raw.get("refine_intrinsics", False)),
             # rig 拘束: 前後レンズ 6 視点 = 12 カメラの既知相対姿勢を固定する.
             "use_rig": bool(raw.get("use_rig", True)),
+            # rig 外参を COLMAP に精修させるか. False にすると offset_v3 の校正を厳密に
+            # 信頼して sensor_from_rig を固定する (剛性 rig). 既定 True (校正の微差を吸収).
+            "refine_rig": bool(raw.get("refine_rig", True)),
             # sequential matching の loop closure. 既定 False:
             #   (1) rig 拘束で既に 100% 登録できるため通常不要,
             #   (2) COLMAP 4.x は 2025-05 に vocab tree を flann -> faiss へ変更しており,
@@ -224,6 +227,7 @@ class Reconstruct(Stage):
             image_path=images_dir,
             output_path=sparse_dir,
             refine_intrinsics=ctx.params["refine_intrinsics"],
+            refine_rig=ctx.params["refine_rig"],
             log_path=logs_dir / "mapper.log",
             on_line=logline("mapper"),
         )
