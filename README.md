@@ -121,7 +121,7 @@ pnpm dev       # http://127.0.0.1:5173
 |-------|------|------|
 | 1 | FastAPI + React 骨組 / SQLite / Worker / WebSocket / Job ライフサイクル | 完了 |
 | 2 | INSV footer / offset_v3 / IMU / MEI キャリブ | 完了 (実 X5 で検証) |
-| 3 | 前後同期抽出 / 空間抽出 (鮮鋭度) / pinhole rig | 完了 |
+| 3 | 前後同期抽出 / **空間抽出 (2層多基準)** / pinhole rig | 完了 |
 | 4 | SAM3 手動パス / 推論 / マスク (縮小->推論->拡大) | 完了 (4070Ti で検証) |
 | 5 | COLMAP CLI / **rig 拘束** / SIFT / Sequential Matching / エクスポート | 完了 (実機で検証) |
 | 6 | 3D Viewer (three.js + R3F) / Frames / Masks / 点群 + カメラ | 完了 |
@@ -130,6 +130,13 @@ pnpm dev       # http://127.0.0.1:5173
 **rig 拘束の効果 (実機, X5 8 frames)**: 前後レンズ 6 視点 = 12 仮想カメラの既知
 相対姿勢を COLMAP に与えることで, 登録率が 16/96 → **96/96 (100%)**, 点数 936 →
 2795, 平均再投影誤差 0.64px. 低視差の手持ち 360 素材でも全フレームが登録される.
+12 frames では 144/144 (100%), 4334 points, 0.72px.
+
+**空間抽出 (2層多基準)**: 固定時間間隔ではなく,
+- 快速層 (安価): 時間 + Laplacian ブレ + 過曝/欠曝 + IMU 回転差
+- 精確層 (高価): SIFT 特徴数 + 光流中央値 + 前選択フレームからの運動量
+の 2 段で候補を絞り, 「視覚/運動の変化量」で等間隔に高品質フレームを選ぶ.
+`selection_mode = interval | sharpness | spatial` で切替.
 
 今後: COLMAP loop closure (COLMAP 4.x は faiss 形式 vocab tree が必要), PB
 (`.insv.pb`) 完全パーサ (PB を伴う個体の INSV サンプル入手待ち; 現状は offset_v3
