@@ -61,3 +61,34 @@ def sample_rate_hz(samples: list[ImuSample]) -> float | None:
     if dt_us <= 0:
         return None
     return (len(samples) - 1) / (dt_us / 1_000_000.0)
+
+
+def integrate_rotation(samples: list[ImuSample], t_start_us: int, t_end_us: int) -> float:
+    """[t_start, t_end] の間の gyro を積分し, 総回転角 (ラジアン) を返す.
+
+    空間抽出のフレーム間隔判定に使う. gyro の各軸を独立に積分し, 角速度ベクトルの
+    ノルムを台形則で積分する (小角近似での総回転量). サンプルが範囲外なら 0.
+
+    gyro の単位は rad/s 前提 (imu.py の観測メモ参照). 単位が deg/s だった場合は
+    呼び出し側で換算するか, ここを調整する.
+    """
+    if t_end_us <= t_start_us:
+        return 0.0
+    # 範囲内のサンプルを時刻順に取る.
+    inrange = [s for s in samples if t_start_us <= s.timestamp_us <= t_end_us]
+    if len(inrange) < 2:
+        return 0.0
+    inrange.sort(key=lambda s: s.timestamp_us)
+    total = 0.0
+    for a, b in zip(inrange[:-1], inrange[1:], strict=False):
+        dt = (b.timestamp_us - a.timestamp_us) / 1_000_000.0
+        if dt <= 0:
+            continue
+        wa = _norm3(a.gyro_xyz)
+        wb = _norm3(b.gyro_xyz)
+        total += 0.5 * (wa + wb) * dt  # 台形則
+    return total
+
+
+def _norm3(v: tuple[float, float, float]) -> float:
+    return (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]) ** 0.5

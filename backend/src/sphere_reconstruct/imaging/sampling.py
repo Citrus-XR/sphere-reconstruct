@@ -70,3 +70,108 @@ def pick_sharpest(scores: list[float]) -> int:
         if s > scores[best]:
             best = i
     return best
+
+
+# -----------------------------------------------------------------------------
+# 空間抽出 (2 層多基準選択)
+# -----------------------------------------------------------------------------
+from collections.abc import Callable
+from dataclasses import dataclass, field
+
+
+@dataclass
+class Candidate:
+    """候補フレーム 1 枚の計測結果.
+
+    快速層: sharpness (Laplacian 分散), exposure_ok (過曝/欠曝でない)
+    精確層: feature_count (SIFT 特徴数)
+    """
+
+    index: int          # source frame index
+    timestamp_us: int
+    sharpness: float
+    exposure_ok: bool
+    feature_count: int = 0
+
+
+@dataclass
+class SpatialConfig:
+    min_sharpness: float = 0.0   # これ未満は快速層で棄却 (0 = 無効)
+    min_features: int = 0        # これ未満は精確層で棄却
+    target_motion: float = 1.5   # 前選択フレームからの運動量がこれを超えたら次を選ぶ
+    min_spacing_frac: float = 0.7  # 最小間隔 = target_motion * これ (これ未満の候補は近すぎ)
+    max_frames: int = 0          # 0 = 無制限
+
+
+@dataclass
+class SpatialResult:
+    selected_indices: list[int]
+    rejected_fast: int           # 快速層で落ちた数
+    reasons: dict[str, int] = field(default_factory=dict)
+
+
+def _quality(c: Candidate) -> float:
+    """選択優先度. 特徴数と鮮鋭度を組み合わせる (正規化は呼び出し前提の相対比較)."""
+    return c.sharpness * (1.0 + c.feature_count)
+
+
+def select_spatial(
+    candidates: list[Candidate],
+    motion_fn: Callable[[int, int], float],
+    config: SpatialConfig,
+) -> SpatialResult:
+    """2 層 + 貪欲な空間間隔でフレームを選ぶ.
+
+    1. 快速層: sharpness >= min_sharpness かつ exposure_ok.
+    2. 精確層: feature_count >= min_features.
+    3. 貪欲間隔: 最初の valid を選び, 前選択からの motion が target_motion を超えたら,
+       「間隔帯 [target*min_spacing_frac, ...]」に入る候補の中で _quality 最大のものを
+       選ぶ. これにより最小間隔を保ちつつ, その付近で最も高品質なフレームを採る.
+       「時間」ではなく「視覚/運動の変化量」で等間隔サンプルする.
+
+    motion_fn(a_index, b_index): a と b の運動量 (光流中央値 or IMU 回転角). 各候補につき
+    1 回だけ呼ぶよう内部でキャッシュする. candidates は時刻昇順であること.
+    """
+    reasons = {"blur": 0, "exposure": 0, "few_features": 0}
+    valid: list[Candidate] = []
+    for c in candidates:
+        if config.min_sharpness > 0 and c.sharpness < config.min_sharpness:
+            reasons["blur"] += 1
+            continue
+        if not c.exposure_ok:
+            reasons["exposure"] += 1
+            continue
+        if config.min_features > 0 and c.feature_count < config.min_features:
+            reasons["few_features"] += 1
+            continue
+        valid.append(c)
+
+    rejected = len(candidates) - len(valid)
+    if not valid:
+        return SpatialResult(selected_indices=[], rejected_fast=rejected, reasons=reasons)
+
+    min_spacing = config.target_motion * config.min_spacing_frac
+    selected = [valid[0]]
+    last = valid[0]
+    window: list[tuple[Candidate, float]] = []  # (候補, last からの motion)
+    for c in valid[1:]:
+        m = motion_fn(last.index, c.index)
+        window.append((c, m))
+        if m >= config.target_motion:
+            # 最小間隔を満たす候補の中で quality 最大を選ぶ.
+            eligible = [cand for cand, mm in window if mm >= min_spacing]
+            if not eligible:
+                eligible = [c]
+            best = max(eligible, key=_quality)
+            selected.append(best)
+            last = best
+            window = []
+            if config.max_frames and len(selected) >= config.max_frames:
+                break
+
+    return SpatialResult(
+        selected_indices=[c.index for c in selected],
+        rejected_fast=rejected,
+        reasons=reasons,
+    )
+

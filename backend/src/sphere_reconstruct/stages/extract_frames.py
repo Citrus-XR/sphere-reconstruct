@@ -30,7 +30,7 @@ from ..settings import get_settings
 @register
 class ExtractFrames(Stage):
     name = StageName.EXTRACT_FRAMES
-    impl_version = "0.2"
+    impl_version = "0.3"
 
     def collect_inputs(self, ctx: StageContext) -> list[FileRef]:
         if ctx.source_path is None:
@@ -45,8 +45,18 @@ class ExtractFrames(Stage):
             "interval_sec": float(raw.get("interval_sec", 1.0)),
             "jpeg_quality": int(raw.get("jpeg_quality", 3)),
             "max_frames": int(raw.get("max_frames", 0)),
-            # 空間抽出: 各区間で最も鮮鋭なフレームを選ぶ. 1 なら固定間隔 (従来).
+            # 選択モード:
+            #   "interval"  … 固定時間間隔 (従来)
+            #   "sharpness" … 各区間で最も鮮鋭なフレーム (sharpness_candidates 個から)
+            #   "spatial"   … 2 層多基準の空間抽出 (鮮鋭度+露出+特徴+光流間隔)
+            "selection_mode": str(raw.get("selection_mode", "interval")),
             "sharpness_candidates": int(raw.get("sharpness_candidates", 1)),
+            # spatial 用パラメータ.
+            "candidate_fps": float(raw.get("candidate_fps", 3.0)),
+            "min_sharpness": float(raw.get("min_sharpness", 0.0)),
+            "max_clip": float(raw.get("max_clip", 0.25)),
+            "min_features": int(raw.get("min_features", 0)),
+            "target_motion": float(raw.get("target_motion", 1.5)),
         }
 
     def execute(self, ctx: StageContext) -> StageManifest:
@@ -108,17 +118,23 @@ class ExtractFrames(Stage):
                 f"no frames to extract (duration={duration}s, interval={interval}s)"
             )
 
-        # 空間抽出: 各区間で候補を抜き, lens0 の鮮鋭度が最大の frame へ index を差し替える.
-        n_candidates = ctx.params["sharpness_candidates"]
-        if n_candidates > 1:
+        mode = ctx.params["selection_mode"]
+        if mode == "spatial":
+            # 2 層多基準の空間抽出. 固定間隔を使わず, 品質 + 運動量で選ぶ.
+            indices = self._select_spatial_indices(
+                ctx, fps=fps, duration=duration, nb_frames=lens0.nb_frames,
+                ffmpeg_bin=ffmpeg_bin, fallback_count=len(indices),
+            )
+        elif mode == "sharpness" or ctx.params["sharpness_candidates"] > 1:
+            # 各区間で候補を抜き, lens0 の鮮鋭度が最大の frame へ差し替える.
+            n_candidates = max(2, ctx.params["sharpness_candidates"])
             indices = self._refine_by_sharpness(
                 ctx, indices, fps=fps, interval=interval, n_candidates=n_candidates,
                 nb_frames=lens0.nb_frames, ffmpeg_bin=ffmpeg_bin,
             )
 
         ctx.progress.info(
-            f"extracting {len(indices)} paired frames @ interval={interval}s from {duration:.1f}s"
-            + (f" (sharpness x{n_candidates})" if n_candidates > 1 else ""),
+            f"extracting {len(indices)} paired frames (mode={mode}) from {duration:.1f}s",
             progress=0.1,
         )
 
@@ -227,6 +243,97 @@ class ExtractFrames(Stage):
 
         shutil.rmtree(tmp_dir, ignore_errors=True)
         return refined
+
+    def _select_spatial_indices(
+        self,
+        ctx: StageContext,
+        *,
+        fps: float,
+        duration: float,
+        nb_frames: int | None,
+        ffmpeg_bin: str | None,
+        fallback_count: int,
+    ) -> list[int]:
+        """2 層多基準の空間抽出.
+
+        快速層: 候補を密に抜き, 各フレームの sharpness (Laplacian) と exposure を測る.
+        精確層: 快速層を通ったフレームに SIFT 特徴数を付ける.
+        貪欲間隔: 光流中央値を運動量として, target_motion 間隔で高品質フレームを選ぶ.
+
+        候補は lens0 のみをスコアリングに使い (前後は露光同期), 判定用に縮小グレースケール
+        をメモリに保持する. 選ばれた source frame index を返す.
+        """
+        import cv2  # noqa: PLC0415
+
+        from ..imaging import quality, sampling  # noqa: PLC0415
+
+        cand_fps = ctx.params["candidate_fps"]
+        bound = (nb_frames - 1) if nb_frames else None
+        n_cand = max(2, int(duration * cand_fps))
+        cand_indices = sorted({int(i / cand_fps * fps) for i in range(n_cand)})
+        if bound is not None:
+            cand_indices = sorted({min(bound, i) for i in cand_indices})
+
+        ctx.progress.info(
+            f"spatial: extracting {len(cand_indices)} candidate frames @ {cand_fps}fps",
+            progress=0.06,
+        )
+        tmp_dir = ctx.stage_out_dir / "_spatial_tmp"
+        paths = ffmpeg.extract_frames_by_index(
+            ctx.source_path, stream_index=0, fps=fps, frame_indices=cand_indices,
+            out_dir=tmp_dir, out_prefix="cand", ffmpeg_bin=ffmpeg_bin,
+        )
+
+        # 快速層 + 精確層のスコアリング. 光流用に縮小グレースケールを保持.
+        grays: dict[int, "object"] = {}
+        candidates: list[sampling.Candidate] = []
+        max_clip = ctx.params["max_clip"]
+        for idx, p in zip(cand_indices, paths, strict=False):
+            gray = cv2.imread(str(p), cv2.IMREAD_GRAYSCALE)
+            if gray is None:
+                continue
+            h, w = gray.shape[:2]
+            small = cv2.resize(gray, (max(1, w // 4), max(1, h // 4)), interpolation=cv2.INTER_AREA)
+            grays[idx] = small
+            sharp = sampling.laplacian_sharpness(small)
+            exp_ok = quality.exposure_stats(small).is_ok(max_clip)
+            feats = quality.sift_feature_count(small, downscale=1) if exp_ok else 0
+            candidates.append(
+                sampling.Candidate(
+                    index=idx, timestamp_us=int(idx / fps * 1_000_000),
+                    sharpness=sharp, exposure_ok=exp_ok, feature_count=feats,
+                )
+            )
+
+        def motion_fn(a: int, b: int) -> float:
+            ga, gb = grays.get(a), grays.get(b)
+            if ga is None or gb is None:
+                return 0.0
+            return quality.optical_flow_median(ga, gb, downscale=1)
+
+        cfg = sampling.SpatialConfig(
+            min_sharpness=ctx.params["min_sharpness"],
+            min_features=ctx.params["min_features"],
+            target_motion=ctx.params["target_motion"],
+            max_frames=ctx.params["max_frames"],
+        )
+        result = sampling.select_spatial(candidates, motion_fn, cfg)
+
+        import shutil
+
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+        ctx.progress.info(
+            f"spatial: selected {len(result.selected_indices)} / {len(candidates)} candidates "
+            f"(rejected fast: {result.reasons})",
+            progress=0.09,
+        )
+        if not result.selected_indices:
+            # 全滅時は素朴な等間隔にフォールバック.
+            ctx.progress.warn("spatial selection empty; falling back to fixed interval")
+            step = max(1, len(cand_indices) // max(1, fallback_count))
+            return cand_indices[::step]
+        return result.selected_indices
 
     # -- ERP video (単一 stream) ---------------------------------------------------
     def _extract_erp_video(

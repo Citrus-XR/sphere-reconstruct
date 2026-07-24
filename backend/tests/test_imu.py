@@ -37,3 +37,25 @@ def test_parse_multi_entry_and_rate():
     rate = sample_rate_hz(samples)
     assert rate is not None
     assert 199.0 < rate < 201.0
+
+
+def test_integrate_rotation_constant_gyro():
+    from sphere_reconstruct.insta360.imu import integrate_rotation
+
+    # gyro ノルム 1 rad/s を 1 秒間 -> 約 1 rad.
+    entries = [
+        _make_entry(0, 1.0, 0.0, 0.0, 0, 0, 0),
+        _make_entry(500_000, 1.0, 0.0, 0.0, 0, 0, 0),
+        _make_entry(1_000_000, 1.0, 0.0, 0.0, 0, 0, 0),
+    ]
+    samples = parse_imu_payload(b"".join(entries))
+    total = integrate_rotation(samples, 0, 1_000_000)
+    assert abs(total - 1.0) < 1e-6
+
+
+def test_integrate_rotation_out_of_range_returns_zero():
+    from sphere_reconstruct.insta360.imu import integrate_rotation
+
+    entries = [_make_entry(0, 1.0, 0.0, 0.0, 0, 0, 0), _make_entry(1_000_000, 1.0, 0.0, 0.0, 0, 0, 0)]
+    samples = parse_imu_payload(b"".join(entries))
+    assert integrate_rotation(samples, 5_000_000, 6_000_000) == 0.0
