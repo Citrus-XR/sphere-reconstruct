@@ -123,7 +123,30 @@ export const api = {
   getSettings: () => req<Record<string, unknown>>('/api/settings'),
   getReconstruction: (id: string) =>
     req<ReconstructionData>(`/api/projects/${id}/reconstruction`),
+  getMasks: (id: string) => req<MasksManifest>(`/api/projects/${id}/masks`),
 }
+
+export interface MaskViewRecord {
+  view: string
+  lens: number
+  path: string
+  coverage: number
+  detections: Record<string, number>
+  coverage_warning?: boolean
+}
+
+export interface MasksManifest {
+  kind: string
+  prompt: string[]
+  max_inference_size: number
+  frames: { index: number; views: MaskViewRecord[] }[]
+}
+
+// pinhole 画像 / mask の URL を組み立てる.
+export const pinholeUrl = (id: string, index: number, view: string, lens: number) =>
+  `/api/projects/${id}/pinhole/${index}/${view}?lens=${lens}`
+export const maskUrl = (id: string, index: number, view: string, lens: number) =>
+  `/api/projects/${id}/pinhole/${index}/${view}?lens=${lens}&mask=true`
 
 // points.bin をパースする. フォーマット (backend/colmap/web_preview.py と一致):
 //   header: u32 count, u32 stride(=20)

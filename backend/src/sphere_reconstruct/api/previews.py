@@ -91,6 +91,16 @@ async def pinhole_view(project_id: str, index: int, view: str, lens: int = 0, ma
     return FileResponse(path, media_type=media)
 
 
+@router.get("/api/projects/{project_id}/masks")
+async def list_masks(project_id: str) -> dict:
+    """generate_masks の manifest (frame ごとの view + coverage) を返す."""
+    project_dir = await _project_dir(project_id)
+    mf = project_dir / "generate_masks" / "manifest_masks.json"
+    if not mf.exists():
+        raise HTTPException(status_code=404, detail="generate_masks not run yet")
+    return json.loads(mf.read_text())
+
+
 @router.get("/api/projects/{project_id}/reconstruction")
 async def reconstruction(project_id: str) -> FileResponse:
     project_dir = await _project_dir(project_id)
