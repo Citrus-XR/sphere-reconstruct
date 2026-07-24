@@ -147,6 +147,22 @@ pnpm dev       # http://127.0.0.1:5173
 (`.insv.pb`) 完全パーサ (PB を伴う個体の INSV サンプル入手待ち; 現状は offset_v3
 (ASCII) で完全に校正できている).
 
+**特徴 backend (SIFT vs ALIKED+LightGlue)**: `reconstruct` の `feature_backend` で
+選ぶ. この COLMAP ビルドは SIFT のみ (deep features 非対応) なので, ALIKED は外部
+onnxruntime で抽出/マッチして COLMAP DB に書き込む (database_creator ->
+keypoints -> LightGlue -> matches_importer). 実測比較:
+
+| footage | backend | registered | points | reproj err |
+|---------|---------|-----------|--------|-----------|
+| 通常 (3840, 8f) | SIFT | 96/96 | 2795 | 0.64px |
+| 通常 (3840, 8f) | ALIKED | 96/96 | 8812 | 1.16px |
+| **暗光低解像 (2880, 10f)** | **SIFT** | **36/120 (30%)** | **110** | 0.57px |
+| **暗光低解像 (2880, 10f)** | **ALIKED** | **120/120 (100%)** | **1379** | 1.07px |
+
+通常素材では両者 100% (SIFT の方が高精度), 弱テクスチャ/暗光では SIFT が崩れ
+(30%), ALIKED が救済する (100%, 12.5x の点数). モデルは SAM3 同様 config パス +
+`scripts/fetch_aliked_models.py` で取得 (git には入れない).
+
 ## ライセンス
 
 未確定. コミット前に決定する.
