@@ -33,7 +33,7 @@ from ..pipeline.stage import Stage, StageContext, new_manifest
 @register
 class ReprojectViews(Stage):
     name = StageName.REPROJECT_VIEWS
-    impl_version = "0.1"
+    impl_version = "0.2"
 
     def collect_inputs(self, ctx: StageContext) -> list[FileRef]:
         # 入力ハッシュ: inspect_source の source.json + extract_frames の manifest_frames.json
@@ -163,6 +163,12 @@ class ReprojectViews(Stage):
                 for v in views
             ],
             "lens_count": len(lenses),
+            # 各レンズの光学中心オフセット (offset_v3 の tx/ty/tz, 単位 m). rig 拘束の
+            # cam_from_rig 計算に使う. lens0 は原点, lens1 は物理ベースライン分ずれる.
+            "lenses": [
+                {"index": i, "tx": l.tx, "ty": l.ty, "tz": l.tz}
+                for i, l in enumerate(lenses)
+            ],
             "frames": rig_records,
         }
         rig_path = ctx.stage_out_dir / "manifest_rig.json"

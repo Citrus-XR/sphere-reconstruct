@@ -43,7 +43,7 @@ from ..colmap import runner as colmap_runner
 @register
 class Reconstruct(Stage):
     name = StageName.RECONSTRUCT
-    impl_version = "0.3"
+    impl_version = "0.4"
 
     def collect_inputs(self, ctx: StageContext) -> list[FileRef]:
         rig = ctx.project_dir / "reproject_views" / "manifest_rig.json"
@@ -65,6 +65,8 @@ class Reconstruct(Stage):
             # 仮想 pinhole は既知 intrinsics でレンダリングしているので, 既定では
             # COLMAP に再推定させず固定する.
             "refine_intrinsics": bool(raw.get("refine_intrinsics", False)),
+            # rig 拘束: 前後レンズ 6 視点 = 12 カメラの既知相対姿勢を固定する.
+            "use_rig": bool(raw.get("use_rig", True)),
         }
 
     def execute(self, ctx: StageContext) -> StageManifest:
@@ -134,10 +136,13 @@ class Reconstruct(Stage):
                     ctx.progress.info(f"[{prefix}] {line}")
             return _cb
 
-        # 既知 intrinsics を計算する. cubemap の全 view は同一の size/fov なので単一
-        # PINHOLE カメラで良い. f = (size/2) / tan(fov/2).
+        # 既知 intrinsics を計算する. cubemap の全 view は同一の size/fov.
+        # f = (size/2) / tan(fov/2), cx=cy=size/2.
         views_meta = rig.get("views", [])
+        lenses_meta = rig.get("lenses", [])
+        use_rig = ctx.params["use_rig"] and len(lenses_meta) >= 2
         camera_params = None
+        camera_params_list = None
         if views_meta:
             import math
 
@@ -146,21 +151,46 @@ class Reconstruct(Stage):
             f = (size / 2.0) / math.tan(math.radians(fov) / 2.0)
             c = size / 2.0
             camera_params = f"{f:.6f},{f:.6f},{c:.6f},{c:.6f}"
+            camera_params_list = [f, f, c, c]
             ctx.progress.info(f"known PINHOLE intrinsics: {camera_params}", progress=0.05)
 
-        # 2) feature extraction (mask があれば mask_path 付き, 既知 intrinsics 固定).
+        # 2) feature extraction.
+        # rig 使用時: 各 <view>_lensN フォルダを独立カメラにし (single_camera_per_folder),
+        # intrinsics は rig_configurator 側で設定する (feature 抽出では camera_params を渡さない).
+        # rig 非使用時: 全画像を単一カメラ + 既知 intrinsics 固定.
         colmap_runner.feature_extractor(
             colmap_bin,
             database_path=db_path,
             image_path=images_dir,
             camera_model="PINHOLE",
-            single_camera=True,
-            camera_params=camera_params,
+            single_camera=not use_rig,
+            single_camera_per_folder=use_rig,
+            camera_params=None if use_rig else camera_params,
             use_gpu=ctx.params["use_gpu"],
             mask_path=masks_dir if use_masks else None,
             log_path=logs_dir / "feature_extractor.log",
             on_line=logline("features"),
         )
+
+        # 2.5) rig 拘束を DB に設定する (既知の前後レンズ相対姿勢を固定).
+        if use_rig and camera_params_list is not None:
+            from ..colmap import rig as colmap_rig
+
+            cams = colmap_rig.compute_rig_cameras(views_meta, lenses_meta)
+            rig_config = colmap_rig.build_rig_config(cams, camera_params_list)
+            rig_cfg_path = out / "rig_config.json"
+            rig_cfg_path.write_text(json.dumps(rig_config, indent=2), encoding="utf-8")
+            ctx.progress.info(
+                f"configuring rig: {len(cams)} cameras (view x lens), ref front_lens0",
+                progress=0.25,
+            )
+            colmap_runner.rig_configurator(
+                colmap_bin,
+                database_path=db_path,
+                rig_config_path=rig_cfg_path,
+                log_path=logs_dir / "rig_configurator.log",
+                on_line=logline("rig"),
+            )
 
         ctx.progress.info("colmap matching", progress=0.3)
         # 3) matching.

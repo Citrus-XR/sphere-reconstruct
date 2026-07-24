@@ -97,6 +97,7 @@ def feature_extractor(
     image_path: Path,
     camera_model: str = "PINHOLE",
     single_camera: bool = True,
+    single_camera_per_folder: bool = False,
     camera_params: str | None = None,
     use_gpu: bool = True,
     mask_path: Path | None = None,
@@ -108,9 +109,13 @@ def feature_extractor(
         "--database_path", str(database_path),
         "--image_path", str(image_path),
         "--ImageReader.camera_model", camera_model,
-        "--ImageReader.single_camera", "1" if single_camera else "0",
         "--FeatureExtraction.use_gpu", "1" if use_gpu else "0",
     ]
+    if single_camera_per_folder:
+        # rig 使用時: 各 <view>_lensN フォルダを独立カメラにする (12 センサーの rig).
+        args += ["--ImageReader.single_camera_per_folder", "1"]
+    else:
+        args += ["--ImageReader.single_camera", "1" if single_camera else "0"]
     if camera_params is not None:
         # 既知の内部パラメータを与える (PINHOLE なら "fx,fy,cx,cy"). 仮想 pinhole は
         # レンダリング時に厳密な intrinsics で作っているので, 推定させず固定する.
@@ -118,6 +123,23 @@ def feature_extractor(
     if mask_path is not None:
         # COLMAP mask 規則: mask_path/<image_name>.png. 黒 (0) 画素を無視する.
         args += ["--ImageReader.mask_path", str(mask_path)]
+    return run_command(colmap_bin, args, log_path=log_path, on_line=on_line)
+
+
+def rig_configurator(
+    colmap_bin: str,
+    *,
+    database_path: Path,
+    rig_config_path: Path,
+    log_path: Path | None = None,
+    on_line: Callable[[str], None] | None = None,
+) -> CommandResult:
+    """既知の rig 相対姿勢を DB に設定する. feature_extractor の後, mapper の前に呼ぶ."""
+    args = [
+        "rig_configurator",
+        "--database_path", str(database_path),
+        "--rig_config_path", str(rig_config_path),
+    ]
     return run_command(colmap_bin, args, log_path=log_path, on_line=on_line)
 
 
