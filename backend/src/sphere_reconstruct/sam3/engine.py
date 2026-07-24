@@ -142,7 +142,9 @@ class Sam3Engine:
                     arr = masks.squeeze(1).detach().cpu().numpy().astype(np.uint8)
                     det.masks = [arr[i] for i in range(arr.shape[0])]
                     if scores is not None:
-                        det.scores = [float(s) for s in scores.detach().cpu().numpy().tolist()]
+                        # autocast 下では bf16 になり numpy が非対応なので float32 化する.
+                        sc = scores.detach().float().cpu().numpy().tolist()
+                        det.scores = [float(s) for s in sc]
                 results.append(det)
         return results
 
