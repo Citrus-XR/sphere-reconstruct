@@ -123,12 +123,17 @@ pnpm dev       # http://127.0.0.1:5173
 | 2 | INSV footer / offset_v3 / IMU / MEI キャリブ | 完了 (実 X5 で検証) |
 | 3 | 前後同期抽出 / 空間抽出 (鮮鋭度) / pinhole rig | 完了 |
 | 4 | SAM3 手動パス / 推論 / マスク (縮小->推論->拡大) | 完了 (4070Ti で検証) |
-| 5 | COLMAP CLI / SIFT / Sequential Matching / エクスポート | 完了 (実機で検証) |
-| 6 | 3D Viewer (three.js + R3F) / 点群 + カメラ | 点群ビューア完了 |
+| 5 | COLMAP CLI / **rig 拘束** / SIFT / Sequential Matching / エクスポート | 完了 (実機で検証) |
+| 6 | 3D Viewer (three.js + R3F) / Frames / Masks / 点群 + カメラ | 完了 |
 | 7 | 起動スクリプト / 環境チェック / クラッシュ復旧 / 静的配信 | 完了 |
 
-今後: rig 拘束付き COLMAP (前後レンズの既知相対姿勢を固定), Masks プレビュー
-ページ, COLMAP loop closure, PB (`.insv.pb`) 完全パーサ.
+**rig 拘束の効果 (実機, X5 8 frames)**: 前後レンズ 6 視点 = 12 仮想カメラの既知
+相対姿勢を COLMAP に与えることで, 登録率が 16/96 → **96/96 (100%)**, 点数 936 →
+2795, 平均再投影誤差 0.64px. 低視差の手持ち 360 素材でも全フレームが登録される.
+
+今後: COLMAP loop closure (COLMAP 4.x は faiss 形式 vocab tree が必要), PB
+(`.insv.pb`) 完全パーサ (PB を伴う個体の INSV サンプル入手待ち; 現状は offset_v3
+(ASCII) で完全に校正できている).
 
 ## ライセンス
 
