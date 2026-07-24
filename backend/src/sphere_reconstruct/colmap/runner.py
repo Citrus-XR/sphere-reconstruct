@@ -1,0 +1,176 @@
+"""COLMAP CLI 子プロセス駆動.
+
+colmap の各サブコマンド (feature_extractor / sequential_matcher / mapper など) を
+子プロセスとして実行し, 標準出力/エラーを行単位で callback へ流す.
+
+キャンセルは呼び出し側がプロセスを terminate すれば良い. 本 runner は 1 コマンド
+= 1 プロセスの同期実行を提供し, ログ行を逐次コールバックする.
+"""
+
+from __future__ import annotations
+
+import shutil
+import subprocess
+from collections.abc import Callable
+from dataclasses import dataclass
+from pathlib import Path
+
+
+class ColmapError(RuntimeError):
+    pass
+
+
+def resolve_colmap_bin(explicit: str | None) -> str:
+    if explicit:
+        p = Path(explicit)
+        if not p.exists():
+            raise FileNotFoundError(f"colmap binary not found: {explicit}")
+        return str(p)
+    found = shutil.which("colmap")
+    if not found:
+        raise FileNotFoundError("colmap not found in PATH; set binaries.colmap in config.toml")
+    return found
+
+
+@dataclass
+class CommandResult:
+    command: list[str]
+    returncode: int
+    log_tail: list[str]
+
+
+def run_command(
+    colmap_bin: str,
+    args: list[str],
+    *,
+    log_path: Path | None = None,
+    on_line: Callable[[str], None] | None = None,
+    tail_lines: int = 40,
+) -> CommandResult:
+    """`colmap <args>` を実行し, 出力を逐次 on_line へ渡す.
+
+    stderr は stdout にマージして 1 本のストリームで扱う. COLMAP は進捗を stderr に
+    出すことが多いため.
+    """
+    full = [colmap_bin, *args]
+    log_f = log_path.open("w", encoding="utf-8") if log_path else None
+    tail: list[str] = []
+    try:
+        proc = subprocess.Popen(
+            full,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+        assert proc.stdout is not None
+        for raw in proc.stdout:
+            line = raw.rstrip("\n")
+            if log_f:
+                log_f.write(raw)
+                log_f.flush()
+            tail.append(line)
+            if len(tail) > tail_lines:
+                tail.pop(0)
+            if on_line is not None:
+                on_line(line)
+        proc.wait()
+        rc = proc.returncode
+    finally:
+        if log_f:
+            log_f.close()
+
+    if rc != 0:
+        raise ColmapError(
+            f"colmap {args[0] if args else '?'} failed (rc={rc}):\n" + "\n".join(tail[-15:])
+        )
+    return CommandResult(command=full, returncode=rc, log_tail=tail)
+
+
+# -- 各サブコマンドの薄いヘルパ ---------------------------------------------------
+
+
+def feature_extractor(
+    colmap_bin: str,
+    *,
+    database_path: Path,
+    image_path: Path,
+    camera_model: str = "PINHOLE",
+    single_camera: bool = True,
+    use_gpu: bool = True,
+    mask_path: Path | None = None,
+    log_path: Path | None = None,
+    on_line: Callable[[str], None] | None = None,
+) -> CommandResult:
+    args = [
+        "feature_extractor",
+        "--database_path", str(database_path),
+        "--image_path", str(image_path),
+        "--ImageReader.camera_model", camera_model,
+        "--ImageReader.single_camera", "1" if single_camera else "0",
+        "--SiftExtraction.use_gpu", "1" if use_gpu else "0",
+    ]
+    if mask_path is not None:
+        # COLMAP mask 規則: mask_path/<image_name>.png. 黒 (0) 画素を無視する.
+        args += ["--ImageReader.mask_path", str(mask_path)]
+    return run_command(colmap_bin, args, log_path=log_path, on_line=on_line)
+
+
+def sequential_matcher(
+    colmap_bin: str,
+    *,
+    database_path: Path,
+    overlap: int = 10,
+    loop_detection: bool = False,
+    vocab_tree_path: Path | None = None,
+    use_gpu: bool = True,
+    log_path: Path | None = None,
+    on_line: Callable[[str], None] | None = None,
+) -> CommandResult:
+    args = [
+        "sequential_matcher",
+        "--database_path", str(database_path),
+        "--SequentialMatching.overlap", str(overlap),
+        "--SiftMatching.use_gpu", "1" if use_gpu else "0",
+    ]
+    if loop_detection and vocab_tree_path is not None:
+        args += [
+            "--SequentialMatching.loop_detection", "1",
+            "--SequentialMatching.vocab_tree_path", str(vocab_tree_path),
+        ]
+    return run_command(colmap_bin, args, log_path=log_path, on_line=on_line)
+
+
+def exhaustive_matcher(
+    colmap_bin: str,
+    *,
+    database_path: Path,
+    use_gpu: bool = True,
+    log_path: Path | None = None,
+    on_line: Callable[[str], None] | None = None,
+) -> CommandResult:
+    args = [
+        "exhaustive_matcher",
+        "--database_path", str(database_path),
+        "--SiftMatching.use_gpu", "1" if use_gpu else "0",
+    ]
+    return run_command(colmap_bin, args, log_path=log_path, on_line=on_line)
+
+
+def mapper(
+    colmap_bin: str,
+    *,
+    database_path: Path,
+    image_path: Path,
+    output_path: Path,
+    log_path: Path | None = None,
+    on_line: Callable[[str], None] | None = None,
+) -> CommandResult:
+    output_path.mkdir(parents=True, exist_ok=True)
+    args = [
+        "mapper",
+        "--database_path", str(database_path),
+        "--image_path", str(image_path),
+        "--output_path", str(output_path),
+    ]
+    return run_command(colmap_bin, args, log_path=log_path, on_line=on_line)

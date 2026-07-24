@@ -1,0 +1,81 @@
+"""colmap.model の binary リーダーテスト.
+
+合成した cameras/images/points3D.bin を書いて読み戻し, 一致を確認する.
+"""
+
+from __future__ import annotations
+
+import struct
+from pathlib import Path
+
+from sphere_reconstruct.colmap import model
+
+
+def _write_cameras(path: Path):
+    with path.open("wb") as f:
+        f.write(struct.pack("<Q", 1))
+        # camera_id=1, model=PINHOLE(1), w=512, h=512, params fx,fy,cx,cy
+        f.write(struct.pack("<iiQQ", 1, 1, 512, 512))
+        f.write(struct.pack("<4d", 256.0, 256.0, 256.0, 256.0))
+
+
+def _write_images(path: Path):
+    with path.open("wb") as f:
+        f.write(struct.pack("<Q", 1))
+        # image_id=1, qvec, tvec, camera_id=1, name, 2 points2D
+        f.write(struct.pack("<idddddddi", 1, 1.0, 0.0, 0.0, 0.0, 1.0, 2.0, 3.0, 1))
+        f.write(b"front_lens0.jpg\x00")
+        f.write(struct.pack("<Q", 2))
+        f.write(struct.pack("<ddQ", 10.0, 20.0, 100))       # registered to point 100
+        f.write(struct.pack("<ddQ", 30.0, 40.0, 2**64 - 1))  # unregistered
+
+
+def _write_points(path: Path):
+    with path.open("wb") as f:
+        f.write(struct.pack("<Q", 1))
+        # pid=100, xyz, rgb, error, track_len=1, (image_id=1, pt2d_idx=0)
+        f.write(struct.pack("<QdddBBBd", 100, 1.5, 2.5, 3.5, 200, 150, 100, 0.7))
+        f.write(struct.pack("<Q", 1))
+        f.write(struct.pack("<ii", 1, 0))
+
+
+def test_read_model_roundtrip(tmp_path: Path):
+    _write_cameras(tmp_path / "cameras.bin")
+    _write_images(tmp_path / "images.bin")
+    _write_points(tmp_path / "points3D.bin")
+
+    recon = model.read_model(tmp_path)
+
+    assert len(recon.cameras) == 1
+    cam = recon.cameras[1]
+    assert cam.model == "PINHOLE"
+    assert cam.width == 512 and cam.height == 512
+    assert cam.params == [256.0, 256.0, 256.0, 256.0]
+
+    assert len(recon.images) == 1
+    img = recon.images[1]
+    assert img.name == "front_lens0.jpg"
+    assert img.qvec == (1.0, 0.0, 0.0, 0.0)
+    assert img.tvec == (1.0, 2.0, 3.0)
+    assert len(img.points2D) == 2
+    assert img.num_registered_points == 1
+
+    assert len(recon.points3D) == 1
+    p = recon.points3D[100]
+    assert p.xyz == (1.5, 2.5, 3.5)
+    assert p.rgb == (200, 150, 100)
+    assert abs(p.error - 0.7) < 1e-9
+    assert p.track == [(1, 0)]
+
+
+def test_summary(tmp_path: Path):
+    _write_cameras(tmp_path / "cameras.bin")
+    _write_images(tmp_path / "images.bin")
+    _write_points(tmp_path / "points3D.bin")
+    recon = model.read_model(tmp_path)
+    s = recon.summary()
+    assert s["num_cameras"] == 1
+    assert s["num_images"] == 1
+    assert s["num_points3D"] == 1
+    assert abs(s["mean_reprojection_error"] - 0.7) < 1e-9
+    assert s["mean_track_length"] == 1.0
