@@ -14,7 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from .calibration import CalibSource, DualLensCalibration
+from .calibration import DualLensCalibration
 
 
 @dataclass
@@ -61,12 +61,15 @@ def find_pb_for(insv_path: Path) -> Path | None:
 def parse(path: Path) -> DualLensCalibration | None:
     """PB を読んで DualLensCalibration に変換する.
 
-    現段階は未実装. サンプル入手して仕様を確定してから埋める.
-    None を返せば呼び出し側は offset_v3 / 内蔵 profile に降級する.
+    現状は未実装. 手元の X5 サンプル (および D: 上の全 INSV) には外部 `.insv.pb` が
+    存在せず, 標定は INSV footer 内の offset_v3 (ASCII) に埋まっている. そちらは
+    calibration.parse_offset_v3_ascii で完全に解釈でき, 実機で pinhole rig の 100%
+    登録・0.64px 誤差を確認済み.
+
+    PB の binary フォーマットは実サンプルが無いと確定できず, 盲目的に推測実装しても
+    検証できないため, ここは意図的に未実装のまま残す. PB を伴う個体の INSV が入手
+    でき次第, probe() の raw_head からマジックを確認して本実装を足す. それまでは
+    None を返し, 呼び出し側は offset_v3 へ降級する.
     """
     _ = probe(path)
-    return DualLensCalibration(
-        source=CalibSource.PB,
-        lenses=[],
-        raw={"note": "PB parser not implemented yet"},
-    )
+    return None

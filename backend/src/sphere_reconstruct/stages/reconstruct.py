@@ -67,8 +67,12 @@ class Reconstruct(Stage):
             "refine_intrinsics": bool(raw.get("refine_intrinsics", False)),
             # rig 拘束: 前後レンズ 6 視点 = 12 カメラの既知相対姿勢を固定する.
             "use_rig": bool(raw.get("use_rig", True)),
-            # sequential matching の loop closure (vocab tree が設定されていれば).
-            "loop_closure": bool(raw.get("loop_closure", True)),
+            # sequential matching の loop closure. 既定 False:
+            #   (1) rig 拘束で既に 100% 登録できるため通常不要,
+            #   (2) COLMAP 4.x は 2025-05 に vocab tree を flann -> faiss へ変更しており,
+            #       binaries.vocab_tree には faiss 形式の .bin が必要 (旧 flann は読めない).
+            # faiss 形式の vocab tree を用意して明示的に有効化する場合のみ使う.
+            "loop_closure": bool(raw.get("loop_closure", False)),
         }
 
     def execute(self, ctx: StageContext) -> StageManifest:
