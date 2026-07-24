@@ -124,7 +124,21 @@ export const api = {
   getReconstruction: (id: string) =>
     req<ReconstructionData>(`/api/projects/${id}/reconstruction`),
   getMasks: (id: string) => req<MasksManifest>(`/api/projects/${id}/masks`),
+  getFrames: (id: string) => req<FramesManifest>(`/api/projects/${id}/frames`),
 }
+
+export interface FramesManifest {
+  kind: string
+  count: number
+  width: number | null
+  height: number | null
+  fps: number | null
+  frames: { index: number; timestamp_sec: number | null }[]
+}
+
+// 抽出フレーム (fisheye) の URL.
+export const frameImageUrl = (id: string, index: number, lens: number) =>
+  `/api/projects/${id}/frames/${index}/image?lens=${lens}`
 
 export interface MaskViewRecord {
   view: string

@@ -50,6 +50,7 @@ export const ProjectDetailPage = () => {
         <div className="mono">state: {project.state}</div>
         <div className="mono">source: {project.source_kind ?? '(未設定)'} {project.source_path ?? ''}</div>
         <div style={{ marginTop: 8, display: 'flex', gap: 16 }}>
+          <Link to={`/projects/${project.id}/frames`}>フレーム →</Link>
           <Link to={`/projects/${project.id}/masks`}>マスク確認 →</Link>
           <Link to={`/projects/${project.id}/reconstruction`}>再構成ビューア →</Link>
         </div>

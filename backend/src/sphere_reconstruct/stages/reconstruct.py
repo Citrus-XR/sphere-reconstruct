@@ -67,6 +67,8 @@ class Reconstruct(Stage):
             "refine_intrinsics": bool(raw.get("refine_intrinsics", False)),
             # rig 拘束: 前後レンズ 6 視点 = 12 カメラの既知相対姿勢を固定する.
             "use_rig": bool(raw.get("use_rig", True)),
+            # sequential matching の loop closure (vocab tree が設定されていれば).
+            "loop_closure": bool(raw.get("loop_closure", True)),
         }
 
     def execute(self, ctx: StageContext) -> StageManifest:
@@ -200,8 +202,12 @@ class Reconstruct(Stage):
                 log_path=logs_dir / "matcher.log", on_line=logline("match"),
             )
         else:
+            vocab = settings.binaries.vocab_tree
+            loop = ctx.params["loop_closure"] and bool(vocab)
             colmap_runner.sequential_matcher(
                 colmap_bin, database_path=db_path, overlap=ctx.params["overlap"],
+                loop_detection=loop,
+                vocab_tree_path=Path(vocab) if loop else None,
                 use_gpu=ctx.params["use_gpu"],
                 log_path=logs_dir / "matcher.log", on_line=logline("match"),
             )

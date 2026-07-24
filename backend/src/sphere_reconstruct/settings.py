@@ -42,6 +42,8 @@ class BinariesConfig(BaseModel):
     ffmpeg: str = ""
     ffprobe: str = ""
     colmap: str = ""
+    # COLMAP loop detection 用 vocab tree (.bin). 空なら loop closure 無効.
+    vocab_tree: str = ""
 
 
 class Sam3Config(BaseModel):
