@@ -108,7 +108,7 @@ def feature_extractor(
         "--image_path", str(image_path),
         "--ImageReader.camera_model", camera_model,
         "--ImageReader.single_camera", "1" if single_camera else "0",
-        "--SiftExtraction.use_gpu", "1" if use_gpu else "0",
+        "--FeatureExtraction.use_gpu", "1" if use_gpu else "0",
     ]
     if mask_path is not None:
         # COLMAP mask 規則: mask_path/<image_name>.png. 黒 (0) 画素を無視する.
@@ -131,7 +131,7 @@ def sequential_matcher(
         "sequential_matcher",
         "--database_path", str(database_path),
         "--SequentialMatching.overlap", str(overlap),
-        "--SiftMatching.use_gpu", "1" if use_gpu else "0",
+        "--FeatureMatching.use_gpu", "1" if use_gpu else "0",
     ]
     if loop_detection and vocab_tree_path is not None:
         args += [
@@ -152,7 +152,7 @@ def exhaustive_matcher(
     args = [
         "exhaustive_matcher",
         "--database_path", str(database_path),
-        "--SiftMatching.use_gpu", "1" if use_gpu else "0",
+        "--FeatureMatching.use_gpu", "1" if use_gpu else "0",
     ]
     return run_command(colmap_bin, args, log_path=log_path, on_line=on_line)
 

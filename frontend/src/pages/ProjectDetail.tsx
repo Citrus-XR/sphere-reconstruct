@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { useParams } from 'react-router-dom'
+import { useParams, Link } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, openEventStream, type EventEnvelope, type SourceKind } from '../api/client'
 
@@ -49,6 +49,9 @@ export const ProjectDetailPage = () => {
         <div className="mono">id: {project.id}</div>
         <div className="mono">state: {project.state}</div>
         <div className="mono">source: {project.source_kind ?? '(未設定)'} {project.source_path ?? ''}</div>
+        <div style={{ marginTop: 8 }}>
+          <Link to={`/projects/${project.id}/reconstruction`}>再構成ビューアを開く →</Link>
+        </div>
       </div>
 
       <div className="card">

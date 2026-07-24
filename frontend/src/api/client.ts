@@ -46,6 +46,45 @@ export interface EventEnvelope {
   ts: string
 }
 
+export interface ReconstructionCamera {
+  id: number
+  model: string
+  width: number
+  height: number
+  params: number[]
+}
+
+export interface ReconstructionImage {
+  id: number
+  name: string
+  camera_id: number
+  qvec: number[]
+  tvec: number[]
+  position: number[]
+  num_points: number
+}
+
+export interface ReconstructionData {
+  cameras: ReconstructionCamera[]
+  images: ReconstructionImage[]
+  stats: {
+    num_cameras: number
+    num_images: number
+    num_points3D: number
+    mean_reprojection_error: number
+    mean_track_length: number
+    registered_ratio?: number
+  }
+  points_file: string
+  points_stride: number
+}
+
+export interface ParsedPoints {
+  count: number
+  positions: Float32Array // 3 * count
+  colors: Float32Array // 3 * count, 0..1
+}
+
 const BASE = ''
 
 const jsonHeaders = { 'Content-Type': 'application/json' }
@@ -82,6 +121,33 @@ export const api = {
   cancelJob: (id: string) =>
     req<{ cancelled: boolean }>(`/api/jobs/${id}/cancel`, { method: 'POST' }),
   getSettings: () => req<Record<string, unknown>>('/api/settings'),
+  getReconstruction: (id: string) =>
+    req<ReconstructionData>(`/api/projects/${id}/reconstruction`),
+}
+
+// points.bin をパースする. フォーマット (backend/colmap/web_preview.py と一致):
+//   header: u32 count, u32 stride(=20)
+//   各点: 3*f32 xyz, 3*u8 rgb, 1 pad, f32 error  (= 20 bytes)
+export const fetchPoints = async (projectId: string): Promise<ParsedPoints> => {
+  const res = await fetch(`/api/projects/${projectId}/reconstruction/points`)
+  if (!res.ok) throw new Error(`points fetch failed: ${res.status}`)
+  const buf = await res.arrayBuffer()
+  const dv = new DataView(buf)
+  const count = dv.getUint32(0, true)
+  const stride = dv.getUint32(4, true)
+  const positions = new Float32Array(count * 3)
+  const colors = new Float32Array(count * 3)
+  let off = 8
+  for (let i = 0; i < count; i++) {
+    positions[i * 3] = dv.getFloat32(off, true)
+    positions[i * 3 + 1] = dv.getFloat32(off + 4, true)
+    positions[i * 3 + 2] = dv.getFloat32(off + 8, true)
+    colors[i * 3] = dv.getUint8(off + 12) / 255
+    colors[i * 3 + 1] = dv.getUint8(off + 13) / 255
+    colors[i * 3 + 2] = dv.getUint8(off + 14) / 255
+    off += stride
+  }
+  return { count, positions, colors }
 }
 
 // WebSocket ヘルパ. dev では /api/events が Vite proxy 経由で ws:// にアップグレードされる.

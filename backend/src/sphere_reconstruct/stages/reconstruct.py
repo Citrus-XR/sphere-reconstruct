@@ -43,7 +43,7 @@ from ..colmap import runner as colmap_runner
 @register
 class Reconstruct(Stage):
     name = StageName.RECONSTRUCT
-    impl_version = "0.1"
+    impl_version = "0.2"
 
     def collect_inputs(self, ctx: StageContext) -> list[FileRef]:
         rig = ctx.project_dir / "reproject_views" / "manifest_rig.json"
@@ -86,6 +86,13 @@ class Reconstruct(Stage):
             d.mkdir(parents=True, exist_ok=True)
 
         # 1) pinhole 画像を作業ツリーへ link/copy. mask があれば COLMAP 命名で mirror.
+        #
+        # レイアウトは view-major: <view>_lensN/frame_XXXXXX.jpg.
+        # 理由: sequential_matcher は画像を名前のアルファベット順で並べ, 近傍 (overlap
+        # 窓) 同士をマッチングする. frame-major (frame_XXXXXX/<view>) にすると, 近傍が
+        # 「同一フレームの別視点」= 重ならない cubemap 面同士になり, 初期ペアが全く
+        # 得られず mapper が失敗する. view-major なら近傍が「同一視点の連続フレーム」=
+        # 十分に重なるため, 逐次マッチングが正しく働く.
         masks_manifest = None
         mm_path = ctx.project_dir / "generate_masks" / "manifest_masks.json"
         use_masks = ctx.params["use_masks"] and mm_path.exists()
@@ -93,12 +100,14 @@ class Reconstruct(Stage):
             masks_manifest = json.loads(mm_path.read_text())
             masks_dir.mkdir(parents=True, exist_ok=True)
 
+        def _colmap_name(view: str, lens: int, index: int) -> str:
+            return f"{view}_lens{lens}/frame_{index:06d}.jpg"
+
         n_imgs = 0
         for fr in rig["frames"]:
             for v in fr["views"]:
                 src_img = ctx.project_dir / v["path"]
-                rel = Path(v["path"]).relative_to("reproject_views")  # frame_XXXXXX/<view>_lensN.jpg
-                dst_img = images_dir / rel
+                dst_img = images_dir / _colmap_name(v["view"], v["lens"], fr["index"])
                 dst_img.parent.mkdir(parents=True, exist_ok=True)
                 _link_or_copy(src_img, dst_img)
                 n_imgs += 1
@@ -106,11 +115,10 @@ class Reconstruct(Stage):
         if use_masks and masks_manifest is not None:
             for fr in masks_manifest["frames"]:
                 for v in fr["views"]:
-                    src_mask = ctx.project_dir / v["path"]  # generate_masks/frame_XXXXXX/<view>_lensN.png
-                    rel_png = Path(v["path"]).relative_to("generate_masks")  # frame_XXXXXX/<view>_lensN.png
+                    src_mask = ctx.project_dir / v["path"]
                     # COLMAP mask 命名: <image_name>.png. image は .jpg なので <...>.jpg.png.
-                    stem = rel_png.stem  # <view>_lensN
-                    dst_mask = masks_dir / rel_png.parent / f"{stem}.jpg.png"
+                    name = _colmap_name(v["view"], v["lens"], fr["index"])
+                    dst_mask = masks_dir / f"{name}.png"
                     dst_mask.parent.mkdir(parents=True, exist_ok=True)
                     _link_or_copy(src_mask, dst_mask)
 
