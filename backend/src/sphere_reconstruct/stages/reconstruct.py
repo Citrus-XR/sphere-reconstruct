@@ -43,7 +43,7 @@ from ..colmap import runner as colmap_runner
 @register
 class Reconstruct(Stage):
     name = StageName.RECONSTRUCT
-    impl_version = "0.2"
+    impl_version = "0.3"
 
     def collect_inputs(self, ctx: StageContext) -> list[FileRef]:
         rig = ctx.project_dir / "reproject_views" / "manifest_rig.json"
@@ -62,6 +62,9 @@ class Reconstruct(Stage):
             "overlap": int(raw.get("overlap", 10)),
             "use_masks": bool(raw.get("use_masks", True)),
             "use_gpu": bool(raw.get("use_gpu", True)),
+            # 仮想 pinhole は既知 intrinsics でレンダリングしているので, 既定では
+            # COLMAP に再推定させず固定する.
+            "refine_intrinsics": bool(raw.get("refine_intrinsics", False)),
         }
 
     def execute(self, ctx: StageContext) -> StageManifest:
@@ -131,13 +134,28 @@ class Reconstruct(Stage):
                     ctx.progress.info(f"[{prefix}] {line}")
             return _cb
 
-        # 2) feature extraction (mask があれば mask_path 付き).
+        # 既知 intrinsics を計算する. cubemap の全 view は同一の size/fov なので単一
+        # PINHOLE カメラで良い. f = (size/2) / tan(fov/2).
+        views_meta = rig.get("views", [])
+        camera_params = None
+        if views_meta:
+            import math
+
+            size = int(views_meta[0]["size"])
+            fov = float(views_meta[0]["fov_deg"])
+            f = (size / 2.0) / math.tan(math.radians(fov) / 2.0)
+            c = size / 2.0
+            camera_params = f"{f:.6f},{f:.6f},{c:.6f},{c:.6f}"
+            ctx.progress.info(f"known PINHOLE intrinsics: {camera_params}", progress=0.05)
+
+        # 2) feature extraction (mask があれば mask_path 付き, 既知 intrinsics 固定).
         colmap_runner.feature_extractor(
             colmap_bin,
             database_path=db_path,
             image_path=images_dir,
             camera_model="PINHOLE",
             single_camera=True,
+            camera_params=camera_params,
             use_gpu=ctx.params["use_gpu"],
             mask_path=masks_dir if use_masks else None,
             log_path=logs_dir / "feature_extractor.log",
@@ -165,6 +183,7 @@ class Reconstruct(Stage):
             database_path=db_path,
             image_path=images_dir,
             output_path=sparse_dir,
+            refine_intrinsics=ctx.params["refine_intrinsics"],
             log_path=logs_dir / "mapper.log",
             on_line=logline("mapper"),
         )

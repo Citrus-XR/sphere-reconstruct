@@ -97,6 +97,7 @@ def feature_extractor(
     image_path: Path,
     camera_model: str = "PINHOLE",
     single_camera: bool = True,
+    camera_params: str | None = None,
     use_gpu: bool = True,
     mask_path: Path | None = None,
     log_path: Path | None = None,
@@ -110,6 +111,10 @@ def feature_extractor(
         "--ImageReader.single_camera", "1" if single_camera else "0",
         "--FeatureExtraction.use_gpu", "1" if use_gpu else "0",
     ]
+    if camera_params is not None:
+        # 既知の内部パラメータを与える (PINHOLE なら "fx,fy,cx,cy"). 仮想 pinhole は
+        # レンダリング時に厳密な intrinsics で作っているので, 推定させず固定する.
+        args += ["--ImageReader.camera_params", camera_params]
     if mask_path is not None:
         # COLMAP mask 規則: mask_path/<image_name>.png. 黒 (0) 画素を無視する.
         args += ["--ImageReader.mask_path", str(mask_path)]
@@ -163,6 +168,7 @@ def mapper(
     database_path: Path,
     image_path: Path,
     output_path: Path,
+    refine_intrinsics: bool = True,
     log_path: Path | None = None,
     on_line: Callable[[str], None] | None = None,
 ) -> CommandResult:
@@ -173,4 +179,11 @@ def mapper(
         "--image_path", str(image_path),
         "--output_path", str(output_path),
     ]
+    if not refine_intrinsics:
+        # 既知の厳密 intrinsics を固定する (仮想 pinhole rig).
+        args += [
+            "--Mapper.ba_refine_focal_length", "0",
+            "--Mapper.ba_refine_principal_point", "0",
+            "--Mapper.ba_refine_extra_params", "0",
+        ]
     return run_command(colmap_bin, args, log_path=log_path, on_line=on_line)

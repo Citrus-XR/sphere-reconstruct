@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -66,3 +67,32 @@ app.include_router(previews.router)
 @app.get("/api/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+def _mount_frontend() -> None:
+    """frontend/dist が存在すればそれを静的配信する (Electron 不要の単体アプリ).
+
+    dev では Vite dev server を使うためこのマウントは不要 (dist が無ければ何もしない).
+    SPA なので, API 以外の未知パスは index.html にフォールバックする.
+    """
+    from fastapi.responses import FileResponse
+    from fastapi.staticfiles import StaticFiles
+
+    # backend/src/sphere_reconstruct/main.py -> repo ルート/frontend/dist
+    repo_root = Path(__file__).resolve().parents[3]
+    dist = repo_root / "frontend" / "dist"
+    if not dist.is_dir():
+        return
+
+    app.mount("/assets", StaticFiles(directory=dist / "assets"), name="assets")
+
+    @app.get("/{full_path:path}")
+    async def spa_fallback(full_path: str) -> FileResponse:
+        # API パスはここに来ない (先に登録済みルータが処理する).
+        candidate = dist / full_path
+        if full_path and candidate.is_file():
+            return FileResponse(candidate)
+        return FileResponse(dist / "index.html")
+
+
+_mount_frontend()

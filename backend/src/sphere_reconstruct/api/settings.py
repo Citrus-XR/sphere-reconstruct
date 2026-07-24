@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter
@@ -39,4 +40,33 @@ async def test_sam3() -> dict[str, Any]:
         "sam3_package_present": check.sam3_package_present,
         "checkpoint_size": check.checkpoint_size,
         "message": check.message,
+    }
+
+
+@router.get("/env-check")
+async def env_check() -> dict[str, Any]:
+    """外部依存 (ffmpeg / ffprobe / colmap / SAM3) の在否を確認する.
+
+    起動画面で「何が足りないか」を一覧するための軽量チェック. バイナリは
+    -h/--version を叩かず, パス解決のみ (実行は環境によって重いので避ける).
+    """
+    import shutil
+
+    s = get_settings()
+
+    def _bin(explicit: str, name: str) -> dict[str, Any]:
+        if explicit:
+            p = Path(explicit)
+            return {"configured": explicit, "found": p.exists(), "source": "config"}
+        found = shutil.which(name)
+        return {"configured": None, "found": found is not None, "resolved": found, "source": "path"}
+
+    sam3 = sam3_quick_check()
+    return {
+        "ffmpeg": _bin(s.binaries.ffmpeg, "ffmpeg"),
+        "ffprobe": _bin(s.binaries.ffprobe, "ffprobe"),
+        "colmap": _bin(s.binaries.colmap, "colmap"),
+        "sam3": {"ok": sam3.ok, "message": sam3.message},
+        "workspace": str(s.workspace.root),
+        "allowed_roots": [str(p) for p in s.filesystem.allowed_roots],
     }
