@@ -113,10 +113,18 @@ export const api = {
       headers: jsonHeaders,
       body: JSON.stringify({ kind, path }),
     }),
-  runPipeline: (id: string) =>
-    req<{ job_id: string }>(`/api/projects/${id}/run`, { method: 'POST' }),
-  rerunStage: (id: string, stage: string) =>
-    req<{ job_id: string }>(`/api/projects/${id}/rerun/${stage}`, { method: 'POST' }),
+  runPipeline: (id: string, paramsByStage?: Record<string, Record<string, unknown>>) =>
+    req<{ job_id: string }>(`/api/projects/${id}/run`, {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify({ params_by_stage: paramsByStage ?? null }),
+    }),
+  rerunStage: (id: string, stage: string, paramsByStage?: Record<string, Record<string, unknown>>) =>
+    req<{ job_id: string }>(`/api/projects/${id}/rerun/${stage}`, {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify({ params_by_stage: paramsByStage ?? null }),
+    }),
   getJob: (id: string) => req<Job>(`/api/jobs/${id}`),
   cancelJob: (id: string) =>
     req<{ cancelled: boolean }>(`/api/jobs/${id}/cancel`, { method: 'POST' }),

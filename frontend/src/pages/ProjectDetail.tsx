@@ -21,8 +21,18 @@ export const ProjectDetailPage = () => {
     mutationFn: () => api.setSource(id, kind, path),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['projects', id] }),
   })
+  const [extractMode, setExtractMode] = useState<'interval' | 'sharpness' | 'spatial'>('interval')
+  const [maxFrames, setMaxFrames] = useState(0)
   const run = useMutation({
-    mutationFn: () => api.runPipeline(id),
+    mutationFn: () =>
+      api.runPipeline(id, {
+        extract_frames: {
+          selection_mode: extractMode,
+          max_frames: maxFrames,
+          ...(extractMode === 'sharpness' ? { sharpness_candidates: 5 } : {}),
+          ...(extractMode === 'spatial' ? { candidate_fps: 3.0, target_motion: 2.0, min_features: 50 } : {}),
+        },
+      }),
     onSuccess: r => setActiveJobId(r.job_id),
   })
 
@@ -88,6 +98,29 @@ export const ProjectDetailPage = () => {
 
       <div className="card">
         <h3>実行</h3>
+        <div style={{ display: 'flex', gap: 8, marginBottom: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+          <label className="mono">抽出モード</label>
+          <select
+            className="input"
+            style={{ maxWidth: 200 }}
+            value={extractMode}
+            onChange={e => setExtractMode(e.target.value as typeof extractMode)}
+          >
+            <option value="interval">固定間隔</option>
+            <option value="sharpness">鮮鋭度 (区間ベスト)</option>
+            <option value="spatial">空間抽出 (2層多基準)</option>
+          </select>
+          <label className="mono">max frames</label>
+          <input
+            className="input"
+            style={{ maxWidth: 100 }}
+            type="number"
+            min={0}
+            value={maxFrames}
+            onChange={e => setMaxFrames(Number(e.target.value))}
+          />
+          <span className="mono">(0 = 無制限)</span>
+        </div>
         <button
           className="btn"
           disabled={!project.source_path || run.isPending}
