@@ -53,6 +53,12 @@ class AlikedLightGlue:
     def load(self) -> None:
         if self._extractor is not None:
             return
+
+        # Windows + CUDA: onnxruntime は CUDA/cuDNN の DLL を探索パスから探す. torch
+        # (cu128) が同梱する CUDA 12.8 ランタイム DLL を使えるよう, torch の lib を
+        # DLL 探索ディレクトリに足す (別途 CUDA インストール不要). 失敗しても CPU で動く.
+        self._add_torch_cuda_dll_dir()
+
         import onnxruntime as ort  # noqa: PLC0415
 
         providers = (
@@ -68,6 +74,24 @@ class AlikedLightGlue:
             raise FileNotFoundError(f"LightGlue matcher not found: {mat}")
         self._extractor = ort.InferenceSession(str(ext), providers=providers)
         self._matcher = ort.InferenceSession(str(mat), providers=providers)
+
+    @staticmethod
+    def _add_torch_cuda_dll_dir() -> None:
+        """torch 同梱の CUDA DLL を Windows の DLL 探索へ追加 (best-effort)."""
+        import os
+        import sys
+
+        if sys.platform != "win32":
+            return
+        try:
+            import torch  # noqa: PLC0415
+
+            lib = Path(torch.__file__).parent / "lib"
+            if lib.is_dir():
+                os.add_dll_directory(str(lib))
+        except Exception:
+            # torch が無い / 失敗しても CPU provider で動作する.
+            pass
 
     def extract(self, image_rgb: np.ndarray) -> Features:
         """RGB (H,W,3) uint8 画像から ALIKED 特徴を抽出する."""

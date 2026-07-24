@@ -65,8 +65,11 @@ dev = [
     "httpx>=0.28",
 ]
 # ALIKED + LightGlue の ONNX 特徴 backend. CUDA 機で onnxruntime-gpu を使う.
+# onnxruntime-gpu 1.23+ は CUDA 13 を要求する. 本プロジェクトは torch cu128 (CUDA 12.8)
+# を使うため, CUDA 12 対応の <1.23 に固定する. GPU 用 CUDA DLL は torch 同梱のものを
+# aliked_lightglue.load() が DLL 探索パスに追加して使う (別途 CUDA インストール不要).
 aliked = [
-    "onnxruntime-gpu>=1.19; sys_platform != 'darwin'",
+    "onnxruntime-gpu>=1.19,<1.23; sys_platform != 'darwin'",
     "onnxruntime>=1.19; sys_platform == 'darwin'",
     "opencv-python-headless>=4.10",
 ]
