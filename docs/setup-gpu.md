@@ -71,7 +71,30 @@ ffprobe = "D:/path/to/ffprobe.exe"
 
 ## 5. COLMAP
 
-Phase 5 で追加予定. `colmap` バイナリを配置し `[binaries].colmap` に書く.
+`colmap` バイナリ (CUDA ビルド推奨) を配置し `[binaries].colmap` に書く.
+
+## 6. ALIKED + LightGlue (任意, feature_backend="aliked")
+
+SIFT が苦手な弱テクスチャ / 大視差 / 繰り返し模様のシーン向けの学習特徴. この
+COLMAP ビルドが SIFT のみの場合でも, 外部 onnxruntime で抽出/マッチして COLMAP DB に
+書き込む方式で使える.
+
+```
+uv sync --extra aliked            # onnxruntime-gpu
+python scripts/fetch_aliked_models.py --out D:/Models/aliked   # モデル取得
+```
+
+`runtime/config.toml`:
+
+```toml
+[aliked]
+extractor_path = "D:/Models/aliked/aliked-n16.onnx"
+matcher_path   = "D:/Models/aliked/aliked_lightglue.onnx"
+device = "cuda"
+```
+
+reconstruct ステージのパラメータ `feature_backend = "aliked"` で有効化する. 空 or
+"sift" なら COLMAP 内蔵 SIFT を使う.
 
 ## 動作確認
 
