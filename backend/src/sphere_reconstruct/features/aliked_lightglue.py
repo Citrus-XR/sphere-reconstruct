@@ -100,11 +100,11 @@ class AlikedLightGlue:
 
     def match(self, f0: Features, f1: Features) -> np.ndarray:
         """2 画像の特徴をマッチングし, (M, 2) の keypoint index 対を返す."""
+        if f0.keypoints.shape[0] == 0 or f1.keypoints.shape[0] == 0:
+            return np.empty((0, 2), dtype=np.int64)
         if self._matcher is None:
             self.load()
         assert self._matcher is not None
-        if f0.keypoints.shape[0] == 0 or f1.keypoints.shape[0] == 0:
-            return np.empty((0, 2), dtype=np.int64)
 
         outs = self._matcher.run(
             None,
