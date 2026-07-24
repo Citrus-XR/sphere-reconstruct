@@ -79,37 +79,56 @@ sphere-reconstruct/
 - SAM3 リポジトリ + チェックポイント (手動配置, HuggingFace 経由の自動 DL は行わない)
 - NVIDIA GPU + CUDA (SAM3 / COLMAP GPU 用)
 
-## 開発の始め方
+## 使い方 (単体アプリとして起動)
 
-Phase 1 段階では最小構成のみ動作する.
+backend が frontend の build を静的配信するので, Electron 不要でブラウザで使える.
+
+```bash
+# Linux/macOS. CUDA 機は SPHERE_WITH_SAM3=1 を付ける.
+SPHERE_WITH_SAM3=1 ./scripts/run.sh
+# -> http://127.0.0.1:8787 をブラウザで開く
+```
+
+```powershell
+# Windows
+$env:SPHERE_WITH_SAM3="1"; .\scripts\run.ps1
+```
+
+`runtime/config.toml` で workspace / allowed_roots / 外部バイナリ / SAM3 パスを設定する.
+CUDA マシンのセットアップは [docs/setup-gpu.md](docs/setup-gpu.md) を参照.
+
+## 開発の始め方
 
 Backend:
 
 ```bash
 cd backend
-uv sync
+uv sync --extra dev --extra imaging
 uv run uvicorn sphere_reconstruct.main:app --reload --host 127.0.0.1 --port 8787
 ```
 
-Frontend:
+Frontend (Vite dev server, API は 8787 へ proxy):
 
 ```bash
 cd frontend
-pnpm install
-pnpm dev
+pnpm install   # または npm install
+pnpm dev       # http://127.0.0.1:5173
 ```
 
 ## フェーズ計画
 
 | Phase | 内容 | 状態 |
 |-------|------|------|
-| 1 | FastAPI + React 骨組 / SQLite / Worker / WebSocket / Job ライフサイクル | 進行中 |
-| 2 | INSV footer / offset_v3 / PB / IMU / MEI キャリブ可視化 | 一部着手 |
-| 3 | 前後同期抽出 / 空間抽出 / pinhole rig / サムネイル | 未着手 |
-| 4 | SAM3 手動パス / 推論 Worker / マスクプレビュー / 部分再実行 | 未着手 |
-| 5 | COLMAP CLI 実行 / rig 設定 / SIFT / Sequential Matching / エクスポート | 未着手 |
-| 6 | 3D Viewer (three.js + R3F) / 画像・マスク連動 | 未着手 |
-| 7 | Windows/Linux 起動スクリプト / 環境チェック / クラッシュ復旧 | 未着手 |
+| 1 | FastAPI + React 骨組 / SQLite / Worker / WebSocket / Job ライフサイクル | 完了 |
+| 2 | INSV footer / offset_v3 / IMU / MEI キャリブ | 完了 (実 X5 で検証) |
+| 3 | 前後同期抽出 / 空間抽出 (鮮鋭度) / pinhole rig | 完了 |
+| 4 | SAM3 手動パス / 推論 / マスク (縮小->推論->拡大) | 完了 (4070Ti で検証) |
+| 5 | COLMAP CLI / SIFT / Sequential Matching / エクスポート | 完了 (実機で検証) |
+| 6 | 3D Viewer (three.js + R3F) / 点群 + カメラ | 点群ビューア完了 |
+| 7 | 起動スクリプト / 環境チェック / クラッシュ復旧 / 静的配信 | 完了 |
+
+今後: rig 拘束付き COLMAP (前後レンズの既知相対姿勢を固定), Masks プレビュー
+ページ, COLMAP loop closure, PB (`.insv.pb`) 完全パーサ.
 
 ## ライセンス
 

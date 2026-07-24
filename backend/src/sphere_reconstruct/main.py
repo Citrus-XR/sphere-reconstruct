@@ -31,6 +31,21 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
     db_path = workspace_root() / "state.db"
     db = await init_db(db_path)
     init_supervisor(db, db_path)
+
+    # クラッシュ復旧: 前回のプロセスが死んだ時点で running/queued だった job は,
+    # その Worker プロセスがもう存在しないので 'failed' (interrupted) にする.
+    # 成果物はステージ単位で原子的に確定しているので, 再実行すれば完了済みステージは
+    # キャッシュヒットで飛ばし, 中断ステージから再開される.
+    async with db.transaction() as conn:
+        await conn.execute(
+            "UPDATE job SET status='failed', error_text='interrupted by restart' "
+            "WHERE status IN ('running', 'queued')"
+        )
+        await conn.execute(
+            "UPDATE stage_run SET status='failed', error_text='interrupted by restart' "
+            "WHERE status='running'"
+        )
+
     logger.info("sphere-reconstruct backend started (db=%s)", db_path)
 
     try:
