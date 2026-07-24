@@ -30,7 +30,7 @@ from ..settings import get_settings
 @register
 class ExtractFrames(Stage):
     name = StageName.EXTRACT_FRAMES
-    impl_version = "0.1"
+    impl_version = "0.2"
 
     def collect_inputs(self, ctx: StageContext) -> list[FileRef]:
         if ctx.source_path is None:
@@ -45,6 +45,8 @@ class ExtractFrames(Stage):
             "interval_sec": float(raw.get("interval_sec", 1.0)),
             "jpeg_quality": int(raw.get("jpeg_quality", 3)),
             "max_frames": int(raw.get("max_frames", 0)),
+            # 空間抽出: 各区間で最も鮮鋭なフレームを選ぶ. 1 なら固定間隔 (従来).
+            "sharpness_candidates": int(raw.get("sharpness_candidates", 1)),
         }
 
     def execute(self, ctx: StageContext) -> StageManifest:
@@ -105,8 +107,18 @@ class ExtractFrames(Stage):
             raise RuntimeError(
                 f"no frames to extract (duration={duration}s, interval={interval}s)"
             )
+
+        # 空間抽出: 各区間で候補を抜き, lens0 の鮮鋭度が最大の frame へ index を差し替える.
+        n_candidates = ctx.params["sharpness_candidates"]
+        if n_candidates > 1:
+            indices = self._refine_by_sharpness(
+                ctx, indices, fps=fps, interval=interval, n_candidates=n_candidates,
+                nb_frames=lens0.nb_frames, ffmpeg_bin=ffmpeg_bin,
+            )
+
         ctx.progress.info(
-            f"extracting {len(indices)} paired frames @ interval={interval}s from {duration:.1f}s",
+            f"extracting {len(indices)} paired frames @ interval={interval}s from {duration:.1f}s"
+            + (f" (sharpness x{n_candidates})" if n_candidates > 1 else ""),
             progress=0.1,
         )
 
@@ -161,6 +173,60 @@ class ExtractFrames(Stage):
         ] + [
             _file_ref(ctx.stage_out_dir / "manifest_frames.json", ctx.project_dir, "application/json", ctx)
         ]
+
+    def _refine_by_sharpness(
+        self,
+        ctx: StageContext,
+        indices: list[int],
+        *,
+        fps: float,
+        interval: float,
+        n_candidates: int,
+        nb_frames: int | None,
+        ffmpeg_bin: str | None,
+    ) -> list[int]:
+        """各区間で lens0 の候補フレームを抜き, Laplacian 分散が最大の index を選ぶ.
+
+        候補は区間幅 (interval*fps) に均等配置する. lens0 のみで判定し (前後鏡頭は
+        露光同期しているため片側で十分), 選ばれた index を返す. 判定用の候補 JPEG は
+        一時ディレクトリに出して使い捨てる.
+        """
+        from ..imaging import sampling  # 遅延 import (cv2).
+
+        span = max(1, int(interval * fps))
+        bound = (nb_frames - 1) if nb_frames else None
+        tmp_dir = ctx.stage_out_dir / "_sharpness_tmp"
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+
+        refined: list[int] = []
+        for i, center in enumerate(indices):
+            cands = sampling.candidate_indices(center, span, n_candidates, fps_bound=bound)
+            if len(cands) == 1:
+                refined.append(cands[0])
+                continue
+            paths = ffmpeg.extract_frames_by_index(
+                ctx.source_path,
+                stream_index=0,
+                fps=fps,
+                frame_indices=cands,
+                out_dir=tmp_dir / f"interval_{i:04d}",
+                out_prefix="cand",
+                ffmpeg_bin=ffmpeg_bin,
+            )
+            scores = [sampling.sharpness_of_file(p) for p in paths]
+            best = sampling.pick_sharpest(scores)
+            refined.append(cands[best])
+            ctx.progress.info(
+                f"sharpness interval {i + 1}/{len(indices)}: picked frame {cands[best]} "
+                f"(score {scores[best]:.1f})",
+                progress=0.05 + 0.04 * ((i + 1) / len(indices)),
+            )
+
+        # 使い捨ての候補画像を削除.
+        import shutil
+
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        return refined
 
     # -- ERP video (単一 stream) ---------------------------------------------------
     def _extract_erp_video(
