@@ -143,6 +143,37 @@ def rig_configurator(
     return run_command(colmap_bin, args, log_path=log_path, on_line=on_line)
 
 
+def database_creator(colmap_bin: str, *, database_path: Path) -> CommandResult:
+    """空の COLMAP DB を現行スキーマで作る (ALIKED 経路で自前書き込みする前段)."""
+    return run_command(
+        colmap_bin, ["database_creator", "--database_path", str(database_path)]
+    )
+
+
+def matches_importer(
+    colmap_bin: str,
+    *,
+    database_path: Path,
+    match_list_path: Path,
+    match_type: str = "raw",
+    min_num_inliers: int = 15,
+    log_path: Path | None = None,
+    on_line: Callable[[str], None] | None = None,
+) -> CommandResult:
+    """テキスト match list を取り込み, 幾何検証して two_view_geometries を埋める.
+
+    match_type="raw": 生の対応 (keypoint index 対) を検証する.
+    """
+    args = [
+        "matches_importer",
+        "--database_path", str(database_path),
+        "--match_list_path", str(match_list_path),
+        "--match_type", match_type,
+        "--TwoViewGeometry.min_num_inliers", str(min_num_inliers),
+    ]
+    return run_command(colmap_bin, args, log_path=log_path, on_line=on_line)
+
+
 def sequential_matcher(
     colmap_bin: str,
     *,

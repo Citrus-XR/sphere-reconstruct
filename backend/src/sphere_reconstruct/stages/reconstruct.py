@@ -43,7 +43,7 @@ from ..colmap import runner as colmap_runner
 @register
 class Reconstruct(Stage):
     name = StageName.RECONSTRUCT
-    impl_version = "0.5"
+    impl_version = "0.6"
 
     def collect_inputs(self, ctx: StageContext) -> list[FileRef]:
         rig = ctx.project_dir / "reproject_views" / "manifest_rig.json"
@@ -62,6 +62,8 @@ class Reconstruct(Stage):
             "overlap": int(raw.get("overlap", 10)),
             "use_masks": bool(raw.get("use_masks", True)),
             "use_gpu": bool(raw.get("use_gpu", True)),
+            # 特徴 backend: "sift" (COLMAP 内蔵) | "aliked" (ALIKED+LightGlue ONNX).
+            "feature_backend": str(raw.get("feature_backend", "sift")),
             # 仮想 pinhole は既知 intrinsics でレンダリングしているので, 既定では
             # COLMAP に再推定させず固定する.
             "refine_intrinsics": bool(raw.get("refine_intrinsics", False)),
@@ -163,25 +165,46 @@ class Reconstruct(Stage):
             camera_params_list = [f, f, c, c]
             ctx.progress.info(f"known PINHOLE intrinsics: {camera_params}", progress=0.05)
 
-        # 2) feature extraction.
-        # rig 使用時: 各 <view>_lensN フォルダを独立カメラにし (single_camera_per_folder),
-        # intrinsics は rig_configurator 側で設定する (feature 抽出では camera_params を渡さない).
-        # rig 非使用時: 全画像を単一カメラ + 既知 intrinsics 固定.
-        colmap_runner.feature_extractor(
-            colmap_bin,
-            database_path=db_path,
-            image_path=images_dir,
-            camera_model="PINHOLE",
-            single_camera=not use_rig,
-            single_camera_per_folder=use_rig,
-            camera_params=None if use_rig else camera_params,
-            use_gpu=ctx.params["use_gpu"],
-            mask_path=masks_dir if use_masks else None,
-            log_path=logs_dir / "feature_extractor.log",
-            on_line=logline("features"),
-        )
+        # 2) 特徴抽出 + マッチング (backend で分岐).
+        backend = ctx.params["feature_backend"]
+        if backend == "aliked":
+            self._run_aliked_backend(
+                ctx, colmap_bin, db_path, images_dir, rig, camera_params_list,
+                overlap=ctx.params["overlap"], logline=logline,
+            )
+        else:
+            # SIFT: feature_extractor -> matcher.
+            colmap_runner.feature_extractor(
+                colmap_bin,
+                database_path=db_path,
+                image_path=images_dir,
+                camera_model="PINHOLE",
+                single_camera=not use_rig,
+                single_camera_per_folder=use_rig,
+                camera_params=None if use_rig else camera_params,
+                use_gpu=ctx.params["use_gpu"],
+                mask_path=masks_dir if use_masks else None,
+                log_path=logs_dir / "feature_extractor.log",
+                on_line=logline("features"),
+            )
+            ctx.progress.info("colmap matching", progress=0.3)
+            if ctx.params["matcher"] == "exhaustive":
+                colmap_runner.exhaustive_matcher(
+                    colmap_bin, database_path=db_path, use_gpu=ctx.params["use_gpu"],
+                    log_path=logs_dir / "matcher.log", on_line=logline("match"),
+                )
+            else:
+                vocab = settings.binaries.vocab_tree
+                loop = ctx.params["loop_closure"] and bool(vocab)
+                colmap_runner.sequential_matcher(
+                    colmap_bin, database_path=db_path, overlap=ctx.params["overlap"],
+                    loop_detection=loop,
+                    vocab_tree_path=Path(vocab) if loop else None,
+                    use_gpu=ctx.params["use_gpu"],
+                    log_path=logs_dir / "matcher.log", on_line=logline("match"),
+                )
 
-        # 2.5) rig 拘束を DB に設定する (既知の前後レンズ相対姿勢を固定).
+        # 3) rig 拘束を DB に設定する (既知の前後レンズ相対姿勢を固定). backend 共通.
         if use_rig and camera_params_list is not None:
             from ..colmap import rig as colmap_rig
 
@@ -191,7 +214,7 @@ class Reconstruct(Stage):
             rig_cfg_path.write_text(json.dumps(rig_config, indent=2), encoding="utf-8")
             ctx.progress.info(
                 f"configuring rig: {len(cams)} cameras (view x lens), ref front_lens0",
-                progress=0.25,
+                progress=0.5,
             )
             colmap_runner.rig_configurator(
                 colmap_bin,
@@ -199,24 +222,6 @@ class Reconstruct(Stage):
                 rig_config_path=rig_cfg_path,
                 log_path=logs_dir / "rig_configurator.log",
                 on_line=logline("rig"),
-            )
-
-        ctx.progress.info("colmap matching", progress=0.3)
-        # 3) matching.
-        if ctx.params["matcher"] == "exhaustive":
-            colmap_runner.exhaustive_matcher(
-                colmap_bin, database_path=db_path, use_gpu=ctx.params["use_gpu"],
-                log_path=logs_dir / "matcher.log", on_line=logline("match"),
-            )
-        else:
-            vocab = settings.binaries.vocab_tree
-            loop = ctx.params["loop_closure"] and bool(vocab)
-            colmap_runner.sequential_matcher(
-                colmap_bin, database_path=db_path, overlap=ctx.params["overlap"],
-                loop_detection=loop,
-                vocab_tree_path=Path(vocab) if loop else None,
-                use_gpu=ctx.params["use_gpu"],
-                log_path=logs_dir / "matcher.log", on_line=logline("match"),
             )
 
         ctx.progress.info("colmap mapper (incremental)", progress=0.55)
@@ -265,6 +270,108 @@ class Reconstruct(Stage):
 
         ctx.progress.info("reconstruct done", progress=1.0)
         return manifest
+
+    def _run_aliked_backend(
+        self, ctx, colmap_bin, db_path, images_dir, rig, camera_params_list, *, overlap, logline
+    ) -> None:
+        """ALIKED 抽出 + LightGlue マッチングを行い COLMAP DB へ書き込む.
+
+        1. database_creator で空 DB を作る.
+        2. 各 <view>_lensN フォルダ = 1 カメラ. 各画像に ALIKED keypoints を書く.
+        3. 同一 view の連続フレーム対を LightGlue でマッチ -> match list.
+        4. matches_importer (raw) で幾何検証して two_view_geometries を埋める.
+        """
+        import cv2  # noqa: PLC0415
+
+        from ..colmap import database as colmap_db  # noqa: PLC0415
+        from ..colmap import runner as colmap_runner  # noqa: PLC0415
+        from ..features.aliked_lightglue import AlikedLightGlue  # noqa: PLC0415
+
+        out = ctx.stage_out_dir
+        logs_dir = out / "logs"
+        if camera_params_list is None:
+            raise RuntimeError("ALIKED backend requires known camera params (views meta)")
+
+        # 1) 空 DB.
+        if db_path.exists():
+            db_path.unlink()
+        colmap_runner.database_creator(colmap_bin, database_path=db_path)
+
+        ctx.progress.info("loading ALIKED + LightGlue (onnxruntime)", progress=0.08)
+        engine = AlikedLightGlue.from_settings()
+        engine.load()
+
+        # フォルダ (view_lens) -> フレーム画像リスト.
+        # rig manifest から (view, lens, frame_index) を辿り, view-major の COLMAP 名を作る.
+        groups: dict[str, list[tuple[int, str]]] = {}  # prefix -> [(frame_index, colmap_name)]
+        for fr in rig["frames"]:
+            for v in fr["views"]:
+                prefix = f"{v['view']}_lens{v['lens']}"
+                name = f"{prefix}/frame_{fr['index']:06d}.jpg"
+                groups.setdefault(prefix, []).append((fr["index"], name))
+        for g in groups.values():
+            g.sort()
+
+        # 2) カメラ + 画像 + keypoints.
+        features: dict[str, object] = {}
+        image_ids: dict[str, int] = {}
+        total_imgs = sum(len(g) for g in groups.values())
+        done = 0
+        with colmap_db.ColmapDatabase(db_path) as db:
+            for prefix, items in groups.items():
+                cam_id = db.add_camera(
+                    colmap_db.CAMERA_MODEL_PINHOLE,
+                    int(camera_params_list[2] * 2), int(camera_params_list[3] * 2),
+                    list(camera_params_list),
+                )
+                for _frame_idx, name in items:
+                    img_path = images_dir / name
+                    bgr = cv2.imread(str(img_path), cv2.IMREAD_COLOR)
+                    if bgr is None:
+                        raise RuntimeError(f"cannot read {img_path}")
+                    rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+                    feat = engine.extract(rgb)
+                    img_id = db.add_image(name, cam_id)
+                    db.add_keypoints(img_id, feat.keypoints)
+                    features[name] = feat
+                    image_ids[name] = img_id
+                    done += 1
+                    if done % 12 == 0 or done == total_imgs:
+                        ctx.progress.info(
+                            f"ALIKED extract {done}/{total_imgs}",
+                            progress=0.08 + 0.32 * (done / max(1, total_imgs)),
+                        )
+
+        # 3) 同一 view の連続フレーム対を LightGlue でマッチ.
+        pairs: list[tuple[str, str, object]] = []
+        n_pairs = 0
+        for prefix, items in groups.items():
+            names = [n for _, n in items]
+            for i in range(len(names)):
+                for j in range(i + 1, min(i + 1 + overlap, len(names))):
+                    m = engine.match(features[names[i]], features[names[j]])
+                    if len(m) > 0:
+                        pairs.append((names[i], names[j], m))
+                    n_pairs += 1
+            ctx.progress.info(f"LightGlue matched view {prefix}", progress=0.45)
+        engine.unload()
+
+        match_list = out / "aliked_matches.txt"
+        colmap_db.write_match_list(pairs, match_list)
+        ctx.progress.info(
+            f"ALIKED: {total_imgs} images, {len(pairs)}/{n_pairs} non-empty pairs -> matches_importer",
+            progress=0.48,
+        )
+
+        # 4) 幾何検証.
+        colmap_runner.matches_importer(
+            colmap_bin,
+            database_path=db_path,
+            match_list_path=match_list,
+            match_type="raw",
+            log_path=logs_dir / "matches_importer.log",
+            on_line=logline("match"),
+        )
 
 
 def _link_or_copy(src: Path, dst: Path) -> None:

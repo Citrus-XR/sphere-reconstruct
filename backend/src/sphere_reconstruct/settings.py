@@ -66,6 +66,17 @@ class LogConfig(BaseModel):
     level: str = "INFO"
 
 
+class AlikedConfig(BaseModel):
+    extractor_path: str = ""   # ALIKED の .onnx
+    matcher_path: str = ""      # LightGlue の .onnx
+    device: str = "cuda"        # onnxruntime provider
+    max_keypoints: int = 4096
+    min_score: float = 0.2
+
+    def is_configured(self) -> bool:
+        return bool(self.extractor_path and self.matcher_path)
+
+
 def _resolve_config_path() -> Path:
     # 明示指定 (SPHERE_CONFIG=/path/to.toml) を最優先, なければ repo ルート/runtime/config.toml.
     import os
@@ -119,6 +130,7 @@ class AppSettings(BaseSettings):
     filesystem: FilesystemConfig = Field(default_factory=FilesystemConfig)
     binaries: BinariesConfig = Field(default_factory=BinariesConfig)
     sam3: Sam3Config = Field(default_factory=Sam3Config)
+    aliked: AlikedConfig = Field(default_factory=AlikedConfig)
     log: LogConfig = Field(default_factory=LogConfig)
 
     @classmethod

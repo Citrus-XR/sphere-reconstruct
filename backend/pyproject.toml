@@ -64,6 +64,12 @@ dev = [
     "mypy>=1.13",
     "httpx>=0.28",
 ]
+# ALIKED + LightGlue の ONNX 特徴 backend. CUDA 機で onnxruntime-gpu を使う.
+aliked = [
+    "onnxruntime-gpu>=1.19; sys_platform != 'darwin'",
+    "onnxruntime>=1.19; sys_platform == 'darwin'",
+    "opencv-python-headless>=4.10",
+]
 
 [build-system]
 requires = ["hatchling"]
