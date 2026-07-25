@@ -30,6 +30,7 @@ def run_pipeline_entry(
     job_id: str,
     stage: str | None = None,
     params_by_stage: dict[str, dict[str, Any]] | None = None,
+    skip: list[str] | None = None,
 ) -> None:
     """Worker のエントリ. spawn 経由で呼ばれるため引数は全て pickle 可能な素の型."""
     db = Path(db_path)
@@ -44,7 +45,8 @@ def run_pipeline_entry(
             engine.run_stage(StageName(stage), (params_by_stage or {}).get(stage, {}))
         else:
             typed_params = {StageName(k): v for k, v in (params_by_stage or {}).items()}
-            engine.run_all(typed_params)
+            skip_set = {StageName(s) for s in (skip or [])}
+            engine.run_all(typed_params, skip=skip_set)
     except BaseException as e:
         tb = traceback.format_exc()
         _emit_error(db, job_id, project_id, f"{type(e).__name__}: {e}\n{tb}")

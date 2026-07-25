@@ -70,6 +70,10 @@ class ReprojectViews(Stage):
         src = json.loads(source_json.read_text())
         frames_mf = json.loads(frames_json.read_text())
 
+        # ERP ソースは魚眼校正 (offset_v3) を持たず, 単一球面から perspective view を切り出す.
+        if frames_mf.get("kind") in ("erp_video", "erp_images"):
+            return self._execute_erp(ctx, manifest, frames_mf)
+
         ov3 = src.get("offset_v3") or {}
         if not ov3.get("valid"):
             raise RuntimeError(
@@ -108,7 +112,12 @@ class ReprojectViews(Stage):
         if ctx.params["max_frames"] > 0:
             frames = frames[: ctx.params["max_frames"]]
         n = len(frames)
-        ctx.progress.info(f"reproject {n} frames x 6 views x 2 lenses = {n*12} renders", progress=0.05)
+        ctx.progress.info(
+            f"reproject {n} frames x 6 views x 2 lenses = {n*12} renders",
+            progress=0.05,
+            key="log.reproject_start",
+            args={"frames": n, "renders": n * 12},
+        )
 
         rig_records = []
         outputs: list[FileRef] = []
@@ -151,8 +160,11 @@ class ReprojectViews(Stage):
                     )
 
             rig_records.append(frame_rec)
-            ctx.progress.info(
-                f"reproject frame {fi + 1}/{n}", progress=0.05 + 0.9 * ((fi + 1) / n)
+            ctx.progress.tick(
+                progress=0.05 + 0.9 * ((fi + 1) / n),
+                message=f"reproject frame {fi + 1}/{n}",
+                key="log.reproject_frame",
+                args={"cur": fi + 1, "tot": n},
             )
 
         rig_manifest = {
@@ -183,7 +195,74 @@ class ReprojectViews(Stage):
         )
 
         manifest.outputs = outputs
-        ctx.progress.info("reproject_views done", progress=1.0)
+        ctx.progress.info("reproject_views done", progress=1.0, key="log.reproject_done")
+        return manifest
+
+    def _execute_erp(self, ctx: StageContext, manifest: StageManifest, frames_mf: dict) -> StageManifest:
+        """ERP フレームから 6-view cubemap pinhole を切り出し, INSV pinhole と同じ rig manifest 形式で出す.
+
+        全 view はパノラマ中心を共有する純回転 rig (並進ゼロ). lens は 1 個 (index 0, t=0) で,
+        reconstruct の pinhole 経路は views 間の既知回転を rig 拘束にする.
+        """
+        views = projection.cubemap_views(size=ctx.params["size"], fov_deg=ctx.params["fov_deg"])
+        frames = frames_mf["frames"]
+        if ctx.params["max_frames"] > 0:
+            frames = frames[: ctx.params["max_frames"]]
+        n = len(frames)
+        ctx.progress.info(
+            f"reproject(ERP) {n} frames x {len(views)} views = {n*len(views)} renders",
+            progress=0.05,
+            key="log.reproject_erp_start",
+            args={"frames": n, "views": len(views), "renders": n * len(views)},
+        )
+
+        rig_records = []
+        outputs: list[FileRef] = []
+        for fi, fr in enumerate(frames):
+            erp_path = ctx.project_dir / fr["erp"] if "erp" in fr else Path(fr["erp_source"])
+            if not erp_path.exists():
+                raise RuntimeError(f"missing ERP frame: {erp_path}")
+            frame_dir = ctx.stage_out_dir / f"frame_{fr['index']:06d}"
+            frame_dir.mkdir(parents=True, exist_ok=True)
+            frame_rec: dict = {
+                "index": fr["index"],
+                "source_frame": fr.get("source_frame"),
+                "timestamp_sec": fr.get("timestamp_sec"),
+                "views": [],
+            }
+            for view in views:
+                img, stats = rendering.render_perspective_from_equirect(erp_path, view)
+                out_path = frame_dir / f"{view.name}_lens0.jpg"
+                rendering.write_jpeg(img, out_path, quality=92)
+                outputs.append(FileRef(path=_final_relpath(out_path, ctx), size=out_path.stat().st_size, sha256="", mime="image/jpeg"))
+                frame_rec["views"].append(
+                    {"view": view.name, "lens": 0, "path": _final_relpath(out_path, ctx), "valid_ratio": stats.valid_ratio}
+                )
+            rig_records.append(frame_rec)
+            ctx.progress.tick(
+                progress=0.05 + 0.9 * ((fi + 1) / n),
+                message=f"reproject frame {fi + 1}/{n}",
+                key="log.reproject_frame",
+                args={"cur": fi + 1, "tot": n},
+            )
+
+        rig_manifest = {
+            "kind": "erp_pinhole_cubemap",
+            "view_count": len(views),
+            "views": [
+                {"name": v.name, "fov_deg": v.fov_deg, "size": v.width, "yaw_deg": v.yaw_deg, "pitch_deg": v.pitch_deg}
+                for v in views
+            ],
+            "lens_count": 1,
+            # 単一球面カメラ: 光学中心は原点で共有 (並進ゼロ). rig は view 間の既知回転のみを拘束する.
+            "lenses": [{"index": 0, "tx": 0.0, "ty": 0.0, "tz": 0.0}],
+            "frames": rig_records,
+        }
+        rig_path = ctx.stage_out_dir / "manifest_rig.json"
+        rig_path.write_text(json.dumps(rig_manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+        outputs.append(FileRef(path=_final_relpath(rig_path, ctx), size=rig_path.stat().st_size, sha256=sha256_file(rig_path), mime="application/json"))
+        manifest.outputs = outputs
+        ctx.progress.info("reproject_views(ERP) done", progress=1.0, key="log.reproject_erp_done")
         return manifest
 
 

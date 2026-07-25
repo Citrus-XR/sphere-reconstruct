@@ -24,6 +24,7 @@ import numpy as np
 
 # COLMAP camera model id.
 CAMERA_MODEL_PINHOLE = 1
+CAMERA_MODEL_OPENCV_FISHEYE = 5
 
 MAX_IMAGE_ID = 2**31 - 1
 

@@ -10,6 +10,7 @@ FastAPI プロセス側で Job のライフサイクルを管理する.
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -34,6 +35,7 @@ class JobSupervisor:
         project_id: str,
         stage: str | None = None,
         params_by_stage: dict[str, dict] | None = None,
+        skip: list[str] | None = None,
     ) -> str:
         job_id = str(uuid.uuid4())
         now = datetime.now(UTC).isoformat()
@@ -64,6 +66,7 @@ class JobSupervisor:
                 "job_id": job_id,
                 "stage": stage,
                 "params_by_stage": params_by_stage,
+                "skip": skip,
             },
         )
         # pid を job テーブルへ書き込む.
@@ -77,11 +80,54 @@ class JobSupervisor:
         return job_id
 
     async def _await_worker(self, job_id: str, handle: WorkerHandle) -> int:
+        code = -1
         try:
-            return await wait_for(handle)
+            code = await wait_for(handle)
+            return code
         finally:
             self._handles.pop(job_id, None)
             self._tasks.pop(job_id, None)
+            # worker がネイティブクラッシュ (CUDA/ONNX の VRAM 不足など) や kill で異常終了すると
+            # worker 内の except を通らず job/stage_run が 'running' のまま残る. ここで回収する.
+            try:
+                await self._finalize_if_orphaned(job_id, code)
+            except Exception:  # 回収失敗でも監視タスク自体は落とさない.
+                pass
+
+    async def _finalize_if_orphaned(self, job_id: str, exit_code: int) -> None:
+        """worker 終了後, job がまだ running/queued のままなら failed にして原因を通知する."""
+        now = datetime.now(UTC).isoformat()
+        async with self._db.transaction() as conn:
+            cur = await conn.execute("SELECT status, project_id FROM job WHERE id=?", (job_id,))
+            row = await cur.fetchone()
+            if row is None or row["status"] not in ("running", "queued"):
+                return  # 正常に終了済み (worker が status を書けた).
+            msg = (
+                f"worker が異常終了しました (exit code {exit_code}). "
+                "ネイティブクラッシュ (CUDA/ONNX の VRAM 不足など) か手動 kill の可能性があります. "
+                "ALIKED を 8K 原寸で回すと VRAM 不足でクラッシュしやすいので device=cpu を試してください."
+            )
+            await conn.execute(
+                "UPDATE job SET status='failed', finished_at=?, error_text=? WHERE id=?",
+                (now, msg, job_id),
+            )
+            await conn.execute(
+                "UPDATE stage_run SET status='failed', finished_at=?, error_text=? WHERE job_id=? AND status='running'",
+                (now, msg, job_id),
+            )
+            await conn.execute(
+                "INSERT INTO event "
+                "(job_id, project_id, stage, level, message, msg_key, msg_args, progress, ts) "
+                "VALUES (?, ?, NULL, 'error', ?, ?, ?, NULL, ?)",
+                (
+                    job_id,
+                    row["project_id"],
+                    "⛔ " + msg,
+                    "log.worker_orphaned",
+                    json.dumps({"exit_code": exit_code}),
+                    now,
+                ),
+            )
 
     def cancel_job(self, job_id: str) -> bool:
         handle = self._handles.get(job_id)

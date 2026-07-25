@@ -6,6 +6,7 @@ CRUD 系. ここに書く HTTP モデルはあくまで API 用 DTO. domain.proj
 
 from __future__ import annotations
 
+import shutil
 from datetime import datetime
 from pathlib import Path
 
@@ -33,6 +34,7 @@ class ProjectRead(BaseModel):
     source_kind: str | None
     source_path: str | None
     state: PipelineState
+    ui_state: dict | None
 
 
 class SetSourceBody(BaseModel):
@@ -49,6 +51,7 @@ def _to_read(p: project_domain.Project) -> ProjectRead:
         source_kind=p.source_kind.value if p.source_kind else None,
         source_path=p.source_path,
         state=p.state,
+        ui_state=p.metadata.get("ui"),
     )
 
 
@@ -85,9 +88,44 @@ async def set_source(project_id: str, body: SetSourceBody) -> ProjectRead:
     try:
         resolved = ensure_within_any(settings.filesystem.allowed_roots, Path(body.path))
     except PathNotAllowedError as e:
-        raise HTTPException(status_code=403, detail=str(e))
+        raise HTTPException(status_code=403, detail=str(e)) from e
     if not resolved.exists():
         raise HTTPException(status_code=404, detail=f"source not found: {resolved}")
 
     p = await project_domain.set_source(db, project_id, kind=body.kind, path=str(resolved))
     return _to_read(p)
+
+
+class UiStateBody(BaseModel):
+    ui: dict
+
+
+@router.put("/{project_id}/ui-state", response_model=ProjectRead)
+async def put_ui_state(project_id: str, body: UiStateBody) -> ProjectRead:
+    """工程ごとの UI 設定 (step パラメータ / モード / 無効化) を保存する."""
+    db = get_db()
+    existing = await project_domain.get_project(db, project_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="project not found")
+    await project_domain.set_ui_state(db, project_id, body.ui)
+    p = await project_domain.get_project(db, project_id)
+    assert p is not None
+    return _to_read(p)
+
+
+@router.delete("/{project_id}")
+async def delete_project(project_id: str) -> dict:
+    """プロジェクトをディスクから完全に削除する (中間成果物含む).
+
+    ソース動画はプロジェクト外のパス参照なので削除されない. DB 行削除で stage_run /
+    job / event は ON DELETE CASCADE で消える.
+    """
+    db = get_db()
+    p = await project_domain.get_project(db, project_id)
+    if p is None:
+        raise HTTPException(status_code=404, detail="project not found")
+    if p.workspace_dir.exists():
+        shutil.rmtree(p.workspace_dir, ignore_errors=True)
+    await db.conn.execute("DELETE FROM project WHERE id=?", (project_id,))
+    await db.conn.commit()
+    return {"deleted": project_id}

@@ -29,12 +29,14 @@ async def events_ws(
 ) -> None:
     await ws.accept()
     db = get_db()
-    last_id = since
+    # since < 0 は「今から」= 現在の最新 id から tail する (過去ログを再送しない).
+    last_id = since if since >= 0 else await _max_id(db, job_id, project_id)
     try:
         while True:
             rows = await _fetch(db, last_id, job_id, project_id)
             if rows:
                 for r in rows:
+                    keys = r.keys()
                     payload = {
                         "id": r["id"],
                         "job_id": r["job_id"],
@@ -42,7 +44,10 @@ async def events_ws(
                         "stage": r["stage"],
                         "level": r["level"],
                         "message": r["message"],
+                        "msg_key": r["msg_key"] if "msg_key" in keys else None,
+                        "msg_args": r["msg_args"] if "msg_args" in keys else None,
                         "progress": r["progress"],
+                        "kind": r["kind"] if "kind" in keys else "log",
                         "ts": r["ts"],
                     }
                     await ws.send_text(json.dumps(payload, ensure_ascii=False))
@@ -52,6 +57,22 @@ async def events_ws(
                 await asyncio.sleep(0.5)
     except WebSocketDisconnect:
         return
+
+
+async def _max_id(db, job_id: str | None, project_id: str | None) -> int:
+    where = ["1=1"]
+    args: list = []
+    if job_id is not None:
+        where.append("job_id = ?")
+        args.append(job_id)
+    if project_id is not None:
+        where.append("project_id = ?")
+        args.append(project_id)
+    cur = await db.conn.execute(
+        f"SELECT COALESCE(MAX(id), 0) AS m FROM event WHERE {' AND '.join(where)}", args
+    )
+    row = await cur.fetchone()
+    return int(row["m"]) if row else 0
 
 
 async def _fetch(db, last_id: int, job_id: str | None, project_id: str | None):

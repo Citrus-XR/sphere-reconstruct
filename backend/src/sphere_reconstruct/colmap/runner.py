@@ -101,6 +101,8 @@ def feature_extractor(
     camera_params: str | None = None,
     use_gpu: bool = True,
     mask_path: Path | None = None,
+    camera_mask_path: Path | None = None,
+    extra_args: list[str] | None = None,
     log_path: Path | None = None,
     on_line: Callable[[str], None] | None = None,
 ) -> CommandResult:
@@ -112,7 +114,7 @@ def feature_extractor(
         "--FeatureExtraction.use_gpu", "1" if use_gpu else "0",
     ]
     if single_camera_per_folder:
-        # rig 使用時: 各 <view>_lensN フォルダを独立カメラにする (12 センサーの rig).
+        # rig 使用時: 各サブフォルダを独立カメラにする (pinhole rig は 12, native は front/back の 2).
         args += ["--ImageReader.single_camera_per_folder", "1"]
     else:
         args += ["--ImageReader.single_camera", "1" if single_camera else "0"]
@@ -123,6 +125,11 @@ def feature_extractor(
     if mask_path is not None:
         # COLMAP mask 規則: mask_path/<image_name>.png. 黒 (0) 画素を無視する.
         args += ["--ImageReader.mask_path", str(mask_path)]
+    if camera_mask_path is not None:
+        # 全画像に共通の 1 枚マスク (native fisheye の円形有効領域など). 黒画素を無視する.
+        args += ["--ImageReader.camera_mask_path", str(camera_mask_path)]
+    if extra_args:
+        args += extra_args
     return run_command(colmap_bin, args, log_path=log_path, on_line=on_line)
 
 
@@ -182,6 +189,7 @@ def sequential_matcher(
     loop_detection: bool = False,
     vocab_tree_path: Path | None = None,
     use_gpu: bool = True,
+    extra_args: list[str] | None = None,
     log_path: Path | None = None,
     on_line: Callable[[str], None] | None = None,
 ) -> CommandResult:
@@ -196,6 +204,30 @@ def sequential_matcher(
             "--SequentialMatching.loop_detection", "1",
             "--SequentialMatching.vocab_tree_path", str(vocab_tree_path),
         ]
+    if extra_args:
+        args += extra_args
+    return run_command(colmap_bin, args, log_path=log_path, on_line=on_line)
+
+
+def vocab_tree_matcher(
+    colmap_bin: str,
+    *,
+    database_path: Path,
+    vocab_tree_path: Path,
+    use_gpu: bool = True,
+    extra_args: list[str] | None = None,
+    log_path: Path | None = None,
+    on_line: Callable[[str], None] | None = None,
+) -> CommandResult:
+    """vocab tree による全体マッチ (順序非依存). 大量/ループ撮影向け."""
+    args = [
+        "vocab_tree_matcher",
+        "--database_path", str(database_path),
+        "--VocabTreeMatching.vocab_tree_path", str(vocab_tree_path),
+        "--FeatureMatching.use_gpu", "1" if use_gpu else "0",
+    ]
+    if extra_args:
+        args += extra_args
     return run_command(colmap_bin, args, log_path=log_path, on_line=on_line)
 
 
@@ -204,6 +236,7 @@ def exhaustive_matcher(
     *,
     database_path: Path,
     use_gpu: bool = True,
+    extra_args: list[str] | None = None,
     log_path: Path | None = None,
     on_line: Callable[[str], None] | None = None,
 ) -> CommandResult:
@@ -212,6 +245,8 @@ def exhaustive_matcher(
         "--database_path", str(database_path),
         "--FeatureMatching.use_gpu", "1" if use_gpu else "0",
     ]
+    if extra_args:
+        args += extra_args
     return run_command(colmap_bin, args, log_path=log_path, on_line=on_line)
 
 
@@ -223,6 +258,8 @@ def mapper(
     output_path: Path,
     refine_intrinsics: bool = True,
     refine_rig: bool = True,
+    multiple_models: bool = True,
+    extra_args: list[str] | None = None,
     log_path: Path | None = None,
     on_line: Callable[[str], None] | None = None,
 ) -> CommandResult:
@@ -241,6 +278,13 @@ def mapper(
             "--Mapper.ba_refine_extra_params", "0",
         ]
     if not refine_rig:
-        # rig 外参 (sensor_from_rig) を固定する. offset_v3 の校正を厳密に信頼する場合.
+        # rig 外参 (sensor_from_rig) を固定する. offset_v3 の校正を厳密に信頼する場合や,
+        # 前後半球で共有点が無く相対姿勢を実測値で強制したい native fisheye で使う.
         args += ["--Mapper.ba_refine_sensor_from_rig", "0"]
+    if not multiple_models:
+        # 1 つの再構成のみ作る. COLMAP は既定で次善のシード群から複数サブモデルを吐くが,
+        # rig 拘束下では最大モデル 1 つで十分なので分裂を抑止する.
+        args += ["--Mapper.multiple_models", "0"]
+    if extra_args:
+        args += extra_args
     return run_command(colmap_bin, args, log_path=log_path, on_line=on_line)

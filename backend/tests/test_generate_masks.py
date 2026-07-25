@@ -89,22 +89,24 @@ def test_generate_masks_with_fake_engine(tmp_path: Path, monkeypatch):
     out_dir.mkdir()
 
     events = []
+    stage = GenerateMasks()
     ctx = StageContext(
         project_id="p",
         project_dir=project_dir,
         stage_out_dir=out_dir,
-        params={
-            "prompt": "person,tripod",
-            "max_inference_size": 128,  # 256 -> 128 に縮小させる
-            "coverage_warn": 0.9,
-            "max_frames": 0,
-        },
+        params=stage.normalize_params(
+            {
+                "prompt": "person,tripod",
+                "max_inference_size": 128,  # 256 -> 128 に縮小させる
+                "coverage_warn": 0.9,
+                "max_frames": 0,
+            }
+        ),
         source_path=None,
         source_kind="insv",
-        progress=ProgressReporter(_emit=lambda level, prog, msg: events.append((level, msg))),
+        progress=ProgressReporter(_emit=lambda level, prog, msg, key=None, args=None, kind="log": events.append((level, msg))),
     )
 
-    stage = GenerateMasks()
     manifest = stage.execute(ctx)
 
     # 各 frame/view に mask PNG が出ているか.
@@ -125,4 +127,65 @@ def test_generate_masks_with_fake_engine(tmp_path: Path, monkeypatch):
     assert mm["prompt"] == ["person", "tripod"]
 
     # manifest outputs は mask PNG 4 枚 + manifest_masks.json.
+    assert len(manifest.outputs) == 2 * 2 + 1
+
+
+def _make_extract_output(project_dir: Path) -> None:
+    """2 frame x (lens0/lens1) の魚眼画像 + manifest_frames.json を捏造する."""
+    ef = project_dir / "extract_frames"
+    frames = []
+    for fi in range(2):
+        rec = {"index": fi, "timestamp_sec": float(fi)}
+        for lens in (0, 1):
+            d = ef / f"lens{lens}"
+            d.mkdir(parents=True, exist_ok=True)
+            img = np.full((256, 256, 3), 128, dtype=np.uint8)
+            p = d / f"lens{lens}_{fi:06d}.jpg"
+            cv2.imwrite(str(p), img)
+            rec[f"lens{lens}"] = str(p.relative_to(project_dir))
+        frames.append(rec)
+    (ef / "manifest_frames.json").write_text(
+        json.dumps({"kind": "insv_dual", "fps": 30, "width": 256, "height": 256, "count": 2, "frames": frames}),
+        encoding="utf-8",
+    )
+
+
+def test_generate_masks_fisheye(tmp_path: Path, monkeypatch):
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    _make_extract_output(project_dir)  # reproject_views は無し -> auto で fisheye
+    monkeypatch.setattr(sam3_engine, "Sam3Engine", _FakeEngine)
+
+    out_dir = project_dir / ".generate_masks.tmp"
+    out_dir.mkdir()
+
+    events = []
+    stage = GenerateMasks()
+    ctx = StageContext(
+        project_id="p",
+        project_dir=project_dir,
+        stage_out_dir=out_dir,
+        params=stage.normalize_params(
+            {"prompt": "person", "max_inference_size": 128, "coverage_warn": 0.9, "dilate_px": 2}
+        ),
+        source_path=None,
+        source_kind="insv",
+        progress=ProgressReporter(_emit=lambda level, prog, msg, key=None, args=None, kind="log": events.append((level, msg))),
+    )
+    manifest = stage.execute(ctx)
+
+    mm = json.loads((out_dir / "manifest_masks.json").read_text())
+    assert mm["kind"] == "sam3_fisheye_masks"
+    assert mm["dilate_px"] == 2
+    for fi in range(2):
+        for lens in (0, 1):
+            mask_png = out_dir / f"lens{lens}" / f"frame_{fi:06d}.png"
+            assert mask_png.exists(), f"missing {mask_png}"
+            m = cv2.imread(str(mask_png), cv2.IMREAD_GRAYSCALE)
+            assert m.shape == (256, 256)
+            # 円内・右半分 (動体外) = 255, 円内・左半分 (動体) = 0, 四隅 (円外) = 0.
+            assert m[128, 245] == 255, "inside circle, non-dynamic -> keep"
+            assert m[128, 10] == 0, "inside circle, dynamic -> excluded"
+            assert m[2, 2] == 0, "outside circle -> excluded"
+    # PNG 4 枚 + manifest.
     assert len(manifest.outputs) == 2 * 2 + 1

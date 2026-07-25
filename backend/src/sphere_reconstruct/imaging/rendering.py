@@ -106,6 +106,40 @@ def render_pinhole(
     return dst, stats
 
 
+def render_perspective_from_equirect(
+    src_image_path: Path, view: PinholeView,
+) -> tuple[np.ndarray, RenderStats]:
+    """Equirectangular (全天球) 画像から view の pinhole 画像 (uint8 HxWx3 BGR) を作る.
+
+    ERP は既に球面を平面展開したものなので, 各 pinhole 画素の視線を rig(=ワールド)座標へ
+    回し, その方向を経度/緯度に変換して equirect を bilinear サンプルする. 光学中心は
+    パノラマ中心を全 view で共有する (並進ゼロ). 経度は横方向に周回するので BORDER_WRAP.
+    """
+    cv2 = _cv2()
+    src = cv2.imread(str(src_image_path), cv2.IMREAD_COLOR)
+    if src is None:
+        raise FileNotFoundError(f"cannot read {src_image_path}")
+    src_h, src_w = src.shape[:2]
+
+    rays = pinhole_backproject(view)  # (H, W, 3), +X 右 +Y 下 +Z 前
+    h, w, _ = rays.shape
+    R_view = yaw_pitch_rotation(view.yaw_deg, view.pitch_deg)
+    d = rays.reshape(-1, 3) @ R_view  # view -> rig(world) 方向.
+    dx, dy, dz = d[:, 0], d[:, 1], d[:, 2]
+    r = np.sqrt(dx * dx + dy * dy + dz * dz)
+    lon = np.arctan2(dx, dz)                       # +Z 前で 0, +X 右で +pi/2.
+    lat = np.arcsin(np.clip(dy / r, -1.0, 1.0))    # +Y 下 -> lat>0 が下.
+    u = (lon / (2.0 * math.pi) + 0.5) * src_w
+    v = (lat / math.pi + 0.5) * src_h
+    # 経度 u は横方向に周回する (mod), 緯度 v は極でクランプする (縦は周回させない).
+    # BORDER_WRAP は u/v 両方に効くため, v を先に範囲内へ収めて縦の巻き込みを防ぐ.
+    map_x = np.mod(u, src_w).reshape(h, w).astype(np.float32)
+    map_y = np.clip(v, 0.0, src_h - 1.0).reshape(h, w).astype(np.float32)
+    dst = cv2.remap(src, map_x, map_y, interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_WRAP)
+    stats = RenderStats(valid_ratio=1.0, src_size=(src_w, src_h), dst_size=(view.width, view.height))
+    return dst, stats
+
+
 def write_jpeg(dst: np.ndarray, out_path: Path, quality: int = 92) -> None:
     cv2 = _cv2()
     out_path.parent.mkdir(parents=True, exist_ok=True)

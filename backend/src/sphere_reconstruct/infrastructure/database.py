@@ -63,8 +63,11 @@ CREATE TABLE IF NOT EXISTS event (
     project_id  TEXT REFERENCES project(id) ON DELETE CASCADE,
     stage       TEXT,
     level       TEXT NOT NULL, -- 'debug' | 'info' | 'warn' | 'error'
-    message     TEXT NOT NULL,
+    message     TEXT NOT NULL, -- レンダリング済みフォールバック文字列 (未 key 化の呼び出しでも壊れない)
+    msg_key     TEXT,          -- i18n キー (log.*). フロントが view 時に翻訳する.
+    msg_args    TEXT,          -- msg_key の補間引数 (JSON). null 可.
     progress    REAL,          -- 0.0 - 1.0 (nullable)
+    kind        TEXT NOT NULL DEFAULT 'log', -- 'log' (Console 表示) | 'progress' (環形のみ, 非表示)
     ts          TEXT NOT NULL
 );
 
@@ -86,6 +89,13 @@ class Database:
         await self._conn.execute("PRAGMA journal_mode=WAL;")
         await self._conn.execute("PRAGMA foreign_keys=ON;")
         await self._conn.executescript(_SCHEMA)
+        # 既存 DB (ALTER 前に作られたファイル) にも追加カラムを足す. マイグレーション層が
+        # 無いので冪等な ADD COLUMN で吸収する (存在すれば OperationalError を握りつぶす).
+        for col, decl in (("msg_key", "TEXT"), ("msg_args", "TEXT"), ("kind", "TEXT NOT NULL DEFAULT 'log'")):
+            try:
+                await self._conn.execute(f"ALTER TABLE event ADD COLUMN {col} {decl}")
+            except aiosqlite.OperationalError:
+                pass
         await self._conn.commit()
 
     async def close(self) -> None:

@@ -79,6 +79,46 @@ def union_masks(masks: list[np.ndarray]) -> np.ndarray | None:
     return acc.astype(np.uint8)
 
 
+def dilate_mask(mask: np.ndarray, px: int) -> np.ndarray:
+    """2 値 mask を px 画素だけ膨張させる. px<=0 ならそのまま.
+
+    SAM3 の物体 mask が輪郭にぴったり張り付くと, リサンプル/量子化で縁の 1-2 画素が
+    漏れて動体が特徴に混ざる. 少し膨張させて安全余裕を作る.
+    """
+    if px <= 0:
+        return (mask > 0).astype(np.uint8)
+    cv2 = _cv2()
+    k = 2 * px + 1
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
+    return (cv2.dilate((mask > 0).astype(np.uint8), kernel) > 0).astype(np.uint8)
+
+
+def circle_mask(width: int, height: int, cx: float, cy: float, r: float) -> np.ndarray:
+    """(cx,cy) 中心 半径 r の円内を 1, 外を 0 とする uint8 マスク (画素座標)."""
+    cv2 = _cv2()
+    m = np.zeros((height, width), dtype=np.uint8)
+    cv2.circle(m, (int(round(cx)), int(round(cy))), int(round(r)), 1, -1)
+    return m
+
+
+def valid_region_mask(
+    width: int,
+    height: int,
+    circle: tuple[float, float, float],
+    exclude: np.ndarray | None = None,
+) -> np.ndarray:
+    """COLMAP 用の有効領域 mask を作る (使う所=1).
+
+    円形有効領域 (circle) の内側かつ exclude (膨張済み動体, 1=除外) の外側を 1 にする.
+    exclude が None なら円だけ.
+    """
+    cx, cy, r = circle
+    valid = circle_mask(width, height, cx, cy, r)
+    if exclude is not None:
+        valid = valid & (1 - (exclude > 0).astype(np.uint8))
+    return valid.astype(np.uint8)
+
+
 def coverage_ratio(mask: np.ndarray) -> float:
     """mask が画像に占める面積比 (0.0 - 1.0)."""
     if mask.size == 0:

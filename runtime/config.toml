@@ -46,7 +46,10 @@ confidence_threshold = 0.5
 # 空なら SIFT にフォールバック. モデルは fabio-sim/LightGlue-ONNX (Apache-2.0) 等から取得.
 extractor_path = ""   # aliked の .onnx (例 aliked-n16rot.onnx)
 matcher_path = ""     # lightglue の .onnx (例 aliked-lightglue.onnx)
-device = "cuda"       # onnxruntime provider: "cuda" | "cpu"
+device = "cuda"       # LightGlue マッチングの onnxruntime provider: "cuda" | "cpu"
+# ALIKED 抽出デバイス. 魚眼は全解像度で抽出するため 8K だと GPU が OOM しうる.
+# "auto" は空き VRAM から自動選択し, 実行時 OOM も CPU へフォールバックする.
+extraction_device = "auto"  # "auto" | "cuda" | "cpu"
 max_keypoints = 4096
 min_score = 0.2
 

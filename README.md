@@ -1,22 +1,41 @@
 # sphere-reconstruct
 
-Insta360 X5 の INSV から, キャリブレーション済み pinhole rig ベースの COLMAP データセットを生成するローカル Web アプリケーション. Equirectangular (ERP) 動画/画像入力も受け付ける.
+Insta360 X5 の INSV から, COLMAP ベースの 3DGS 向けデータセットを生成するローカル Web
+アプリケーション. 既定は生の前後魚眼をそのまま解く **Native 魚眼 (前後強制 rig)**,
+fallback として pinhole rig cubemap も選べる. Equirectangular (ERP) 動画/画像入力も
+受け付ける.
 
 旧 [lichtfeld-360-plugin](https://github.com/alexmgee/lichtfeld-360-plugin) (GPL-3.0-or-later) は行動参考のみで, 実装コードは流用していない. 独立に再実装.
 
 ## パイプライン (V1 主線)
 
+再構成は 2 モード. reconstruct ステージの `reconstruction_mode` で切替える.
+
+**Native 魚眼 (既定, native_fisheye)** — 前後魚眼を全 FoV / 原画素のまま解く:
+
 ```
-INSV / ERP
+INSV
   -> ソース検査 (INSPECTED)
-  -> フレーム抽出 (EXTRACTED)
-  -> pinhole rig 再投影 (REPROJECTED)
-  -> SAM3 マスク生成 (MASKED)
-  -> COLMAP Incremental Mapper (RECONSTRUCTED)
+  -> 前後同期フレーム抽出 (EXTRACTED)
+  -> SAM3 魚眼マスク: 円形有効領域 + 動体除外 (MASKED)
+  -> COLMAP: 前後 2 レンズ OPENCV_FISHEYE + 強制物理 rig (RECONSTRUCTED)
   -> データセット書き出し (EXPORTED)
 ```
 
-各ステージは冪等. 入力ハッシュ・パラメータハッシュ・実装バージョンで再計算判定. 中間結果は tmp に書いてから原子リプレース.
+front を参照, back を「Y 軸 180deg + 物理 baseline」で強制固定するため, 前後半球に
+視覚的重なりが無くても必ず 1 モデルへ合流する. pinhole 再投影が不要で特徴損失が無い.
+魚眼の有効領域 (円) は UI で手動調整でき (レンズ端の反射/汚れを外周から除外), 動体
+(人 / 自撮り棒 / 三脚 / 影) は SAM3 で検出し膨張させて除外する.
+
+**Pinhole rig (fallback, pinhole_rig)** — 6-view cubemap pinhole に再投影して解く:
+
+```
+INSV -> 検査 -> 抽出 -> pinhole rig 再投影 -> SAM3 マスク -> COLMAP (12 仮想カメラ rig) -> 書き出し
+```
+
+各ステージは冪等. 入力ハッシュ・パラメータハッシュ・実装バージョンで再計算判定. 中間
+結果は tmp に書いてから原子リプレース. native_fisheye では reproject_views を自動
+スキップし, generate_masks は生魚眼用 (fisheye レイアウト) の SAM3 マスクを作る.
 
 ## アーキテクチャ
 
@@ -123,19 +142,35 @@ pnpm dev       # http://127.0.0.1:5173
 | 2 | INSV footer / offset_v3 / IMU / MEI キャリブ | 完了 (実 X5 で検証) |
 | 3 | 前後同期抽出 / **空間抽出 (2層多基準)** / pinhole rig | 完了 |
 | 4 | SAM3 手動パス / 推論 / マスク (縮小->推論->拡大) | 完了 (4070Ti で検証) |
-| 5 | COLMAP CLI / **rig 拘束** / SIFT / Sequential Matching / エクスポート | 完了 (実機で検証) |
+| 5 | COLMAP CLI / **rig 拘束** / SIFT / ALIKED / エクスポート | 完了 (実機で検証) |
 | 6 | 3D Viewer (three.js + R3F) / Frames / Masks / 点群 + カメラ | 完了 |
 | 7 | 起動スクリプト / 環境チェック / クラッシュ復旧 / 静的配信 | 完了 |
+| 8 | **Native 魚眼再構成 (前後強制 rig) / ALIKED 全解像度 + OOM 自動 CPU** | 完了 (実機で検証) |
 
-**rig 拘束の効果 (実機, X5 8 frames)**: 前後レンズ 6 視点 = 12 仮想カメラの既知
-相対姿勢を COLMAP に与えることで, 登録率が 16/96 → **96/96 (100%)**, 点数 936 →
-2795, 平均再投影誤差 0.64px. 低視差の手持ち 360 素材でも全フレームが登録される.
-12 frames では 144/144 (100%), 4334 points, 0.72px.
+### 再構成モード (native_fisheye / pinhole_rig)
 
-**offset_v3 校正精度の検証**: rig 外参を一切精修せず offset_v3 を厳密に信頼した
-「剛性 rig」でも 144/144 (100%), 平均再投影誤差 **0.94px**. 校正が歪んでいれば
-剛性 rig は誤差が発散するはずで, 0.94px の亜画素精度は offset_v3 が幾何的に正確な
-証拠. COLMAP に外参精修を許すと 0.94 → 0.72px に微減 (機種平均校正の残差 ~0.2px を吸収).
+**Native 魚眼 (既定)**: 前後 2 レンズを OPENCV_FISHEYE の 2 センサー rig として解く.
+front を参照, back を「Y 軸 180deg (quat [0,0,1,0]) + 物理 baseline」で**強制固定**する.
+この相対姿勢は正常素材の合流結果から実測した (front->back 回転 179.87deg, 12 フレーム
+std 0.16deg). front/back は視覚的に重ならないが, 同名フレームを 1 つの rig frame とみなす
+ことで必ず 1 モデルへ合流する. baseline (offset_v3 のレンズ中心間距離 ~32mm) は metric
+スケールのアンカーにもなる. rig 外参は精修せず実測値で固定する.
+
+実機比較 (暗所低解像 2880^2, 前後各 10 フレーム):
+
+| 構成 | モデル数 | 登録 | 点数 | 再投影 |
+|------|---------|------|------|--------|
+| Native 魚眼, rig 無し | 2 (分裂) | 85% | — | — |
+| Native 魚眼, **強制 rig + SIFT** | 1 | **100% (20/20)** | 767 | 0.81px |
+| Native 魚眼, **強制 rig + ALIKED** | 1 | **100% (20/20)** | **3521** | 1.19px |
+
+強制 rig で前後分裂が解消し 100% 合流する. 暗所では ALIKED が点数で圧倒 (4.6x), 精度は
+SIFT が上. Pinhole rig (fallback) は正常素材 6 フレームで 72/72 (100%), 0.81px.
+
+**pinhole rig 拘束の効果 (参考)**: 6-view cubemap = 12 仮想カメラの既知相対姿勢を
+COLMAP に与えることで, 登録率が 16/96 → **96/96 (100%)**, 平均再投影誤差 0.64px.
+offset_v3 を一切精修しない剛性 rig でも 144/144 (100%), 0.94px の亜画素精度が出るため,
+offset_v3 が幾何的に正確であることが裏付けられる.
 
 **空間抽出 (2層多基準)**: 固定時間間隔ではなく,
 - 快速層 (安価): 時間 + Laplacian ブレ + 過曝/欠曝 + IMU 回転差
@@ -143,25 +178,17 @@ pnpm dev       # http://127.0.0.1:5173
 の 2 段で候補を絞り, 「視覚/運動の変化量」で等間隔に高品質フレームを選ぶ.
 `selection_mode = interval | sharpness | spatial` で切替.
 
-今後: COLMAP loop closure (COLMAP 4.x は faiss 形式 vocab tree が必要), PB
-(`.insv.pb`) 完全パーサ (PB を伴う個体の INSV サンプル入手待ち; 現状は offset_v3
-(ASCII) で完全に校正できている).
+**特徴 backend (SIFT vs ALIKED+LightGlue)**: reconstruct の `feature_backend` で選ぶ.
+この COLMAP ビルドは SIFT のみ (deep features 非対応) なので, ALIKED は外部 onnxruntime で
+抽出/マッチして COLMAP DB に書き込む (database_creator -> keypoints -> LightGlue ->
+matches_importer). 魚眼は縮小すると角分解能が落ちるため ALIKED は**全解像度**で抽出し,
+`extraction_device = auto` は空き VRAM から GPU/CPU を選び, 実行時 OOM も CPU へ
+フォールバックする (8K の 3840^2 は GPU では OOM するため CPU 抽出になる). 通常素材では
+SIFT の方が高精度, 弱テクスチャ/暗所では ALIKED が救済する. モデルは SAM3 同様 config
+パス + `scripts/fetch_aliked_models.py` で取得 (git には入れない).
 
-**特徴 backend (SIFT vs ALIKED+LightGlue)**: `reconstruct` の `feature_backend` で
-選ぶ. この COLMAP ビルドは SIFT のみ (deep features 非対応) なので, ALIKED は外部
-onnxruntime で抽出/マッチして COLMAP DB に書き込む (database_creator ->
-keypoints -> LightGlue -> matches_importer). 実測比較:
-
-| footage | backend | registered | points | reproj err |
-|---------|---------|-----------|--------|-----------|
-| 通常 (3840, 8f) | SIFT | 96/96 | 2795 | 0.64px |
-| 通常 (3840, 8f) | ALIKED | 96/96 | 8812 | 1.16px |
-| **暗光低解像 (2880, 10f)** | **SIFT** | **36/120 (30%)** | **110** | 0.57px |
-| **暗光低解像 (2880, 10f)** | **ALIKED** | **120/120 (100%)** | **1379** | 1.07px |
-
-通常素材では両者 100% (SIFT の方が高精度), 弱テクスチャ/暗光では SIFT が崩れ
-(30%), ALIKED が救済する (100%, 12.5x の点数). モデルは SAM3 同様 config パス +
-`scripts/fetch_aliked_models.py` で取得 (git には入れない).
+今後: 物理レンズ姿勢からの Derived Pinhole 生成 (訓練出力用, 2 度目の COLMAP を
+回さない), COLMAP loop closure (faiss 形式 vocab tree), PB (`.insv.pb`) 完全パーサ.
 
 ## ライセンス
 

@@ -69,7 +69,17 @@ class LogConfig(BaseModel):
 class AlikedConfig(BaseModel):
     extractor_path: str = ""   # ALIKED の .onnx
     matcher_path: str = ""      # LightGlue の .onnx
-    device: str = "cuda"        # onnxruntime provider
+    device: str = "cuda"        # LightGlue マッチングの onnxruntime provider
+    # ALIKED 抽出の実行デバイス. 魚眼は縮小すると角分解能が落ちるため全解像度で抽出するが,
+    # 8K 級 (3840^2) だと GPU VRAM を使い切って OOM する. "auto" は空き VRAM と画像
+    # 画素数から GPU/CPU を自動選択し, 実行時 OOM も CPU へフォールバックする.
+    #   "auto" | "cuda" | "cpu"
+    extraction_device: str = "auto"
+    # ALIKED 抽出の長辺上限 (px). 8K 原寸 (3840^2 = 14.7MP) は GPU VRAM も CPU RAM も
+    # 溢れてネイティブクラッシュするため, これを超える画像は縮小して抽出し keypoint 座標を
+    # 原寸へ戻す. 0 で無効 (原寸抽出). 既定は無効で, UI の「抽出解像度上限」チェックで opt-in する.
+    # config.toml で >0 を設定すれば, UI が 0 (無効) を送っても server 側で硬上限を掛けられる.
+    max_extract_size: int = 0
     max_keypoints: int = 4096
     min_score: float = 0.2
 

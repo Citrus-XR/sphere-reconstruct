@@ -17,6 +17,7 @@ from ..domain.artifacts import FileRef, StageManifest
 from ..domain.pipeline_state import StageName
 from ..infrastructure.filesystem import sha256_file
 from ..insta360 import calibration as calib
+from ..insta360 import imu as insv_imu
 from ..insta360 import insv, metadata as insv_metadata, protobuf as pb
 from ..pipeline.manifest import register
 from ..pipeline.stage import Stage, StageContext, new_manifest
@@ -25,7 +26,7 @@ from ..pipeline.stage import Stage, StageContext, new_manifest
 @register
 class InspectSource(Stage):
     name = StageName.INSPECT_SOURCE
-    impl_version = "0.1"
+    impl_version = "0.2"  # gravity 抽出を追加
 
     def collect_inputs(self, ctx: StageContext) -> list[FileRef]:
         if ctx.source_path is None:
@@ -79,7 +80,7 @@ class InspectSource(Stage):
         return manifest
 
     def _inspect_insv(self, path: Path, out_dir: Path, ctx: StageContext) -> dict:
-        ctx.progress.info("scanning MP4 boxes", progress=0.1)
+        ctx.progress.info("scanning MP4 boxes", progress=0.1, key="log.inspect_scan_mp4")
         layout = insv.layout(path)
 
         summary: dict = {
@@ -94,12 +95,15 @@ class InspectSource(Stage):
             "footer_size": layout.footer_size,
             "footer": None,
             "offset_v3": None,
+            "gravity": None,
             "pb": None,
             "calibration_source": None,
         }
 
         if layout.footer_offset is not None:
-            ctx.progress.info("scanning Insta360 footer (inst box)", progress=0.4)
+            ctx.progress.info(
+                "scanning Insta360 footer (inst box)", progress=0.4, key="log.inspect_scan_footer"
+            )
             try:
                 view = insv_metadata.read_footer(path, layout.footer_offset)
                 summary["footer"] = {
@@ -116,7 +120,9 @@ class InspectSource(Stage):
                 }
 
                 # inst box を丸ごと読んで offset_v3 ASCII 校准串を拾う.
-                ctx.progress.info("parsing offset_v3 (ascii)", progress=0.55)
+                ctx.progress.info(
+                    "parsing offset_v3 (ascii)", progress=0.55, key="log.inspect_parse_offset_v3"
+                )
                 inst_bytes = insv_metadata.read_inst_box_bytes(view)
                 cands = calib.find_ascii_calibrations(inst_bytes)
                 chosen = calib.pick_offset_v3(cands)
@@ -136,10 +142,43 @@ class InspectSource(Stage):
                         summary["calibration_source"] = "offset_v3"
                 else:
                     summary["offset_v3"] = {"found": False}
-            except insv_metadata.FooterNotFoundError as e:
-                ctx.progress.warn(f"footer not detected: {e}")
 
-        ctx.progress.info("looking for external .insv.pb", progress=0.7)
+                # IMU (Gyro record) から重力方向 (IMU 座標) を抽出. 再構成の重力対齐に使う.
+                grav = insv_imu.extract_gravity(view)
+                if grav is not None:
+                    summary["gravity"] = {
+                        "imu": list(grav.gravity_imu),
+                        "samples": grav.sample_count,
+                        "mean_magnitude": round(grav.mean_magnitude, 4),
+                    }
+                    ctx.progress.info(
+                        f"IMU gravity: {grav.gravity_imu} ({grav.sample_count} samples, "
+                        f"|a|~{grav.mean_magnitude:.2f})",
+                        progress=0.6,
+                        key="log.inspect_gravity",
+                        args={
+                            "gx": round(grav.gravity_imu[0], 3),
+                            "gy": round(grav.gravity_imu[1], 3),
+                            "gz": round(grav.gravity_imu[2], 3),
+                            "n": grav.sample_count,
+                            "mag": round(grav.mean_magnitude, 2),
+                        },
+                    )
+                else:
+                    ctx.progress.info(
+                        "IMU gravity not found (no Gyro record)",
+                        progress=0.6, key="log.inspect_gravity_none",
+                    )
+            except insv_metadata.FooterNotFoundError as e:
+                ctx.progress.warn(
+                    f"footer not detected: {e}",
+                    key="log.inspect_footer_not_detected",
+                    args={"error": str(e)},
+                )
+
+        ctx.progress.info(
+            "looking for external .insv.pb", progress=0.7, key="log.inspect_look_pb"
+        )
         pb_path = pb.find_pb_for(path)
         if pb_path is not None:
             probe = pb.probe(pb_path)
@@ -150,7 +189,7 @@ class InspectSource(Stage):
             # offset_v3 では埋まらなかったが footer は存在する -> 内蔵 profile への降級待ち.
             summary["calibration_source"] = "builtin_profile"
 
-        ctx.progress.info("inspect done", progress=1.0)
+        ctx.progress.info("inspect done", progress=1.0, key="log.inspect_done")
         return summary
 
     # -- ERP video / images (最小実装) ---------------------------------------------
@@ -158,10 +197,10 @@ class InspectSource(Stage):
         from ..imaging import ffprobe as _ffprobe
         from ..settings import get_settings
 
-        ctx.progress.info("ffprobe on erp video", progress=0.5)
+        ctx.progress.info("ffprobe on erp video", progress=0.5, key="log.inspect_ffprobe_erp")
         pr = _ffprobe.probe(path, ffprobe_bin=get_settings().binaries.ffprobe or None)
         vs = pr.video_streams[0] if pr.video_streams else None
-        ctx.progress.info("inspect done", progress=1.0)
+        ctx.progress.info("inspect done", progress=1.0, key="log.inspect_done")
         return {
             "kind": "erp_video",
             "path": str(path),
@@ -180,7 +219,12 @@ class InspectSource(Stage):
         if not path.is_dir():
             raise NotADirectoryError(f"erp_images source must be a directory: {path}")
         images = sorted([p for p in path.iterdir() if p.suffix.lower() in {".jpg", ".jpeg", ".png"}])
-        ctx.progress.info(f"erp images: {len(images)} files", progress=1.0)
+        ctx.progress.info(
+            f"erp images: {len(images)} files",
+            progress=1.0,
+            key="log.inspect_erp_images",
+            args={"count": len(images)},
+        )
         return {
             "kind": "erp_images",
             "path": str(path),

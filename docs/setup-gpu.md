@@ -90,11 +90,29 @@ python scripts/fetch_aliked_models.py --out D:/Models/aliked   # モデル取得
 [aliked]
 extractor_path = "D:/Models/aliked/aliked-n16.onnx"
 matcher_path   = "D:/Models/aliked/aliked_lightglue.onnx"
-device = "cuda"
+device = "cuda"            # LightGlue マッチングの provider
+extraction_device = "auto" # ALIKED 抽出: auto | cuda | cpu
 ```
 
 reconstruct ステージのパラメータ `feature_backend = "aliked"` で有効化する. 空 or
 "sift" なら COLMAP 内蔵 SIFT を使う.
+
+### 抽出デバイスと VRAM (魚眼で重要)
+
+魚眼は 180deg+ を円内へ圧縮するため角分解能が元々低く, 縮小抽出すると暗所/弱テク
+スチャで特徴が消える. よって ALIKED は**全解像度**で抽出する. ただし ALIKED は稠密な
+特徴マップを作るため, 8K 級 (3840^2) を GPU で流すと VRAM を使い切って OOM する
+(4070Ti 12GB で 2880^2 でも OOM を確認).
+
+`extraction_device`:
+- `auto` (既定): 空き VRAM と画素数から GPU/CPU を選び, 実行時に OOM が出たら CPU へ
+  フォールバックして以降も CPU を使う. LightGlue マッチングは疎な keypoint のみで
+  軽いため `device` (既定 GPU) のまま.
+- `cuda`: 常に GPU. 小さい画像で速度を優先する場合のみ.
+- `cpu`: 常に CPU. 全解像度でも OOM しないが低速.
+
+reconstruct の `extraction_device` パラメータで stage ごとに上書きできる (UI の
+「ALIKED 抽出」セレクタ). UI は GPU 固定 + 大画像で OOM リスクを警告する.
 
 ## 動作確認
 

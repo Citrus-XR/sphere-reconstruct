@@ -12,8 +12,10 @@ from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
+from pydantic import BaseModel
 
 from ..domain import project as project_domain
+from ..imaging import fisheye_region
 from ..infrastructure.database import get_db
 from ..infrastructure.filesystem import PathNotAllowedError, ensure_within
 
@@ -32,7 +34,7 @@ def _safe(project_dir: Path, rel: str) -> Path:
     try:
         return ensure_within(project_dir, project_dir / rel)
     except PathNotAllowedError:
-        raise HTTPException(status_code=400, detail="invalid path")
+        raise HTTPException(status_code=400, detail="invalid path") from None
 
 
 @router.get("/api/projects/{project_id}/frames")
@@ -48,8 +50,9 @@ async def list_frames(project_id: str) -> dict:
         "width": data.get("width"),
         "height": data.get("height"),
         "fps": data.get("fps"),
+        "selection": data.get("selection"),
         "frames": [
-            {"index": f["index"], "timestamp_sec": f.get("timestamp_sec")}
+            {"index": f["index"], "timestamp_sec": f.get("timestamp_sec"), "score": f.get("score")}
             for f in data.get("frames", [])
         ],
     }
@@ -99,6 +102,96 @@ async def list_masks(project_id: str) -> dict:
     if not mf.exists():
         raise HTTPException(status_code=404, detail="generate_masks not run yet")
     return json.loads(mf.read_text())
+
+
+@router.get("/api/projects/{project_id}/export-info")
+async def export_info(project_id: str) -> dict:
+    """export_dataset の出力ディレクトリ (絶対パス) を返す. Inspector で場所を表示する用."""
+    project_dir = await _project_dir(project_id)
+    export = project_dir / "export_dataset"
+    if not export.exists():
+        raise HTTPException(status_code=404, detail="export_dataset not run yet")
+    dataset = export / "dataset"
+    preview = export / "preview"
+    train_configs = export / "train_configs"
+    return {
+        "dir": str(export),
+        "dataset_dir": str(dataset) if dataset.exists() else None,
+        "preview_dir": str(preview) if preview.exists() else None,
+        "train_configs_dir": str(train_configs) if train_configs.exists() else None,
+    }
+
+
+class FisheyeRegion(BaseModel):
+    lens0: dict
+    lens1: dict
+
+
+@router.get("/api/projects/{project_id}/fisheye-region")
+async def get_fisheye_region(project_id: str) -> dict:
+    """魚眼有効領域 (円) の保存値を返す. 未保存なら既定 (中心, r=0.485).
+
+    saved: ユーザが明示的に保存したか (fisheye_region.json が存在するか). 魚眼モードでは
+    有効領域の設定を必須にするため, フロントはこのフラグでゲートする.
+    """
+    project_dir = await _project_dir(project_id)
+    region = fisheye_region.load_region(project_dir)
+    return {**region, "saved": fisheye_region.region_path(project_dir).exists()}
+
+
+@router.put("/api/projects/{project_id}/fisheye-region")
+async def put_fisheye_region(project_id: str, region: FisheyeRegion) -> dict:
+    """魚眼有効領域を保存する. 検証して正規化した内容を返す."""
+    project_dir = await _project_dir(project_id)
+    project_dir.mkdir(parents=True, exist_ok=True)
+    return fisheye_region.save_region(project_dir, region.model_dump())
+
+
+@router.get("/api/projects/{project_id}/source-info")
+async def source_info(project_id: str) -> dict:
+    """ソースを ffprobe して尺/fps/解像度を返す (抽帧の予測フレーム数計算用).
+
+    予測フレーム数 = duration_sec * fps_target (原版プラグインと同じ式) をフロントで計算する.
+    """
+    from fastapi.concurrency import run_in_threadpool
+
+    from ..imaging import ffprobe
+    from ..settings import get_settings
+
+    db = get_db()
+    p = await project_domain.get_project(db, project_id)
+    if p is None:
+        raise HTTPException(status_code=404, detail="project not found")
+    if not p.source_path:
+        raise HTTPException(status_code=400, detail="source not set")
+    src = Path(p.source_path)
+    if not src.exists() or src.is_dir():
+        # 画像フォルダ等は尺が無い.
+        return {"kind": p.source_kind.value if p.source_kind else None, "duration_sec": None}
+
+    probe = await run_in_threadpool(
+        ffprobe.probe, src, ffprobe_bin=get_settings().binaries.ffprobe or None
+    )
+    vs = probe.video_streams[0] if probe.video_streams else None
+    return {
+        "kind": p.source_kind.value if p.source_kind else None,
+        "duration_sec": probe.duration,
+        "fps": vs.fps if vs else None,
+        "width": vs.width if vs else None,
+        "height": vs.height if vs else None,
+        "nb_frames": vs.nb_frames if vs else None,
+    }
+
+
+@router.get("/api/projects/{project_id}/fisheye-mask/{index}")
+async def fisheye_mask(project_id: str, index: int, lens: int = 0) -> FileResponse:
+    """native fisheye の生成マスク (generate_masks/lensN/frame_XXXXXX.png) を返す."""
+    project_dir = await _project_dir(project_id)
+    rel = f"generate_masks/lens{lens}/frame_{index:06d}.png"
+    path = _safe(project_dir, rel)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="mask not found")
+    return FileResponse(path, media_type="image/png")
 
 
 @router.get("/api/projects/{project_id}/reconstruction")

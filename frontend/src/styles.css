@@ -25,50 +25,6 @@
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--fg); }
 
-.app {
-  max-width: 1200px;
-  margin: 0 auto;
-  padding: 24px;
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-}
-
-.app-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: baseline;
-  border-bottom: 1px solid var(--border);
-  padding-bottom: 12px;
-}
-
-.app-header h1 {
-  font-size: 20px;
-  margin: 0;
-  letter-spacing: 0.02em;
-}
-
-.app-header nav {
-  display: flex;
-  gap: 16px;
-}
-
-.app-header nav a {
-  color: var(--fg-mute);
-  text-decoration: none;
-}
-
-.app-header nav a:hover {
-  color: var(--accent);
-}
-
-.card {
-  background: var(--bg-elev);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 16px;
-}
-
 .btn {
   background: var(--accent);
   color: white;
@@ -77,6 +33,8 @@ body { margin: 0; background: var(--bg); color: var(--fg); }
   border-radius: 6px;
   cursor: pointer;
   font-size: 14px;
+  white-space: nowrap;
+  flex: none;
 }
 .btn:disabled { opacity: 0.5; cursor: default; }
 
@@ -96,18 +54,173 @@ body { margin: 0; background: var(--bg); color: var(--fg); }
   width: 100%;
 }
 
-.list-row {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 12px;
-  border-top: 1px solid var(--border);
-}
-
-.list-row:first-child {
-  border-top: none;
-}
-
 .mono { font-family: ui-monospace, 'Menlo', monospace; font-size: 12px; color: var(--fg-mute); }
 
 .error { color: var(--error); }
+
+/* ===== Unity 風 IDE レイアウト ===== */
+.ide {
+  position: fixed; inset: 0;
+  display: grid;
+  grid-template-columns: 1fr;
+  grid-template-rows: 46px 1fr 26px;
+  grid-template-areas:
+    "top"
+    "center"
+    "status";
+  background: var(--bg); color: var(--fg);
+  font-size: 13px;
+}
+.ide-top { grid-area: top; display: flex; align-items: center; gap: 12px;
+  padding: 0 12px; border-bottom: 1px solid var(--border); background: var(--bg-elev); }
+.ide-top h1 { font-size: 15px; margin: 0 8px 0 0; letter-spacing: .02em; }
+.ide-center { grid-area: center; overflow: hidden; position: relative; background: var(--bg); }
+.ide-status { grid-area: status; display: flex; align-items: center; gap: 16px;
+  padding: 0 12px; border-top: 1px solid var(--border); background: var(--bg-elev);
+  font-family: ui-monospace, monospace; font-size: 11px; color: var(--fg-mute);
+  overflow: hidden; min-width: 0; }
+
+/* hierarchy (左) */
+.hier-item { display: flex; align-items: center; gap: 8px; padding: 7px 12px;
+  cursor: pointer; border-left: 3px solid transparent; user-select: none; }
+.hier-item:hover { background: rgba(128,128,128,.08); }
+.hier-item.sel { background: rgba(108,157,255,.14); border-left-color: var(--accent); }
+.hier-badge { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+
+/* 環形ゲージ (下部バー): CPU / RAM / GPU util / VRAM を省スペースで. GPU 名はホバー時のみ. */
+.ring-gauge { display: inline-flex; align-items: center; gap: 5px; }
+.ring-gauge svg { flex: none; display: block; }
+.ring-text { display: inline-flex; flex-direction: column; line-height: 1.15; white-space: nowrap; }
+.ring-text b { font-size: 9px; letter-spacing: .04em; color: var(--fg-mute); font-weight: 600; }
+.ring-text .mono { font-size: 10px; color: var(--fg); }
+.gpu-group { display: inline-flex; align-items: center; gap: 10px; }
+
+/* slider 行 */
+.ctl { margin-bottom: 12px; }
+.ctl label { display: block; font-size: 11px; color: var(--fg-mute); margin-bottom: 4px; }
+.ctl .row { display: flex; align-items: center; gap: 8px; }
+.ctl input[type=range] { flex: 1; }
+.ctl .val { font-family: ui-monospace, monospace; min-width: 60px; text-align: right; }
+.predict { font-size: 11px; color: var(--accent); margin-top: 2px; }
+
+/* file browser modal */
+.modal-back { position: fixed; inset: 0; background: rgba(0,0,0,.5);
+  display: flex; align-items: center; justify-content: center; z-index: 50; }
+.modal { background: var(--bg-elev); border: 1px solid var(--border); border-radius: 8px;
+  width: 640px; max-height: 80vh; display: flex; flex-direction: column; overflow: hidden; }
+.modal-head { padding: 10px 14px; border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; gap: 8px; }
+.modal-list { overflow: auto; padding: 6px; }
+.fs-row { display: flex; align-items: center; gap: 8px; padding: 6px 10px; cursor: pointer; border-radius: 4px; }
+.fs-row:hover { background: rgba(128,128,128,.1); }
+
+/* シーン上部ツールバー (固定, 背景あり) */
+.scene-toolbar { position: absolute; top: 0; left: 0; right: 0;
+  display: flex; align-items: center; gap: 14px; z-index: 5;
+  background: rgba(20,20,20,.9); color: #ddd; padding: 6px 12px;
+  border-bottom: 1px solid rgba(255,255,255,.1);
+  font-size: 11px; font-family: ui-monospace, monospace; }
+.scene-toolbar label { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; }
+.scene-toolbar input[type=range] { width: 70px; }
+/* 視図左下の info オーバレイ */
+.scene-info { position: absolute; bottom: 8px; left: 8px; z-index: 6; color: #bbb;
+  background: rgba(0,0,0,.5); padding: 4px 8px; border-radius: 4px; font-size: 11px;
+  font-family: ui-monospace, monospace; }
+
+/* ===== テーマ手動切替 (data-theme が prefers-color-scheme を上書き) ===== */
+:root[data-theme="light"] {
+  --fg: #1a1a1a; --fg-mute: #6a6a6a; --bg: #fdfdfd; --bg-elev: #ffffff;
+  --border: #dcdcdc; --accent: #3a6df0; --error: #d9534f;
+}
+:root[data-theme="dark"] {
+  --fg: #eaeaea; --fg-mute: #9a9a9a; --bg: #171717; --bg-elev: #212121;
+  --border: #303030; --accent: #6c9dff; --error: #ff7b78;
+}
+
+/* 下部バー: 左=最新ログ, 右=使用率 */
+/* 下部バー: 左=最新ログ, 右=使用率. ログが長くても使用率を押し出さないよう分離. */
+.ide-status .laststatus { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; color: var(--fg-mute); }
+.ide-status .stats-right { display: flex; align-items: center; gap: 12px; flex: 0 0 auto; }
+
+/* 設定ポップオーバー */
+.pop { position: absolute; top: 42px; right: 8px; z-index: 200;
+  background: var(--bg-elev); border: 1px solid var(--border); border-radius: 8px;
+  box-shadow: 0 6px 24px rgba(0,0,0,.35); padding: 12px; width: 240px; }
+
+/* 各コントロールの説明文 */
+.hint { font-size: 10.5px; color: var(--fg-mute); margin-top: 2px; line-height: 1.4; }
+
+/* hierarchy チェックボックス */
+.hier-item input[type=checkbox] { margin: 0; }
+
+/* console フィルタ */
+.con-bar { display: flex; align-items: center; gap: 6px; padding: 4px 6px; flex: none;
+  border-bottom: 1px solid var(--border); }
+.con-chip { font-size: 10px; padding: 2px 7px; border-radius: 10px; cursor: pointer;
+  border: 1px solid var(--border); background: transparent; color: var(--fg-mute); }
+.con-chip.on { background: var(--accent); color: #fff; border-color: var(--accent); }
+.con-search { flex: 1; font-size: 11px; padding: 2px 6px; border: 1px solid var(--border);
+  border-radius: 4px; background: var(--bg); color: var(--fg); }
+
+/* ===== flexlayout (ドッキング) をアプリのテーマに合わせる ===== */
+.flexlayout__layout {
+  --color-text: var(--fg);
+  --color-background: var(--bg);
+  --color-base: var(--bg);
+  --color-1: var(--bg);
+  --color-2: var(--bg-elev);
+  --color-3: var(--bg-elev);
+  --color-4: var(--bg-elev);
+  --color-5: var(--border);
+  --color-6: var(--border);
+  --color-tabset-background: var(--bg-elev);
+  --color-tabset-background-selected: var(--bg-elev);
+  --color-tabset-background-maximized: var(--bg-elev);
+  --color-tab-selected: var(--fg);
+  --color-tab-selected-background: var(--bg);
+  --color-tab-unselected: var(--fg-mute);
+  --color-tab-unselected-background: var(--bg-elev);
+  --color-tab-content: var(--fg);
+  --color-border-background: var(--bg-elev);
+  --color-splitter: var(--border);
+  --color-splitter-hover: var(--accent);
+  --color-splitter-drag: var(--accent);
+  --color-drag-rect-border: var(--accent);
+  --color-drag-rect-background: rgba(108,157,255,.2);
+  --color-drag-rect: var(--fg);
+  --font-size: 12px;
+}
+.flexlayout__tab { background: var(--bg-elev); color: var(--fg); min-width: 0; overflow: hidden; }
+.flexlayout__tabset_tabbar_outer { background: var(--bg-elev); }
+.dock-content { height: 100%; overflow: auto; padding: 8px; min-width: 0; }
+.dock-content.nopad { padding: 0; }
+
+/* L0/L1 等のセグメントトグル (FrameInspector). */
+.seg { display: inline-flex; border: 1px solid var(--border); border-radius: 4px; overflow: hidden; }
+.seg button { border: none; background: transparent; color: var(--fg-mute); font-size: 11px; padding: 2px 8px; cursor: pointer; }
+.seg button.on { background: var(--accent); color: #fff; }
+
+/* タブの視認性: alpha テーマだと選択タブが背景に溶けて見えない. accent 下線 + 明暗差を付ける. */
+.flexlayout__tab_button { border-bottom: 2px solid transparent; }
+.flexlayout__tab_button--selected { background: var(--bg); border-bottom-color: var(--accent); }
+.flexlayout__tab_button--selected .flexlayout__tab_button_content { color: var(--fg); font-weight: 600; }
+.flexlayout__tab_button--unselected .flexlayout__tab_button_content { color: var(--fg-mute); }
+.flexlayout__tab_button:hover { background: rgba(128,128,128,.12); }
+.flexlayout__tab_toolbar_button { color: var(--fg-mute); opacity: .7; }
+.flexlayout__tab_toolbar_button:hover { opacity: 1; }
+
+/* 長文ログ等がパネル幅を押し広げて右カラムを飛ばさないよう, コンソールは必ず折り返す. */
+.con-log { flex: 1; overflow: auto; padding: 6px; font-size: 11px; line-height: 1.5;
+  min-width: 0; word-break: break-word; overflow-wrap: anywhere; }
+.con-log > div { white-space: pre-wrap; }
+
+/* project manager 行の選択強調 + 削除線ステップ */
+.fs-row.sel-row { background: rgba(108,157,255,.14); }
+.hier-item.disabled span { text-decoration: line-through; opacity: .6; }
+.modal { flex-direction: column; }
+
+/* 処理中の点滅バッジ (黄) */
+@keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: .2; } }
+.hier-badge.running { background: #f5c518 !important; animation: blink .8s infinite; }
+.btn.stop { background: var(--error); }

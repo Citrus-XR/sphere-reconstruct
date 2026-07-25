@@ -74,13 +74,39 @@ async def wait_for(handle: WorkerHandle, poll_interval: float = 0.5) -> int:
 
 
 def cancel(handle: WorkerHandle, grace_seconds: float = 5.0) -> None:
-    """SIGTERM -> grace -> SIGKILL のフォールバック."""
+    """SIGTERM -> grace -> SIGKILL のフォールバック. 子孫プロセスも巻き込んで殺す.
+
+    SAM3/Torch/CUDA は worker の下にさらに子プロセス (dataloader, CUDA サービス等) を
+    起こすことがあり, 親だけ terminate すると子が残って GPU/VRAM を掴んだまま「止まらない」.
+    psutil でプロセスツリー全体へ signal を送る.
+    """
+    _signal_tree(handle.pid, kill=False)
     handle.terminate()
     # 同期的に短時間だけ待つ. 呼び出し元は API リクエスト側なので長くしない.
     handle.process.join(timeout=grace_seconds)
     if handle.process.is_alive():
+        _signal_tree(handle.pid, kill=True)
         handle.kill()
         handle.process.join(timeout=1.0)
+
+
+def _signal_tree(pid: int | None, *, kill: bool) -> None:
+    """psutil で pid の子孫プロセスへ terminate/kill を送る (親は呼び出し側が処理する)."""
+    if pid is None:
+        return
+    try:
+        import psutil  # noqa: PLC0415
+    except Exception:
+        return  # psutil が無ければ子は諦める (親の terminate に委ねる).
+    try:
+        parent = psutil.Process(pid)
+    except psutil.Error:
+        return
+    for child in parent.children(recursive=True):
+        try:
+            child.kill() if kill else child.terminate()
+        except psutil.Error:
+            pass
 
 
 def is_windows() -> bool:

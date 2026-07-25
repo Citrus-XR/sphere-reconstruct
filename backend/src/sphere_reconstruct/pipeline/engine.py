@@ -17,6 +17,7 @@ Note: ステージ実装内から `progress.info(...)` が別スレッドから�
 
 from __future__ import annotations
 
+import json
 import shutil
 import sqlite3
 import threading
@@ -26,7 +27,7 @@ from pathlib import Path
 from typing import Any
 
 from ..domain.artifacts import StageManifest, manifest_path
-from ..domain.pipeline_state import STAGE_ORDER, STAGE_TO_STATE, PipelineState, StageName
+from ..domain.pipeline_state import STAGE_ORDER, STAGE_TO_STATE, StageName
 from ..infrastructure.filesystem import atomic_replace_dir
 from .manifest import get as get_stage_cls
 from .stage import ProgressReporter, StageContext
@@ -99,11 +100,19 @@ class Engine:
         stage_run_id = str(uuid.uuid4())
         started_at = _iso_now()
 
-        def emit(level: str, progress: float | None, message: str) -> None:
+        def emit(
+            level: str,
+            progress: float | None,
+            message: str,
+            key: str | None = None,
+            args: dict | None = None,
+            kind: str = "log",
+        ) -> None:
             self._execute(
                 """
-                INSERT INTO event (job_id, project_id, stage, level, message, progress, ts)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO event
+                    (job_id, project_id, stage, level, message, msg_key, msg_args, progress, kind, ts)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     self._job_id,
@@ -111,7 +120,10 @@ class Engine:
                     stage_name.value,
                     level,
                     message,
+                    key,
+                    json.dumps(args, ensure_ascii=False) if args is not None else None,
                     progress,
+                    kind,
                     _iso_now(),
                 ),
             )
@@ -130,7 +142,12 @@ class Engine:
         # 冪等チェック. すでに final があって, 入力/パラメータ/実装バージョンが一致するならスキップ.
         cached = self._cached_matches(stage, ctx)
         if cached is not None:
-            reporter.info(f"stage {stage_name.value} skipped (cache hit)", progress=1.0)
+            reporter.info(
+                f"stage {stage_name.value} skipped (cache hit)",
+                progress=1.0,
+                key="log.cache_hit",
+                args={"stage": stage_name.value},
+            )
             shutil.rmtree(tmp_dir, ignore_errors=True)
             self._mark_state_up_to(stage_name)
             return
@@ -226,9 +243,23 @@ class Engine:
         )
 
     # -- 全ステージ実行 -----------------------------------------------------------
-    def run_all(self, params_by_stage: dict[StageName, dict[str, Any]] | None = None) -> None:
+    def run_all(
+        self,
+        params_by_stage: dict[StageName, dict[str, Any]] | None = None,
+        skip: set[StageName] | None = None,
+    ) -> None:
         params_by_stage = params_by_stage or {}
+        skip = set(skip or set())
+        # pinhole_rig 以外 (native_fisheye / equirectangular) は生フレームを直接 COLMAP に
+        # 渡すため, pinhole 再投影 (reproject_views) は不要でスキップする. SAM3 マスクは
+        # generate_masks が入力形式に応じたレイアウトで作るので, これは従来通り実行する.
+        recon = params_by_stage.get(StageName.RECONSTRUCT, {})
+        mode = recon.get("reconstruction_mode", "native_fisheye")
+        if mode != "pinhole_rig":
+            skip.add(StageName.REPROJECT_VIEWS)
         for st in STAGE_ORDER:
+            if st in skip:
+                continue
             self.run_stage(st, params_by_stage.get(st, {}))
 
     def close(self) -> None:

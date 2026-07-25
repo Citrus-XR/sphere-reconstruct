@@ -166,3 +166,78 @@ def read_trailer_bytes(footer: InsvFooter) -> bytes:
     with footer.path.open("rb") as f:
         f.seek(footer.trailer_offset)
         return f.read(footer.trailer_size)
+
+
+# トレイラ末尾の固定領域: padding(32) + size(4) + version(4) + magic(32) = 72 バイト.
+# record ディレクトリはこの手前に詰まる. 参考: AdrianEddy/telemetry-parser insta360.
+_RECORDS_TRAILER = 72
+_DESC_SIZE = 6  # 各 record 末尾の [format:u8][id:u8][size:u32 LE].
+
+
+def iter_trailer_records(footer: InsvFooter):
+    """inst box 末尾の record 群を (id, format, data) で列挙する.
+
+    レイアウト (telemetry-parser 準拠): ファイル末尾から
+      [72B トレイラ][desc0][data0][desc1][data1]... (後方に詰まる)
+    各 record は物理的に `[data][format:u8][id:u8][size:u32 LE]`. 末尾側先頭に
+    Offsets(id=0) 索引があればそれで各 record の (offset,size) を引き, 無ければ線形に
+    後方走査する. record データ領域は [file_size - extra_size, file_size].
+    """
+    extra_size = footer.reported_inst_data_size
+    file_size = footer.file_size
+    extra_start = file_size - extra_size
+    if extra_start < 0 or extra_size <= _RECORDS_TRAILER:
+        return
+    with footer.path.open("rb") as f:
+        f.seek(extra_start)
+        tail = f.read(extra_size)
+    n = len(tail)
+
+    def _desc(offset_from_end: int):
+        pos = n - offset_from_end
+        if pos < 0 or pos + _DESC_SIZE > n:
+            return None
+        fmt = tail[pos]
+        rid = tail[pos + 1]
+        size = int.from_bytes(tail[pos + 2 : pos + 6], "little")
+        return pos, fmt, rid, size
+
+    # 1) Offsets 索引モード: 末尾側先頭 record が id==0 なら (id -> offset,size) を引く.
+    first = _desc(_RECORDS_TRAILER + _DESC_SIZE)
+    if first is not None and first[2] == 0:
+        pos, _fmt, _rid, size = first
+        data_start = pos - size
+        if data_start >= 0:
+            index_data = tail[data_start:pos]
+            entries: dict[int, tuple[int, int, int]] = {}
+            off = 0
+            while off + 10 <= len(index_data):
+                eid = index_data[off]
+                efmt = index_data[off + 1]
+                esize = int.from_bytes(index_data[off + 2 : off + 6], "little")
+                eoff = int.from_bytes(index_data[off + 6 : off + 10], "little")
+                off += 10
+                if eid > 0:
+                    entries[eid] = (eoff, esize, efmt)
+            if entries:
+                for rid, (eoff, esize, efmt) in entries.items():
+                    if 0 <= eoff and eoff + esize <= n:
+                        yield rid, efmt, tail[eoff : eoff + esize]
+                return
+
+    # 2) 線形後方走査 (索引 record が無い / 壊れている場合).
+    offset = _RECORDS_TRAILER + _DESC_SIZE
+    guard = 0
+    while offset < extra_size and guard < 1_000_000:
+        guard += 1
+        d = _desc(offset)
+        if d is None:
+            break
+        pos, fmt, rid, size = d
+        data_start = pos - size
+        if data_start < 0:
+            break
+        yield rid, fmt, tail[data_start:pos]
+        if size == 0:
+            break
+        offset += size + _DESC_SIZE

@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import threading
 from collections.abc import Callable, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 
@@ -30,6 +31,24 @@ def _resolve_bin(explicit: str | None) -> str:
 _FRAME_RE = re.compile(rb"frame=\s*(\d+)")
 
 
+def _extract_one(
+    binary: str, src: Path, stream_index: int, ts: float, out_path: Path, jpeg_quality: int
+) -> None:
+    """1 timestamp 分を書き出す. 入力側 fast seek (`-ss` を `-i` の前) で高速化."""
+    args = [
+        binary, "-nostdin", "-hide_banner", "-v", "error",
+        "-ss", f"{ts:.6f}", "-i", str(src),
+        "-map", f"0:v:{stream_index}", "-frames:v", "1",
+        "-q:v", str(jpeg_quality), "-y", str(out_path),
+    ]
+    proc = subprocess.run(args, capture_output=True)
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"ffmpeg failed at ts={ts:.3f}s stream={stream_index}: "
+            f"{proc.stderr.decode('utf-8', 'replace')[:400]}"
+        )
+
+
 def extract_frames_by_timestamp(
     src: Path,
     *,
@@ -40,49 +59,43 @@ def extract_frames_by_timestamp(
     jpeg_quality: int = 3,   # ffmpeg -q:v (2 が最高, 31 が最低, デフォルト 3)
     ffmpeg_bin: str | None = None,
     progress: Callable[[int, int], None] | None = None,
+    workers: int = 1,
 ) -> list[Path]:
     """指定 stream から, 指定 timestamp (秒) の直近フレームを 1 枚ずつ書き出す.
 
-    実装方針: 各 timestamp 毎に `-ss ... -i src -frames:v 1` で呼ぶ. INSV では
-    seek 精度確保のため入力側 fast seek + 出力側 accurate seek のコンボを使う.
-    (シーケンシャル抽出よりは遅いが実装が単純. 後で最適化する.)
+    各 timestamp 毎に `-ss ... -i src -frames:v 1` で呼ぶ. INSV では seek 精度確保のため
+    入力側 fast seek を使う. workers>1 で ffmpeg を並列に走らせる — 8K HEVC を大量に抜く場合,
+    プロセス起動 + seek + 単一フレームデコードが直列だと数分かかるため, 有界プールで短縮する.
 
-    Returns: 実際に書けた出力ファイルパスのリスト.
+    Returns: 出力ファイルパスのリスト (入力 timestamp と同じ順序).
     """
     binary = _resolve_bin(ffmpeg_bin)
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_paths: list[Path] = []
     total = len(timestamps_sec)
-    for i, ts in enumerate(timestamps_sec):
-        out_path = out_dir / f"{out_prefix}_{i:06d}.jpg"
-        args = [
-            binary,
-            "-nostdin",
-            "-hide_banner",
-            "-v",
-            "error",
-            "-ss",
-            f"{ts:.6f}",
-            "-i",
-            str(src),
-            "-map",
-            f"0:v:{stream_index}",
-            "-frames:v",
-            "1",
-            "-q:v",
-            str(jpeg_quality),
-            "-y",
-            str(out_path),
-        ]
-        proc = subprocess.run(args, capture_output=True)
-        if proc.returncode != 0:
-            raise RuntimeError(
-                f"ffmpeg failed at ts={ts:.3f}s stream={stream_index}: "
-                f"{proc.stderr.decode('utf-8', 'replace')[:400]}"
-            )
-        out_paths.append(out_path)
+    out_paths = [out_dir / f"{out_prefix}_{i:06d}.jpg" for i in range(total)]
+
+    if workers <= 1 or total <= 1:
+        for i, ts in enumerate(timestamps_sec):
+            _extract_one(binary, src, stream_index, ts, out_paths[i], jpeg_quality)
+            if progress is not None:
+                progress(i + 1, total)
+        return out_paths
+
+    done = 0
+    lock = threading.Lock()
+
+    def _task(i: int, ts: float) -> None:
+        nonlocal done
+        _extract_one(binary, src, stream_index, ts, out_paths[i], jpeg_quality)
         if progress is not None:
-            progress(i + 1, total)
+            with lock:
+                done += 1
+                progress(done, total)
+
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futures = [ex.submit(_task, i, ts) for i, ts in enumerate(timestamps_sec)]
+        for f in futures:
+            f.result()  # 例外はここで再送出 (最初の失敗で伝播).
     return out_paths
 
 

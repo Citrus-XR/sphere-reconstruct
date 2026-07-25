@@ -20,6 +20,8 @@ export interface Project {
   source_kind: SourceKind | null
   source_path: string | null
   state: PipelineState
+  // 工程に保存された UI 設定 (step パラメータ / モード / 無効化). リロードで復元する.
+  ui_state: { params?: Record<string, unknown>; reconMode?: string; disabled?: string[] } | null
 }
 
 export interface Job {
@@ -42,7 +44,13 @@ export interface EventEnvelope {
   stage: string | null
   level: 'debug' | 'info' | 'warn' | 'error'
   message: string
+  // i18n キー + 補間引数. バックエンドが安定キーを付けた行のみ非 null. message は
+  // 未 key 行 / 翻訳欠落時のフォールバック. msg_args はここで JSON 文字列からパース済み.
+  msg_key: string | null
+  msg_args: Record<string, unknown> | null
   progress: number | null
+  // 'log' = Console 表示行 / 'progress' = 進捗のみの一時イベント (環形インジケータ駆動, Console 非表示).
+  kind: 'log' | 'progress'
   ts: string
 }
 
@@ -113,11 +121,11 @@ export const api = {
       headers: jsonHeaders,
       body: JSON.stringify({ kind, path }),
     }),
-  runPipeline: (id: string, paramsByStage?: Record<string, Record<string, unknown>>) =>
+  runPipeline: (id: string, paramsByStage?: Record<string, Record<string, unknown>>, skip?: string[]) =>
     req<{ job_id: string }>(`/api/projects/${id}/run`, {
       method: 'POST',
       headers: jsonHeaders,
-      body: JSON.stringify({ params_by_stage: paramsByStage ?? null }),
+      body: JSON.stringify({ params_by_stage: paramsByStage ?? null, skip: skip ?? null }),
     }),
   rerunStage: (id: string, stage: string, paramsByStage?: Record<string, Record<string, unknown>>) =>
     req<{ job_id: string }>(`/api/projects/${id}/rerun/${stage}`, {
@@ -131,8 +139,111 @@ export const api = {
   getSettings: () => req<Record<string, unknown>>('/api/settings'),
   getReconstruction: (id: string) =>
     req<ReconstructionData>(`/api/projects/${id}/reconstruction`),
-  getMasks: (id: string) => req<MasksManifest>(`/api/projects/${id}/masks`),
   getFrames: (id: string) => req<FramesManifest>(`/api/projects/${id}/frames`),
+  getMasks: (id: string) => req<MasksManifest>(`/api/projects/${id}/masks`),
+  getExportInfo: (id: string) => req<ExportInfo>(`/api/projects/${id}/export-info`),
+  putUiState: (id: string, ui: Record<string, unknown>) =>
+    req<Project>(`/api/projects/${id}/ui-state`, {
+      method: 'PUT', headers: jsonHeaders, body: JSON.stringify({ ui }),
+    }),
+  getFisheyeRegion: (id: string) =>
+    req<FisheyeRegion>(`/api/projects/${id}/fisheye-region`),
+  putFisheyeRegion: (id: string, region: FisheyeRegion) =>
+    req<FisheyeRegion>(`/api/projects/${id}/fisheye-region`, {
+      method: 'PUT',
+      headers: jsonHeaders,
+      body: JSON.stringify(region),
+    }),
+  // system / filesystem / stages.
+  getSystemStats: () => req<SystemStats>('/api/system/stats'),
+  getFsRoots: () => req<{ roots: string[] }>('/api/fs/roots'),
+  getFsDrives: () => req<{ drives: string[] }>('/api/fs/drives'),
+  browseFs: (path: string) =>
+    req<FsListing>(`/api/fs/browse?path=${encodeURIComponent(path)}`),
+  getSourceInfo: (id: string) => req<SourceInfo>(`/api/projects/${id}/source-info`),
+  getStages: (id: string) => req<StagesStatus>(`/api/projects/${id}/stages`),
+  clearStage: (id: string, stage: string) =>
+    req<{ cleared: string; state: string }>(`/api/projects/${id}/stages/${stage}/clear`, {
+      method: 'POST',
+    }),
+  clearOutputs: (id: string) =>
+    req<{ cleared: string; state: string }>(`/api/projects/${id}/clear-outputs`, { method: 'POST' }),
+  deleteProject: (id: string) =>
+    req<{ deleted: string }>(`/api/projects/${id}`, { method: 'DELETE' }),
+}
+
+export interface SystemGpu {
+  name: string
+  util_percent: number | null
+  mem_used_mb: number | null
+  mem_total_mb: number | null
+}
+export interface SystemStats {
+  cpu_percent: number | null
+  ram: { percent: number; used_mb: number; total_mb: number } | null
+  gpus: SystemGpu[]
+}
+export interface FsEntry {
+  name: string
+  path: string
+  is_dir: boolean
+  size?: number
+  ext?: string
+}
+export interface FsListing {
+  path: string
+  parent: string | null
+  dirs: FsEntry[]
+  files: FsEntry[]
+}
+export interface SourceInfo {
+  kind: string | null
+  duration_sec: number | null
+  fps?: number | null
+  width?: number | null
+  height?: number | null
+  nb_frames?: number | null
+}
+export interface StageStatus {
+  stage: string
+  has_output: boolean
+  status: string | null // null=未実行, 'succeeded'|'failed'|'running'|'cancelled'
+  error_text: string | null
+  job_id: string | null
+  started_at: string | null
+  finished_at: string | null
+  params: Record<string, unknown> | null
+}
+export interface StagesStatus {
+  project_id: string
+  state: PipelineState
+  stages: StageStatus[]
+}
+
+// 魚眼の円形有効領域 (正規化 cx/cy/r, 画像幅基準). lens0=front, lens1=back.
+export interface LensCircle {
+  cx: number
+  cy: number
+  r: number
+}
+export interface FisheyeRegion {
+  lens0: LensCircle
+  lens1: LensCircle
+  saved?: boolean
+}
+
+export interface FrameSelection {
+  mode: string
+  selected: number
+  candidates?: number
+  fallback?: boolean
+  reasons?: { blur: number; exposure: number; few_features: number }
+}
+
+export interface FrameInfo {
+  index: number
+  timestamp_sec: number | null
+  score?: { sharpness: number; features?: number } | null
 }
 
 export interface FramesManifest {
@@ -141,34 +252,65 @@ export interface FramesManifest {
   width: number | null
   height: number | null
   fps: number | null
-  frames: { index: number; timestamp_sec: number | null }[]
+  selection: FrameSelection | null
+  frames: FrameInfo[]
+}
+
+// generate_masks の manifest. kind により frame ごとの構造が異なる (fisheye は lenses, pinhole/erp は views).
+export interface MaskLensRecord {
+  lens: number
+  path: string
+  coverage: number
+  coverage_warning?: boolean
+}
+export interface MaskFrameRecord {
+  index: number
+  lenses?: MaskLensRecord[]
+}
+export interface MasksManifest {
+  kind: string
+  prompt?: string[]
+  frames: MaskFrameRecord[]
+}
+
+// export_dataset の出力ディレクトリ (絶対パス).
+export interface ExportInfo {
+  dir: string
+  dataset_dir: string | null
+  preview_dir: string | null
+  train_configs_dir: string | null
 }
 
 // 抽出フレーム (fisheye) の URL.
 export const frameImageUrl = (id: string, index: number, lens: number) =>
   `/api/projects/${id}/frames/${index}/image?lens=${lens}`
+// native fisheye の生成マスク PNG の URL.
+export const fisheyeMaskUrl = (id: string, index: number, lens: number) =>
+  `/api/projects/${id}/fisheye-mask/${index}?lens=${lens}`
 
-export interface MaskViewRecord {
-  view: string
-  lens: number
-  path: string
-  coverage: number
-  detections: Record<string, number>
-  coverage_warning?: boolean
+// COLMAP 画像名 "front/frame_000123.jpg" を {view, lens, index} に分解する.
+export const parseImageName = (name: string): { view: string; lens: number; index: number } | null => {
+  const m = name.match(/^(front|back)\/frame_(\d+)\.jpg$/)
+  if (!m) return null
+  return { view: m[1], lens: m[1] === 'front' ? 0 : 1, index: Number(m[2]) }
 }
 
-export interface MasksManifest {
-  kind: string
-  prompt: string[]
-  max_inference_size: number
-  frames: { index: number; views: MaskViewRecord[] }[]
+// 再構成の画像名から frame index を抽出し, frame ごとの登録情報 (使われた画像数 / 3D 点数) を集計する.
+// 抽出済みだが Map に無い frame = 再構成で未登録 (失敗).
+export const frameReconMap = (recon: ReconstructionData | undefined): Map<number, { numPoints: number; images: number }> => {
+  const m = new Map<number, { numPoints: number; images: number }>()
+  if (!recon) return m
+  for (const img of recon.images) {
+    const mt = img.name.match(/frame_(\d+)/)
+    if (!mt) continue
+    const idx = Number(mt[1])
+    const cur = m.get(idx) ?? { numPoints: 0, images: 0 }
+    cur.numPoints += img.num_points
+    cur.images += 1
+    m.set(idx, cur)
+  }
+  return m
 }
-
-// pinhole 画像 / mask の URL を組み立てる.
-export const pinholeUrl = (id: string, index: number, view: string, lens: number) =>
-  `/api/projects/${id}/pinhole/${index}/${view}?lens=${lens}`
-export const maskUrl = (id: string, index: number, view: string, lens: number) =>
-  `/api/projects/${id}/pinhole/${index}/${view}?lens=${lens}&mask=true`
 
 // points.bin をパースする. フォーマット (backend/colmap/web_preview.py と一致):
 //   header: u32 count, u32 stride(=20)
@@ -199,21 +341,64 @@ export const fetchPoints = async (projectId: string): Promise<ParsedPoints> => {
 export const openEventStream = (
   opts: { jobId?: string; projectId?: string; since?: number },
   onEvent: (e: EventEnvelope) => void,
-): WebSocket => {
-  const params = new URLSearchParams()
-  if (opts.since !== undefined) params.set('since', String(opts.since))
-  if (opts.jobId) params.set('job_id', opts.jobId)
-  if (opts.projectId) params.set('project_id', opts.projectId)
+  onStatus?: (status: 'disconnected' | 'reconnected') => void,
+): { close: () => void } => {
+  // バックエンド再起動 / 一時的な切断でも進捗が止まらないよう自動再接続する.
+  // 受信した最大 id を覚え, 再接続時に since=lastId で続きから取り (取りこぼし / 重複なし).
+  // 初回 since<0 は「今から」tail (過去ログを Console に流さない).
+  let ws: WebSocket | null = null
+  let closed = false
+  let lastId = opts.since ?? -1
+  let everOpen = false
+  let downNotified = false
+  let retry: ReturnType<typeof setTimeout> | undefined
 
-  const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-  const url = `${proto}//${window.location.host}/api/events?${params.toString()}`
-  const ws = new WebSocket(url)
-  ws.onmessage = ev => {
-    try {
-      onEvent(JSON.parse(ev.data) as EventEnvelope)
-    } catch {
-      // 壊れたメッセージは無視.
+  const connect = () => {
+    if (closed) return
+    const params = new URLSearchParams()
+    params.set('since', String(lastId))
+    if (opts.jobId) params.set('job_id', opts.jobId)
+    if (opts.projectId) params.set('project_id', opts.projectId)
+    const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+    ws = new WebSocket(`${proto}//${window.location.host}/api/events?${params.toString()}`)
+    ws.onopen = () => {
+      if (everOpen && downNotified) onStatus?.('reconnected')
+      everOpen = true
+      downNotified = false
     }
+    ws.onmessage = ev => {
+      try {
+        const raw = JSON.parse(ev.data) as Omit<EventEnvelope, 'msg_args'> & { msg_args: string | null }
+        if (typeof raw.id === 'number' && raw.id > lastId) lastId = raw.id
+        // バックエンドは msg_args を JSON 文字列で送るので, ここでオブジェクトへパースする.
+        let args: Record<string, unknown> | null = null
+        if (raw.msg_args) {
+          try {
+            args = JSON.parse(raw.msg_args) as Record<string, unknown>
+          } catch {
+            args = null
+          }
+        }
+        onEvent({ ...raw, msg_args: args })
+      } catch {
+        // 壊れたメッセージは無視.
+      }
+    }
+    ws.onclose = () => {
+      if (closed) return
+      if (everOpen && !downNotified) { onStatus?.('disconnected'); downNotified = true }
+      clearTimeout(retry)
+      retry = setTimeout(connect, 1000)
+    }
+    ws.onerror = () => { try { ws?.close() } catch { /* onclose が再接続を張る */ } }
   }
-  return ws
+
+  connect()
+  return {
+    close: () => {
+      closed = true
+      clearTimeout(retry)
+      try { ws?.close() } catch { /* noop */ }
+    },
+  }
 }

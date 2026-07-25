@@ -16,7 +16,8 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from .api import events, jobs, previews, projects, settings as settings_api
+from .api import events, jobs, previews, projects, stages, system
+from .api import settings as settings_api
 from .infrastructure.database import close_db, init_db
 from .job_supervisor import init_supervisor, shutdown_supervisor
 from .settings import get_settings, workspace_root
@@ -77,6 +78,8 @@ app.include_router(jobs.router)
 app.include_router(events.router)
 app.include_router(settings_api.router)
 app.include_router(previews.router)
+app.include_router(stages.router)
+app.include_router(system.router)
 
 
 @app.get("/api/health")

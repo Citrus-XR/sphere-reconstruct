@@ -28,18 +28,38 @@ class ProgressReporter:
     """Worker 内から Job / stage の進捗を出すためのコールバック.
 
     実体は Worker entrypoint で差し込む (SQLite の event テーブルへ書き込む実装).
+
+    message は常にレンダリング済みのフォールバック文字列. key/args を渡すと i18n キー +
+    補間引数として一緒に保存し, フロントが表示言語で翻訳する (message は未 key の呼び出しや
+    翻訳欠落時のフォールバックとして残す).
+
+    info/warn/error は「ログ行」(kind=log) として Console に出す. 進捗の細かい更新は tick()
+    (kind=progress) を使う — これは環形インジケータの駆動のみで, Console には出さない (spam 防止).
+    開始 / 完了 / 失敗など残すべき区切りは info/warn/error を使うこと.
     """
 
-    _emit: Any  # Callable[[str, float | None, str], None]
+    _emit: Any  # Callable[[str, float|None, str, str|None, dict|None, str], None]
 
-    def info(self, message: str, progress: float | None = None) -> None:
-        self._emit("info", progress, message)
+    def info(
+        self, message: str, progress: float | None = None, *, key: str | None = None, args: dict | None = None
+    ) -> None:
+        self._emit("info", progress, message, key, args, "log")
 
-    def warn(self, message: str, progress: float | None = None) -> None:
-        self._emit("warn", progress, message)
+    def warn(
+        self, message: str, progress: float | None = None, *, key: str | None = None, args: dict | None = None
+    ) -> None:
+        self._emit("warn", progress, message, key, args, "log")
 
-    def error(self, message: str, progress: float | None = None) -> None:
-        self._emit("error", progress, message)
+    def error(
+        self, message: str, progress: float | None = None, *, key: str | None = None, args: dict | None = None
+    ) -> None:
+        self._emit("error", progress, message, key, args, "log")
+
+    def tick(
+        self, progress: float | None = None, *, message: str = "", key: str | None = None, args: dict | None = None
+    ) -> None:
+        """進捗のみの一時イベント (kind=progress). Console には出さず, 環形インジケータだけ更新する."""
+        self._emit("info", progress, message, key, args, "progress")
 
 
 @dataclass

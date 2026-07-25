@@ -112,3 +112,22 @@ async def update_state(db: Database, project_id: str, state: PipelineState) -> N
             "UPDATE project SET state=?, updated_at=? WHERE id=?",
             (state.value, _now_iso(), project_id),
         )
+
+
+async def set_ui_state(db: Database, project_id: str, ui: dict) -> None:
+    """工程ごとの UI 設定 (各 step のパラメータ / モード / 無効化) を metadata に永続化する.
+
+    リロードで消えないよう metadata_json["ui"] に丸ごと保存する. 中身の形はフロント任せ.
+    """
+    import json
+
+    p = await get_project(db, project_id)
+    if p is None:
+        raise LookupError(f"project {project_id} not found")
+    meta = dict(p.metadata)
+    meta["ui"] = ui
+    async with db.transaction() as conn:
+        await conn.execute(
+            "UPDATE project SET metadata_json=?, updated_at=? WHERE id=?",
+            (json.dumps(meta, ensure_ascii=False), _now_iso(), project_id),
+        )

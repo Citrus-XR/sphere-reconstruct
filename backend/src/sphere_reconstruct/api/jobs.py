@@ -44,6 +44,8 @@ class RunBody(BaseModel):
     # 例: {"reproject_views": {"size": 1024, "max_frames": 10},
     #      "generate_masks": {"prompt": "person,tripod"}}
     params_by_stage: dict[str, dict] | None = None
+    # 全工程実行時にスキップするステージ名 (UI のチェックボックスで無効化した工程).
+    skip: list[str] | None = None
 
 
 @router.post("/api/projects/{project_id}/run", response_model=JobStarted)
@@ -57,6 +59,7 @@ async def run_pipeline(project_id: str, body: RunBody | None = None) -> JobStart
         project_id=project_id,
         stage=None,
         params_by_stage=body.params_by_stage if body else None,
+        skip=body.skip if body else None,
     )
     return JobStarted(job_id=job_id)
 
