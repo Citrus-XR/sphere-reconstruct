@@ -1,43 +1,45 @@
-"""重力対齐: IMU 重力方向 + 再構成のカメラ姿勢から, 点群を「上=重力の逆」に揃える回転を求める.
+"""露光時刻と同期した INSV 加速度から sparse model の物理的な上方向を求める.
 
-背景: COLMAP の再構成はゲージ自由度により全体の回転が任意 (最初に登録された画像の姿勢に
-world 座標が固定される) ため, 毎回「上」がバラバラになる. INSV の IMU 加速度計は重力方向を
-持つので, それを使って 1 つの大域回転を掛け, 点群を起こす.
+カメラが動く映像では device 座標の加速度を全期間平均してはいけない. 各 front image の
+timestamp 周辺だけを robust 平均し, COLMAP の world->camera pose で world へ戻す. encoded
+fisheye image と IMU の軸対応は右手系の signed axis permutation 24 通りから, 全 frame の
+角度残差が最小のものを選ぶ. 連続回転を自由推定すると world up と mounting が共に未知で
+非一意になるため行わない.
 
-原理:
-- inspect_source が IMU 加速度計の平均方向 g_imu (IMU 座標, 単位) を出す (静止時は上向き).
-- IMU はカメラ (native rig の ref = front センサ) に固定. mounting = R_cam_from_imu.
-- 各 front 画像の world->cam 回転 R_wc から, world での上方向を
-      up_world_i = R_wc^T @ (mounting @ g_imu)
-  で得る. カメラが概ね直立 (yaw 主体) なら up_world_i は全画像でほぼ一致する.
-- それらを平均して up_world を求め, これを viewer の上 (+Y) に写す回転 R_align を作る.
-
-mounting (IMU->camera 取付回転) は機種/個体で未校正のため, 既定は単位行列 (IMU 軸 ≒ front
-カメラ軸と仮定). ずれる場合は 1 度の実測で定数を差し替える. 一致度 (consistency) が悪い
-(=モデル or 重力が信用できない) ときは対齐しない.
+aligned dataset は LichtFeld/COLMAP 規約の -Y up. Web preview だけは表示時に
+diag(1,-1,-1) を掛けて Three.js の +Y up へ変換する.
 """
 
 from __future__ import annotations
+
+import itertools
+import re
 
 import numpy as np
 
 from .model import Reconstruction
 
-# viewer (three.js) の上方向. 重力の逆 (up) をここに写す.
-TARGET_UP = np.array([0.0, 1.0, 0.0])
+# COLMAP/LichtFeld dataset 座標では -Y が物理的な上. LF viewer は dataset world を
+# diag(1,-1,-1) で表示座標へ移し, -Y を画面上の +Y にする.
+TARGET_UP = np.array([0.0, -1.0, 0.0])
+DATASET_TO_VIEWER = np.diag([1.0, -1.0, -1.0])
 
-# IMU -> front camera の取付回転 (未校正; 既定は単位). 実測後にここを差し替える.
+# 旧 API 用. 時刻同期版は撮影ごとに mounting を robust 推定する.
 MOUNTING_R = np.eye(3)
+
+_FRONT_FRAME = re.compile(r"(?:^|/)(?:front|front_lens0)/frame_(\d+)\.[^.]+$")
 
 
 def _quat_to_R(qvec) -> np.ndarray:
     """world->cam クォータニオン (qw,qx,qy,qz) -> 回転行列."""
     qw, qx, qy, qz = qvec
-    return np.array([
-        [1 - 2 * (qy * qy + qz * qz), 2 * (qx * qy - qz * qw), 2 * (qx * qz + qy * qw)],
-        [2 * (qx * qy + qz * qw), 1 - 2 * (qx * qx + qz * qz), 2 * (qy * qz - qx * qw)],
-        [2 * (qx * qz - qy * qw), 2 * (qy * qz + qx * qw), 1 - 2 * (qx * qx + qy * qy)],
-    ])
+    return np.array(
+        [
+            [1 - 2 * (qy * qy + qz * qz), 2 * (qx * qy - qz * qw), 2 * (qx * qz + qy * qw)],
+            [2 * (qx * qy + qz * qw), 1 - 2 * (qx * qx + qz * qz), 2 * (qy * qz - qx * qw)],
+            [2 * (qx * qz - qy * qw), 2 * (qy * qz + qx * qw), 1 - 2 * (qx * qx + qy * qy)],
+        ]
+    )
 
 
 def _R_to_quat(R: np.ndarray) -> tuple[float, float, float, float]:
@@ -102,7 +104,10 @@ def _is_front(name: str) -> bool:
 
 
 def compute_align_rotation(
-    recon: Reconstruction, gravity_imu, *, mounting: np.ndarray | None = None,
+    recon: Reconstruction,
+    gravity_imu,
+    *,
+    mounting: np.ndarray | None = None,
 ) -> tuple[np.ndarray | None, dict]:
     """重力対齐の大域回転 R_align (3x3) と診断情報を返す.
 
@@ -146,11 +151,214 @@ def compute_align_rotation(
     return R_align, info
 
 
-def apply_alignment(recon: Reconstruction, R_align: np.ndarray) -> None:
-    """R_align を再構成に in-place 適用する. 点 p'=R p, カメラ R_wc'=R_wc R^T, t 不変.
+def compute_timed_align_rotation(
+    recon: Reconstruction,
+    frame_times: dict[int, float],
+    imu_samples,
+    *,
+    imu_timestamps_sec: list[float] | None = None,
+    offset_min: float = -0.5,
+    offset_max: float = 0.5,
+    offset_step: float = 0.02,
+    window_seconds: float = 0.025,
+) -> tuple[np.ndarray | None, dict]:
+    """時刻同期した加速度列から world up と IMU mounting を同時推定する.
 
-    web_preview 用の軽量変換 (COLMAP バイナリは書き換えない). qvec/tvec/xyz を更新する.
+    カメラが動く素材では device 座標の重力を全期間平均できない. 各露光時刻の加速度を使い,
+    video/IMU の小さな開始時刻差も grid search し, signed axis mounting と world up の
+    robust consensus を評価する.
     """
+    if len(imu_samples) < 2:
+        return None, {"reason": "no_timed_imu"}
+    pairs = []
+    for image in recon.images.values():
+        match = _FRONT_FRAME.search(image.name.replace("\\", "/"))
+        if match is None:
+            continue
+        frame_index = int(match.group(1))
+        if frame_index in frame_times:
+            pairs.append((image, frame_times[frame_index]))
+    if len(pairs) < 4:
+        return None, {"reason": "too_few_timed_front_images", "count": len(pairs)}
+
+    timestamps = np.asarray(
+        imu_timestamps_sec
+        if imu_timestamps_sec is not None
+        else [(sample.timestamp_us - imu_samples[0].timestamp_us) / 1_000_000.0 for sample in imu_samples]
+    )
+    raw_acceleration = np.asarray([sample.accel_xyz for sample in imu_samples], dtype=float)
+    rotations = np.asarray([_quat_to_R(image.qvec) for image, _time in pairs])
+    exposure_times = np.asarray([time for _image, time in pairs])
+
+    offsets = np.arange(offset_min, offset_max + offset_step * 0.5, offset_step)
+    estimates = [
+        _estimate_at_offset(
+            timestamps,
+            raw_acceleration,
+            rotations,
+            exposure_times,
+            float(offset),
+            window_seconds,
+        )
+        for offset in offsets
+    ]
+    estimates = [estimate for estimate in estimates if estimate is not None]
+    if not estimates:
+        return None, {"reason": "imu_time_range_mismatch"}
+    best = min(estimates, key=lambda estimate: estimate["score"])
+
+    fine_step = offset_step / 4.0
+    fine_offsets = np.arange(
+        best["time_offset_sec"] - offset_step,
+        best["time_offset_sec"] + offset_step + fine_step * 0.5,
+        fine_step,
+    )
+    fine = [
+        _estimate_at_offset(
+            timestamps,
+            raw_acceleration,
+            rotations,
+            exposure_times,
+            float(offset),
+            window_seconds,
+        )
+        for offset in fine_offsets
+    ]
+    fine = [estimate for estimate in fine if estimate is not None]
+    if fine:
+        best = min(fine, key=lambda estimate: estimate["score"])
+
+    required_inliers = max(4, round(len(pairs) * 0.6))
+    if best["inlier_count"] < required_inliers:
+        return None, {**_public_estimate(best, len(pairs)), "reason": "too_few_gravity_inliers"}
+    if best["spread_deg"] > 10.0 or best["p90_deg"] > 20.0:
+        return None, {**_public_estimate(best, len(pairs)), "reason": "gravity_residual_too_large"}
+    return _rotation_aligning(best["up_world"], TARGET_UP), _public_estimate(best, len(pairs))
+
+
+def reference_trajectory_diameter(recon: Reconstruction) -> float:
+    centers = [
+        image.camera_center
+        for image in recon.images.values()
+        if _FRONT_FRAME.search(image.name.replace("\\", "/"))
+    ]
+    if len(centers) < 2:
+        centers = [image.camera_center for image in recon.images.values()]
+    if len(centers) < 2:
+        return 0.0
+    points = np.asarray(centers, dtype=float)
+    return float(np.linalg.norm(np.ptp(points, axis=0)))
+
+
+def _estimate_at_offset(
+    timestamps: np.ndarray,
+    accelerations: np.ndarray,
+    rotations: np.ndarray,
+    exposure_times: np.ndarray,
+    offset: float,
+    window: float,
+):
+    gravities = []
+    selected_rotations = []
+    for rotation, exposure in zip(rotations, exposure_times, strict=True):
+        selection = np.abs(timestamps - (exposure + offset)) <= window
+        if not np.any(selection):
+            continue
+        gravity = np.median(accelerations[selection], axis=0)
+        norm = np.linalg.norm(gravity)
+        if norm <= 1e-9:
+            continue
+        gravities.append(gravity / norm)
+        selected_rotations.append(rotation)
+    if len(gravities) < 4:
+        return None
+    gravities = np.asarray(gravities)
+    selected_rotations = np.asarray(selected_rotations)
+
+    candidates = [
+        _mounting_consensus(gravities, selected_rotations, mounting)
+        for mounting in _right_handed_axis_rotations()
+    ]
+    best = min(candidates, key=lambda candidate: candidate["score"])
+    missing_fraction = 1.0 - len(gravities) / len(rotations)
+    return {
+        **best,
+        "time_offset_sec": offset,
+        "sampled_frames": len(gravities),
+        "score": best["score"] + 10.0 * missing_fraction,
+    }
+
+
+def _mounting_consensus(
+    gravities: np.ndarray,
+    rotations: np.ndarray,
+    mounting: np.ndarray,
+) -> dict:
+    world_ups = np.asarray(
+        [rotation.T @ mounting @ gravity for gravity, rotation in zip(gravities, rotations, strict=True)]
+    )
+    world_ups /= np.linalg.norm(world_ups, axis=1)[:, None]
+    inliers = np.ones(len(world_ups), dtype=bool)
+    for _ in range(10):
+        up_world = np.mean(world_ups[inliers], axis=0)
+        up_world /= np.linalg.norm(up_world)
+        angles = _angular_errors(world_ups, up_world)
+        median = float(np.median(angles))
+        mad = float(np.median(np.abs(angles - median)))
+        next_inliers = angles <= max(8.0, median + 2.5 * mad)
+        if np.array_equal(next_inliers, inliers):
+            break
+        if np.count_nonzero(next_inliers) < 4:
+            break
+        inliers = next_inliers
+
+    up_world = np.mean(world_ups[inliers], axis=0)
+    up_world /= np.linalg.norm(up_world)
+    angles = _angular_errors(world_ups, up_world)
+    spread = float(np.median(angles[inliers]))
+    p90 = float(np.percentile(angles[inliers], 90))
+    outlier_fraction = 1.0 - np.count_nonzero(inliers) / len(inliers)
+    return {
+        "up_world": up_world,
+        "mounting": mounting,
+        "spread_deg": spread,
+        "p90_deg": p90,
+        "inlier_count": int(np.count_nonzero(inliers)),
+        "score": spread + 0.1 * p90 + 10.0 * outlier_fraction,
+    }
+
+
+def _right_handed_axis_rotations() -> list[np.ndarray]:
+    rotations = []
+    for permutation in itertools.permutations(range(3)):
+        for signs in itertools.product((-1.0, 1.0), repeat=3):
+            rotation = np.zeros((3, 3))
+            for row, column in enumerate(permutation):
+                rotation[row, column] = signs[row]
+            if np.linalg.det(rotation) > 0.5:
+                rotations.append(rotation)
+    return rotations
+
+
+def _angular_errors(vectors: np.ndarray, reference: np.ndarray) -> np.ndarray:
+    return np.degrees(np.arccos(np.clip(vectors @ reference, -1.0, 1.0)))
+
+
+def _public_estimate(estimate: dict, total_frames: int) -> dict:
+    return {
+        "up_world": [round(float(value), 6) for value in estimate["up_world"]],
+        "mounting": [[round(float(value), 6) for value in row] for row in estimate["mounting"]],
+        "time_offset_sec": round(float(estimate["time_offset_sec"]), 4),
+        "spread_deg": round(float(estimate["spread_deg"]), 3),
+        "p90_deg": round(float(estimate["p90_deg"]), 3),
+        "inlier_count": estimate["inlier_count"],
+        "sampled_frames": estimate["sampled_frames"],
+        "front_images": total_frames,
+    }
+
+
+def apply_alignment(recon: Reconstruction, R_align: np.ndarray) -> None:
+    """R_align を再構成に in-place 適用する. 点 p'=R p, カメラ R_wc'=R_wc R^T, t 不変."""
     Rt = R_align.T
     for p in recon.points3D.values():
         p.xyz = tuple(float(x) for x in (R_align @ np.asarray(p.xyz)))

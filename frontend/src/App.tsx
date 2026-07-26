@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Layout, Model, type TabNode, type IJsonModel } from 'flexlayout-react'
 import { api, openEventStream, type EventEnvelope } from './api/client'
@@ -13,8 +13,7 @@ import { StageSettings } from './features/StageSettings'
 import { CameraInspector } from './features/CameraInspector'
 import { FrameInspector } from './features/FrameInspector'
 import { FisheyeRegionEditor } from './features/FisheyeRegionEditor'
-import { PointCloudViewer } from './viewers/PointCloudViewer'
-import { DEFAULT_PARAMS, allParams, type ReconMode, type StageParams } from './features/stageParams'
+import { DEFAULT_PARAMS, paramsForStage, type ReconMode, type StageParams } from './features/stageParams'
 import { useSettings } from './ui/settings'
 import { translateMsg } from './ui/i18n'
 
@@ -22,6 +21,9 @@ const OPTIONAL = new Set(['generate_masks'])
 type Lvl = 'info' | 'warn' | 'error' | 'debug'
 const LVL_EMOJI: Record<string, string> = { info: 'ℹ️', warn: '⚠️', error: '⛔', debug: '🔍' }
 const LAYOUT_KEY = 'layout.flex.v2'
+const PointCloudViewer = lazy(() => import('./viewers/PointCloudViewer').then(module => ({
+  default: module.PointCloudViewer,
+})))
 
 // ログ行の時刻 (ローカル HH:MM:SS) と stage タグ (snake_case → PascalCase: extract_frames → ExtractFrames).
 const fmtTime = (ts: string): string => {
@@ -32,6 +34,7 @@ const fmtTime = (ts: string): string => {
 }
 const stageTag = (s: string | null): string =>
   s ? s.split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join('') : ''
+const sameValue = (left: unknown, right: unknown): boolean => JSON.stringify(left) === JSON.stringify(right)
 
 // Unity/VSCode 風のドッキング初期レイアウト. タブのタイトルをドラッグして再配置でき,
 // 変更は localStorage に保存される. Console は既定でシーンビューの下.
@@ -81,7 +84,18 @@ export const App = () => {
   const [selectedFrameIndex, setSelectedFrameIndex] = useState<number | null>(null)
   const [lvlOn, setLvlOn] = useState<Record<Lvl, boolean>>({ info: true, warn: true, error: true, debug: false })
   const [search, setSearch] = useState('')
-  // Console 自動スクロール: ユーザーが最下部にいる時だけ新ログで追従する.
+  const changeReconMode = (mode: ReconMode) => {
+    if (mode === reconMode) return
+    setReconMode(mode)
+    if (!projectId) return
+    api.clearStage(projectId, 'generate_masks').then(() => {
+      qc.invalidateQueries({ queryKey: ['stages', projectId] })
+      for (const key of ['reconstruction', 'masks', 'export-info']) {
+        qc.removeQueries({ queryKey: [key, projectId] })
+      }
+    }).catch(error => console.warn('mode invalidation failed', error))
+  }
+  // Console 自動スクロール: 表示位置が最下部にある時だけ新ログへ追従する.
   const conRef = useRef<HTMLDivElement>(null)
   const atBottomRef = useRef(true)
 
@@ -163,7 +177,26 @@ export const App = () => {
     enabled: !!projectId && isFisheye, retry: false,
   })
   const firstFrame = framesData?.frames?.[0]?.index ?? null
-  // 一键全流程が通らない構成を検出 (通らないなら理由を返し, ボタンを無効化する).
+  const route = [
+    'inspect_source',
+    'extract_frames',
+    ...(isFisheye ? ['fisheye_region'] : []),
+    ...(reconMode === 'pinhole_rig' ? ['reproject_views'] : []),
+    ...(!disabled.has('generate_masks') ? ['generate_masks'] : []),
+    'extract_features',
+    'match_features',
+    'reconstruct',
+    'align_reconstruction',
+    'export_dataset',
+  ]
+  const stageIsFresh = (stage: NonNullable<typeof stagesData>['stages'][number]): boolean => {
+    if (!stage.has_output || !stage.params) return false
+    const expected = paramsForStage(stage.stage, params, reconMode)
+    return Object.entries(expected).every(([key, value]) => sameValue(stage.params?.[key], value))
+  }
+  const outputs = new Map((stagesData?.stages ?? []).map(stage => [stage.stage, stageIsFresh(stage)]))
+  const nextStep = route.find(stage => stage === 'fisheye_region' ? !regionData?.saved : !outputs.get(stage)) ?? null
+  // 次工程を開始できない構成を検出し, 理由をボタン tooltip に出す.
   // 魚眼有効領域は既定円で動くため必須ではない (未保存でも run-all は通る).
   const runReason: string | null =
     !project?.source_path ? t('noSource')
@@ -218,12 +251,33 @@ export const App = () => {
     mutationFn: (path: string) =>
       api.setSource(projectId as string, path.toLowerCase().endsWith('.insv') ? 'insv'
         : /\.(mp4|mov|mkv|avi)$/i.test(path) ? 'erp_video' : 'erp_images', path),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['projects'] }); qc.invalidateQueries({ queryKey: ['source-info', projectId] }) },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['projects'] })
+      qc.invalidateQueries({ queryKey: ['source-info', projectId] })
+      qc.invalidateQueries({ queryKey: ['stages', projectId] })
+      for (const key of ['reconstruction', 'frames', 'fisheye-region', 'masks', 'export-info']) {
+        qc.removeQueries({ queryKey: [key, projectId] })
+      }
+      setSelectedFrameIndex(null)
+      setSelectedCameraId(null)
+    },
   })
-  const runAll = useMutation({
-    mutationFn: () => api.runPipeline(projectId as string, allParams(params, reconMode), [...disabled]),
+  const runNextMutation = useMutation({
+    mutationFn: (stage: string) => api.rerunStage(projectId as string, stage, {
+      [stage]: paramsForStage(stage, params, reconMode),
+    }),
     onSuccess: r => { setActiveJobId(r.job_id); qc.invalidateQueries({ queryKey: ['stages', projectId] }) },
   })
+  const runNext = () => {
+    if (!nextStep) return
+    if (nextStep === 'fisheye_region') {
+      setSelectedStage('fisheye_region')
+      setSelectedCameraId(null)
+      setSelectedFrameIndex(null)
+      return
+    }
+    runNextMutation.mutate(nextStep)
+  }
   const clearOutputs = useMutation({
     mutationFn: () => api.clearOutputs(projectId as string),
     onSuccess: () => {
@@ -253,19 +307,17 @@ export const App = () => {
     : null
 
   const items: HierItem[] = []
-  const nonInsvReady = !!project?.source_path && project?.source_kind !== 'insv'
   for (const s of stagesData?.stages ?? []) {
     // pinhole 再投影 (reproject_views) は pinhole_rig モードだけ必要. 他は「生成」不要で隠す.
     if (s.stage === 'reproject_views' && reconMode !== 'pinhole_rig') continue
     const en = !disabled.has(s.stage)
-    // mp4 / ERP 画像は検査不要だが, 「緑扱い」にするのは equirectangular (直接処理) のときだけ.
-    // ERP+pinhole は reproject 処理が要るので inspect_source を通常表示にする.
-    const forceGreen = s.stage === 'inspect_source' && nonInsvReady && reconMode === 'equirectangular'
-    const done = s.has_output || forceGreen
+    const done = stageIsFresh(s)
+    const stale = s.status === 'stale' || (s.has_output && !done)
     items.push({
       key: s.stage, label: t(`st_${s.stage}`),
-      badgeColor: s.status === 'failed' ? 'var(--error)' : done ? '#4caf50' : 'var(--border)',
-      statusLabel: s.status === 'running' ? t('running') : s.status === 'failed' ? t('failed') : done ? t('done') : t('notrun'),
+      badgeColor: s.status === 'failed' ? 'var(--error)' : stale ? '#d69a2a' : done ? '#4caf50' : 'var(--border)',
+      statusLabel: s.status === 'running' ? t('running') : s.status === 'failed' ? t('failed')
+        : stale ? t('stale') : done ? t('done') : t('notrun'),
       toggleable: OPTIONAL.has(s.stage), enabled: en, dim: !en, running: s.status === 'running',
       progress: progressByStage[s.stage]?.progress ?? 0,
     })
@@ -311,13 +363,16 @@ export const App = () => {
         return (
           <div style={{ position: 'relative', width: '100%', height: '100%', background: 'var(--bg)' }}>
             {recon
-              ? <PointCloudViewer projectId={projectId as string} recon={recon}
-                  showPoints={showPoints} showCams={showCams} selectedCameraId={selectedCameraId} onPickCamera={selectCamera} />
+              ? <Suspense fallback={<div className="hint">Loading 3D viewer…</div>}>
+                  <PointCloudViewer projectId={projectId as string} recon={recon}
+                    showPoints={showPoints} showCams={showCams} selectedCameraId={selectedCameraId} onPickCamera={selectCamera} />
+                </Suspense>
               : null}
             {recon && (
               <div className="scene-info">
                 images {recon.stats.num_images} · points {recon.stats.num_points3D.toLocaleString()}
                 {recon.stats.registered_ratio != null && ` · reg ${(recon.stats.registered_ratio * 100).toFixed(0)}%`}
+                {recon.stats.camera_trajectory_diameter != null && ` · path span ${recon.stats.camera_trajectory_diameter.toFixed(3)} units`}
               </div>
             )}
           </div>
@@ -343,7 +398,7 @@ export const App = () => {
                   : <div className="hint">{t('needExtractFirst')}</div>)
               : selectedStage
               ? <StageSettings projectId={projectId as string} stage={selectedStage} status={stageStatus}
-                  sourceInfo={sourceInfo} reconMode={reconMode} setReconMode={setReconMode} params={params} setParams={setParams}
+                  sourceInfo={sourceInfo} reconMode={reconMode} setReconMode={changeReconMode} params={params} setParams={setParams}
                   onJob={onJob} hasSource={!!project?.source_path} sourcePath={project?.source_path ?? null} resultMode={resultMode}
                   sourceKind={project?.source_kind ?? null} processing={processing} stageIsRunning={stageStatus?.status === 'running'} onStop={stopJob}
                   stageDisabled={disabled.has(selectedStage)} onToggleStage={() => toggleStage(selectedStage)}
@@ -396,8 +451,8 @@ export const App = () => {
           onClick={() => { if (window.confirm(t('clearOutputsConfirm'))) clearOutputs.mutate() }}>{t('clearOutputs')}</button>
         {processing
           ? <button className="btn stop" onClick={stopJob}>■ {t('stop')}</button>
-          : <button className="btn" disabled={!projectId || !!runReason || runAll.isPending}
-              title={runReason ?? ''} onClick={() => runAll.mutate()}>{t('runAll')}</button>}
+          : <button className="btn" disabled={!projectId || !!runReason || !nextStep || runNextMutation.isPending}
+              title={runReason ?? ''} onClick={runNext}>{t('runAll')}</button>}
         <SettingsMenu />
       </div>
 

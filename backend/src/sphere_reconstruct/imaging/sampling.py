@@ -87,7 +87,7 @@ class Candidate:
     精確層: feature_count (SIFT 特徴数)
     """
 
-    index: int          # source frame index
+    index: int  # source frame index
     timestamp_us: int
     sharpness: float
     exposure_ok: bool
@@ -96,17 +96,17 @@ class Candidate:
 
 @dataclass
 class SpatialConfig:
-    min_sharpness: float = 0.0   # これ未満は快速層で棄却 (0 = 無効)
-    min_features: int = 0        # これ未満は精確層で棄却
-    target_motion: float = 1.5   # 前選択フレームからの運動量がこれを超えたら次を選ぶ
+    min_sharpness: float = 0.0  # これ未満は快速層で棄却 (0 = 無効)
+    min_features: int = 0  # これ未満は精確層で棄却
+    target_motion: float = 1.5  # 前選択フレームからの運動量がこれを超えたら次を選ぶ
     min_spacing_frac: float = 0.7  # 最小間隔 = target_motion * これ (これ未満の候補は近すぎ)
-    max_frames: int = 0          # 0 = 無制限
+    max_frames: int = 0  # 0 = 無制限
 
 
 @dataclass
 class SpatialResult:
     selected_indices: list[int]
-    rejected_fast: int           # 快速層で落ちた数
+    rejected_fast: int  # 快速層で落ちた数
     reasons: dict[str, int] = field(default_factory=dict)
 
 
@@ -166,12 +166,15 @@ def select_spatial(
             selected.append(best)
             last = best
             window = []
-            if config.max_frames and len(selected) >= config.max_frames:
-                break
+    if selected[-1].index != valid[-1].index:
+        selected.append(valid[-1])
+    if config.max_frames and len(selected) > config.max_frames:
+        # 先頭から N 枚で打ち切ると動画後半を失う. 全選択列を均等に間引き, 始終端を残す.
+        positions = np.linspace(0, len(selected) - 1, config.max_frames)
+        selected = [selected[round(position)] for position in positions]
 
     return SpatialResult(
         selected_indices=[c.index for c in selected],
         rejected_fast=rejected,
         reasons=reasons,
     )
-

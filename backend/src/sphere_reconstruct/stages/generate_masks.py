@@ -143,7 +143,12 @@ class GenerateMasks(Stage):
         mm_path = ctx.stage_out_dir / "manifest_masks.json"
         mm_path.write_text(json.dumps(mask_manifest, indent=2, ensure_ascii=False), encoding="utf-8")
         outputs.append(
-            FileRef(path=_final_relpath(mm_path, ctx), size=mm_path.stat().st_size, sha256=sha256_file(mm_path), mime="application/json")
+            FileRef(
+                path=_final_relpath(mm_path, ctx),
+                size=mm_path.stat().st_size,
+                sha256=sha256_file(mm_path),
+                mime="application/json",
+            )
         )
         manifest.outputs = outputs
         ctx.progress.info("generate_masks done", progress=1.0, key="log.mask_done")
@@ -214,17 +219,35 @@ class GenerateMasks(Stage):
                     ctx.progress.warn(
                         f"frame {fr['index']} lens{lens}: dynamic coverage {cov:.2f} > {coverage_warn}",
                         key="log.mask_coverage_warn_lens",
-                        args={"frame": fr["index"], "lens": lens, "cov": round(cov, 2), "warn": coverage_warn},
+                        args={
+                            "frame": fr["index"],
+                            "lens": lens,
+                            "cov": round(cov, 2),
+                            "warn": coverage_warn,
+                        },
                     )
                     rec["coverage_warning"] = True
                 frec["lenses"].append(rec)
-                outputs.append(FileRef(path=_final_relpath(out_path, ctx), size=out_path.stat().st_size, sha256="", mime="image/png"))
+                outputs.append(
+                    FileRef(
+                        path=_final_relpath(out_path, ctx),
+                        size=out_path.stat().st_size,
+                        sha256="",
+                        mime="image/png",
+                    )
+                )
                 done += 1
                 ctx.progress.tick(
                     progress=0.08 + 0.9 * (done / max(1, total)),
                     message=f"mask {done}/{total} (frame {fr['index']} lens{lens}, dyn={cov:.2f})",
                     key="log.mask_progress_lens",
-                    args={"done": done, "total": total, "frame": fr["index"], "lens": lens, "cov": round(cov, 2)},
+                    args={
+                        "done": done,
+                        "total": total,
+                        "frame": fr["index"],
+                        "lens": lens,
+                        "cov": round(cov, 2),
+                    },
                 )
             recs.append(frec)
 
@@ -284,24 +307,45 @@ class GenerateMasks(Stage):
 
                 cov = mask_utils.coverage_ratio(dynamic)
                 rec = {
-                    "view": v["view"], "lens": v["lens"], "path": _final_relpath(out_path, ctx),
-                    "coverage": cov, "detections": {d.prompt: len(d.masks) for d in detections},
+                    "view": v["view"],
+                    "lens": v["lens"],
+                    "path": _final_relpath(out_path, ctx),
+                    "coverage": cov,
+                    "detections": {d.prompt: len(d.masks) for d in detections},
                 }
                 if cov > coverage_warn:
                     ctx.progress.warn(
                         f"frame {fr['index']} {out_path.name}: coverage {cov:.2f} > {coverage_warn}",
                         key="log.mask_coverage_warn_view",
-                        args={"frame": fr["index"], "name": out_path.name, "cov": round(cov, 2), "warn": coverage_warn},
+                        args={
+                            "frame": fr["index"],
+                            "name": out_path.name,
+                            "cov": round(cov, 2),
+                            "warn": coverage_warn,
+                        },
                     )
                     rec["coverage_warning"] = True
                 view_records.append(rec)
-                outputs.append(FileRef(path=_final_relpath(out_path, ctx), size=out_path.stat().st_size, sha256="", mime="image/png"))
+                outputs.append(
+                    FileRef(
+                        path=_final_relpath(out_path, ctx),
+                        size=out_path.stat().st_size,
+                        sha256="",
+                        mime="image/png",
+                    )
+                )
                 done += 1
                 ctx.progress.tick(
                     progress=0.08 + 0.9 * (done / max(1, total)),
                     message=f"mask {done}/{total} (frame {fr['index']} {out_path.name}, cov={cov:.2f})",
                     key="log.mask_progress_view",
-                    args={"done": done, "total": total, "frame": fr["index"], "name": out_path.name, "cov": round(cov, 2)},
+                    args={
+                        "done": done,
+                        "total": total,
+                        "frame": fr["index"],
+                        "name": out_path.name,
+                        "cov": round(cov, 2),
+                    },
                 )
             recs.append({"index": fr["index"], "views": view_records})
 
@@ -313,7 +357,6 @@ class GenerateMasks(Stage):
             "frames": recs,
         }
         return outputs, manifest
-
 
     # -- erp (equirectangular) ---------------------------------------------------
     def _run_erp(self, ctx, engine, prompts) -> tuple[list[FileRef], dict]:
@@ -361,8 +404,10 @@ class GenerateMasks(Stage):
 
             cov = mask_utils.coverage_ratio(dynamic)
             rec = {
-                "index": fr["index"], "path": _final_relpath(out_path, ctx),
-                "coverage": cov, "detections": {d.prompt: len(d.masks) for d in detections},
+                "index": fr["index"],
+                "path": _final_relpath(out_path, ctx),
+                "coverage": cov,
+                "detections": {d.prompt: len(d.masks) for d in detections},
             }
             if cov > coverage_warn:
                 ctx.progress.warn(
@@ -372,7 +417,14 @@ class GenerateMasks(Stage):
                 )
                 rec["coverage_warning"] = True
             recs.append(rec)
-            outputs.append(FileRef(path=_final_relpath(out_path, ctx), size=out_path.stat().st_size, sha256="", mime="image/png"))
+            outputs.append(
+                FileRef(
+                    path=_final_relpath(out_path, ctx),
+                    size=out_path.stat().st_size,
+                    sha256="",
+                    mime="image/png",
+                )
+            )
             done += 1
             ctx.progress.tick(
                 progress=0.08 + 0.9 * (done / max(1, total)),

@@ -9,12 +9,13 @@
   <project>/extract_frames/lens1/lens1_XXXXXX.jpg   (INSV のみ)
   <project>/extract_frames/manifest_frames.json     (frame_index / timestamp のマップ)
 
-ERP video 単一 stream / 単一 stream fisheye は Phase 3 の後半で追加. 現状は INSV のみ.
+ERP video は単一 stream を抽出し, ERP image folder は元画像を参照する manifest を作る.
 """
 
 from __future__ import annotations
 
 import json
+import tempfile
 from pathlib import Path
 
 from ..domain.artifacts import FileRef, StageManifest
@@ -96,9 +97,7 @@ class ExtractFrames(Stage):
     ) -> None:
         pair = probe.dual_lens_streams()
         if pair is None:
-            raise RuntimeError(
-                f"expected 2 matching video streams, got {len(probe.video_streams)}"
-            )
+            raise RuntimeError(f"expected 2 matching video streams, got {len(probe.video_streams)}")
         lens0, lens1 = pair
         fps = lens0.fps
         duration = probe.duration or (lens0.nb_frames or 0) / fps
@@ -114,9 +113,7 @@ class ExtractFrames(Stage):
             indices = indices[:max_frames]
 
         if not indices:
-            raise RuntimeError(
-                f"no frames to extract (duration={duration}s, interval={interval}s)"
-            )
+            raise RuntimeError(f"no frames to extract (duration={duration}s, interval={interval}s)")
 
         mode = ctx.params["selection_mode"]
         selection: dict = {"mode": mode}
@@ -124,16 +121,25 @@ class ExtractFrames(Stage):
         if mode == "spatial":
             # 2 層多基準の空間抽出. 固定間隔を使わず, 品質 + 運動量で選ぶ.
             indices, spatial_stats, frame_scores = self._select_spatial_indices(
-                ctx, fps=fps, duration=duration, nb_frames=lens0.nb_frames,
-                ffmpeg_bin=ffmpeg_bin, fallback_count=len(indices),
+                ctx,
+                fps=fps,
+                duration=duration,
+                nb_frames=lens0.nb_frames,
+                ffmpeg_bin=ffmpeg_bin,
+                fallback_count=len(indices),
             )
             selection.update(spatial_stats)
         elif mode == "sharpness" or ctx.params["sharpness_candidates"] > 1:
             # 各区間で候補を抜き, lens0 の鮮鋭度が最大の frame へ差し替える.
             n_candidates = max(2, ctx.params["sharpness_candidates"])
             indices, frame_scores = self._refine_by_sharpness(
-                ctx, indices, fps=fps, interval=interval, n_candidates=n_candidates,
-                nb_frames=lens0.nb_frames, ffmpeg_bin=ffmpeg_bin,
+                ctx,
+                indices,
+                fps=fps,
+                interval=interval,
+                n_candidates=n_candidates,
+                nb_frames=lens0.nb_frames,
+                ffmpeg_bin=ffmpeg_bin,
             )
         selection["selected"] = len(indices)
 
@@ -149,7 +155,6 @@ class ExtractFrames(Stage):
 
         out_lens0 = ctx.stage_out_dir / "lens0"
         out_lens1 = ctx.stage_out_dir / "lens1"
-        total = len(indices)
         done_by_lens = {"lens0": 0, "lens1": 0}
 
         def prog(lens: str, cur: int, tot: int) -> None:
@@ -200,14 +205,14 @@ class ExtractFrames(Stage):
             encoding="utf-8",
         )
 
-        manifest.outputs = [
-            _file_ref(p, ctx.project_dir, "image/jpeg", ctx) for p in (p0 + p1)
-        ] + [
+        manifest.outputs = [_file_ref(p, ctx.project_dir, "image/jpeg", ctx) for p in (p0 + p1)] + [
             _file_ref(ctx.stage_out_dir / "manifest_frames.json", ctx.project_dir, "application/json", ctx)
         ]
         ctx.progress.info(
             f"extract_frames done: {len(indices)} frames",
-            progress=1.0, key="log.extract_done", args={"count": len(indices)},
+            progress=1.0,
+            key="log.extract_done",
+            args={"count": len(indices)},
         )
 
     def _refine_by_sharpness(
@@ -231,31 +236,37 @@ class ExtractFrames(Stage):
 
         span = max(1, int(interval * fps))
         bound = (nb_frames - 1) if nb_frames else None
-        tmp_dir = ctx.stage_out_dir / "_sharpness_tmp"
-        tmp_dir.mkdir(parents=True, exist_ok=True)
+        tmp_dir = Path(tempfile.mkdtemp(prefix=".extract-frames-sharpness-", dir=ctx.project_dir))
 
+        candidate_groups = [
+            sampling.candidate_indices(center, span, n_candidates, fps_bound=bound) for center in indices
+        ]
+        all_candidates = sorted({candidate for group in candidate_groups for candidate in group})
+        paths = ffmpeg.extract_frames_sequential(
+            ctx.source_path,
+            stream_index=0,
+            frame_indices=all_candidates,
+            out_dir=tmp_dir,
+            out_prefix="candidate",
+            ffmpeg_bin=ffmpeg_bin,
+            progress=lambda current, total: ctx.progress.tick(
+                progress=0.05 + 0.02 * current / max(1, total),
+                message=f"sharpness candidates {current}/{total}",
+            ),
+        )
+        path_by_index = dict(zip(all_candidates, paths, strict=True))
         refined: list[int] = []
         pick_scores: dict[int, dict] = {}
-        for i, center in enumerate(indices):
-            cands = sampling.candidate_indices(center, span, n_candidates, fps_bound=bound)
+        for i, cands in enumerate(candidate_groups):
             if len(cands) == 1:
                 refined.append(cands[0])
                 continue
-            paths = ffmpeg.extract_frames_by_index(
-                ctx.source_path,
-                stream_index=0,
-                fps=fps,
-                frame_indices=cands,
-                out_dir=tmp_dir / f"interval_{i:04d}",
-                out_prefix="cand",
-                ffmpeg_bin=ffmpeg_bin,
-            )
-            scores = [sampling.sharpness_of_file(p) for p in paths]
+            scores = [sampling.sharpness_of_file(path_by_index[candidate]) for candidate in cands]
             best = sampling.pick_sharpest(scores)
             refined.append(cands[best])
             pick_scores[cands[best]] = {"sharpness": round(float(scores[best]), 1)}
             ctx.progress.tick(
-                progress=0.05 + 0.04 * ((i + 1) / len(indices)),
+                progress=0.07 + 0.02 * ((i + 1) / len(indices)),
                 message=f"sharpness interval {i + 1}/{len(indices)}: picked frame {cands[best]} "
                 f"(score {scores[best]:.1f})",
                 key="log.extract_sharpness_interval",
@@ -271,7 +282,7 @@ class ExtractFrames(Stage):
         import shutil
 
         shutil.rmtree(tmp_dir, ignore_errors=True)
-        return refined, pick_scores
+        return sorted(set(refined)), pick_scores
 
     def _select_spatial_indices(
         self,
@@ -309,10 +320,14 @@ class ExtractFrames(Stage):
             key="log.extract_spatial_candidates",
             args={"count": len(cand_indices), "fps": cand_fps},
         )
-        tmp_dir = ctx.stage_out_dir / "_spatial_tmp"
-        paths = ffmpeg.extract_frames_by_index(
-            ctx.source_path, stream_index=0, fps=fps, frame_indices=cand_indices,
-            out_dir=tmp_dir, out_prefix="cand", ffmpeg_bin=ffmpeg_bin, workers=4,
+        tmp_dir = Path(tempfile.mkdtemp(prefix=".extract-frames-spatial-", dir=ctx.project_dir))
+        paths = ffmpeg.extract_frames_sequential(
+            ctx.source_path,
+            stream_index=0,
+            frame_indices=cand_indices,
+            out_dir=tmp_dir,
+            out_prefix="cand",
+            ffmpeg_bin=ffmpeg_bin,
             progress=lambda cur, tot: ctx.progress.tick(
                 progress=0.05 + 0.30 * (cur / max(1, tot)),
                 message=f"spatial: extracting candidate frames {cur}/{tot}",
@@ -322,7 +337,7 @@ class ExtractFrames(Stage):
         )
 
         # 快速層 + 精確層のスコアリング. 光流用に縮小グレースケールを保持.
-        grays: dict[int, "object"] = {}
+        grays: dict[int, object] = {}
         candidates: list[sampling.Candidate] = []
         max_clip = ctx.params["max_clip"]
         n_score = len(cand_indices)
@@ -338,8 +353,11 @@ class ExtractFrames(Stage):
             feats = quality.sift_feature_count(small, downscale=1) if exp_ok else 0
             candidates.append(
                 sampling.Candidate(
-                    index=idx, timestamp_us=int(idx / fps * 1_000_000),
-                    sharpness=sharp, exposure_ok=exp_ok, feature_count=feats,
+                    index=idx,
+                    timestamp_us=int(idx / fps * 1_000_000),
+                    sharpness=sharp,
+                    exposure_ok=exp_ok,
+                    feature_count=feats,
                 )
             )
             if (si + 1) % 4 == 0 or si + 1 == n_score:
@@ -383,8 +401,10 @@ class ExtractFrames(Stage):
         # 選ばれた frame ごとの品質スコア (鮮鋭度 + 特徴数).
         cand_by_index = {c.index: c for c in candidates}
         scores = {
-            idx: {"sharpness": round(float(cand_by_index[idx].sharpness), 1),
-                  "features": int(cand_by_index[idx].feature_count)}
+            idx: {
+                "sharpness": round(float(cand_by_index[idx].sharpness), 1),
+                "features": int(cand_by_index[idx].feature_count),
+            }
             for idx in result.selected_indices
             if idx in cand_by_index
         }
@@ -422,10 +442,9 @@ class ExtractFrames(Stage):
         )
 
         out = ctx.stage_out_dir / "erp"
-        paths = ffmpeg.extract_frames_by_index(
+        paths = ffmpeg.extract_frames_sequential(
             ctx.source_path,
             stream_index=0,
-            fps=fps,
             frame_indices=indices,
             out_dir=out,
             out_prefix="erp",
@@ -463,14 +482,14 @@ class ExtractFrames(Stage):
             ),
             encoding="utf-8",
         )
-        manifest.outputs = [
-            _file_ref(p, ctx.project_dir, "image/jpeg", ctx) for p in paths
-        ] + [
+        manifest.outputs = [_file_ref(p, ctx.project_dir, "image/jpeg", ctx) for p in paths] + [
             _file_ref(ctx.stage_out_dir / "manifest_frames.json", ctx.project_dir, "application/json", ctx)
         ]
         ctx.progress.info(
             f"extract_frames done: {len(paths)} frames",
-            progress=1.0, key="log.extract_done", args={"count": len(paths)},
+            progress=1.0,
+            key="log.extract_done",
+            args={"count": len(paths)},
         )
 
     # -- ERP images (フォルダ指定) --------------------------------------------------
@@ -494,7 +513,12 @@ class ExtractFrames(Stage):
         ]
         (ctx.stage_out_dir / "manifest_frames.json").write_text(
             json.dumps(
-                {"kind": "erp_images", "count": len(imgs), "selection": {"mode": "folder", "selected": len(imgs)}, "frames": frames},
+                {
+                    "kind": "erp_images",
+                    "count": len(imgs),
+                    "selection": {"mode": "folder", "selected": len(imgs)},
+                    "frames": frames,
+                },
                 indent=2,
                 ensure_ascii=False,
             ),
@@ -510,7 +534,9 @@ class ExtractFrames(Stage):
         ]
         ctx.progress.info(
             f"extract_frames done: {len(imgs)} images",
-            progress=1.0, key="log.extract_done", args={"count": len(imgs)},
+            progress=1.0,
+            key="log.extract_done",
+            args={"count": len(imgs)},
         )
         return manifest
 

@@ -32,7 +32,7 @@ def _cv2():
 
 @dataclass
 class RenderStats:
-    valid_ratio: float   # remap で source から拾えた画素の比率
+    valid_ratio: float  # remap で source から拾えた画素の比率
     src_size: tuple[int, int]
     dst_size: tuple[int, int]
 
@@ -107,7 +107,8 @@ def render_pinhole(
 
 
 def render_perspective_from_equirect(
-    src_image_path: Path, view: PinholeView,
+    src_image_path: Path,
+    view: PinholeView,
 ) -> tuple[np.ndarray, RenderStats]:
     """Equirectangular (全天球) 画像から view の pinhole 画像 (uint8 HxWx3 BGR) を作る.
 
@@ -127,8 +128,8 @@ def render_perspective_from_equirect(
     d = rays.reshape(-1, 3) @ R_view  # view -> rig(world) 方向.
     dx, dy, dz = d[:, 0], d[:, 1], d[:, 2]
     r = np.sqrt(dx * dx + dy * dy + dz * dz)
-    lon = np.arctan2(dx, dz)                       # +Z 前で 0, +X 右で +pi/2.
-    lat = np.arcsin(np.clip(dy / r, -1.0, 1.0))    # +Y 下 -> lat>0 が下.
+    lon = np.arctan2(dx, dz)  # +Z 前で 0, +X 右で +pi/2.
+    lat = np.arcsin(np.clip(dy / r, -1.0, 1.0))  # +Y 下 -> lat>0 が下.
     u = (lon / (2.0 * math.pi) + 0.5) * src_w
     v = (lat / math.pi + 0.5) * src_h
     # 経度 u は横方向に周回する (mod), 緯度 v は極でクランプする (縦は周回させない).

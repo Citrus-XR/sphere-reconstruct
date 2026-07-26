@@ -1,42 +1,45 @@
-"""stages.reconstruct.normalize_params の単体テスト (COLMAP 不要, 純 dict ロジック).
+"""分割した SfM stages の parameter contract を検証する."""
 
-3 モード (native_fisheye / equirectangular / pinhole_rig) のパラメータ契約を固定する.
-"""
+import pytest
 
-from __future__ import annotations
-
-from sphere_reconstruct.stages.reconstruct import Reconstruct
-
-# normalize_params は self を使わないので __new__ で十分 (COLMAP 依存を避ける).
-_R = Reconstruct.__new__(Reconstruct)
+from sphere_reconstruct.stages.extract_features import ExtractFeatures
+from sphere_reconstruct.stages.match_features import MatchFeatures
+from sphere_reconstruct.stages.reconstruct import Reconstruct, _validate_summary
 
 
-def test_native_fisheye_defaults():
-    p = _R.normalize_params({"reconstruction_mode": "native_fisheye"})
-    assert p["reconstruction_mode"] == "native_fisheye"
-    assert p["refine_intrinsics"] is True
-    assert p["use_masks"] is True
-    assert "use_rig" not in p
+def test_feature_defaults_use_sift_for_normal_footage():
+    params = ExtractFeatures().normalize_params({})
+    assert params["reconstruction_mode"] == "native_fisheye"
+    assert params["feature_type"] == "SIFT"
+    assert params["max_image_size"] == 2048
+    assert params["max_num_features"] == 8192
 
 
-def test_equirectangular_forces_no_refine():
-    p = _R.normalize_params({"reconstruction_mode": "equirectangular"})
-    assert p["refine_intrinsics"] is False   # 球面モデルは精修する内参が無い
-    assert p["use_masks"] is True
-    assert "use_rig" not in p
+def test_matching_defaults_to_fast_bruteforce():
+    params = MatchFeatures().normalize_params({})
+    assert params["matcher_type"] == "bruteforce"
+    assert params["pairing"] == "sequential"
+    assert params["overlap"] == 4
 
 
-def test_pinhole_rig_has_rig_flags():
-    p = _R.normalize_params({"reconstruction_mode": "pinhole_rig"})
-    assert p["use_rig"] is True
-    assert p["refine_rig"] is True
-    assert p["loop_closure"] is False
-    assert p["refine_intrinsics"] is False
+def test_reconstruction_defaults_to_global_cpu_when_cudss_is_unknown():
+    params = Reconstruct().normalize_params({})
+    assert params["mapper"] == "global"
+    assert params["view_graph_calibration"] is True
+    assert params["ba_use_gpu"] is False
+    assert params["random_seed"] == 0
+    assert params["min_registered_ratio"] == 0.8
+    assert params["min_points3D"] == 100
 
 
-def test_default_mode_and_extract_cap():
-    p = _R.normalize_params({})
-    assert p["reconstruction_mode"] == "native_fisheye"
-    assert p["feature_backend"] == "sift"
-    assert p["extraction_device"] == "auto"
-    assert p["extract_max_size"] == 0   # 0 = settings 既定 (2048) を使う
+def test_incremental_does_not_run_view_graph_calibration_by_default():
+    params = Reconstruct().normalize_params({"mapper": "incremental"})
+    assert params["view_graph_calibration"] is False
+
+
+def test_quality_gate_rejects_camera_only_reconstruction():
+    with pytest.raises(RuntimeError, match="points3D=0"):
+        _validate_summary(
+            {"registered_ratio": 1.0, "num_points3D": 0},
+            {"min_registered_ratio": 0.8, "min_points3D": 100},
+        )

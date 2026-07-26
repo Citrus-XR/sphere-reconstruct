@@ -20,7 +20,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO
 
-
 # ISO BMFF box header は最短 8 bytes: uint32 size + 4 bytes type. size==1 なら
 # その後 uint64 largesize が続く. size==0 なら EOF まで続く.
 _BOX_HEADER_MIN = 8
@@ -33,8 +32,8 @@ _KNOWN_TOP_BOXES = frozenset({b"ftyp", b"moov", b"mdat", b"free", b"skip", b"uui
 @dataclass
 class MP4Box:
     box_type: bytes  # 4 bytes
-    offset: int      # ファイル先頭からの byte offset
-    header_size: int # 8 か 16
+    offset: int  # ファイル先頭からの byte offset
+    header_size: int  # 8 か 16
     total_size: int  # header 含む byte 数 (0 なら EOF まで)
 
 
@@ -43,7 +42,7 @@ class InsvLayout:
     file_size: int
     boxes: list[MP4Box]
     footer_offset: int | None  # Insta360 フッタが始まる (と推定される) offset
-    footer_size: int | None    # None なら EOF まで
+    footer_size: int | None  # None なら EOF まで
 
 
 def scan_boxes(fp: BinaryIO, file_size: int) -> list[MP4Box]:
@@ -80,9 +79,7 @@ def scan_boxes(fp: BinaryIO, file_size: int) -> list[MP4Box]:
         if box_type not in _KNOWN_TOP_BOXES:
             break
 
-        boxes.append(
-            MP4Box(box_type=box_type, offset=pos, header_size=header_size, total_size=total)
-        )
+        boxes.append(MP4Box(box_type=box_type, offset=pos, header_size=header_size, total_size=total))
 
         if total == 0:
             # mdat が 0 size で EOF までを意味する. これ以降 box は現れない前提で終了.

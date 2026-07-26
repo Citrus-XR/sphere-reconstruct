@@ -9,8 +9,10 @@ colmap の各サブコマンド (feature_extractor / sequential_matcher / mapper
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -62,6 +64,7 @@ def run_command(
             stderr=subprocess.STDOUT,
             text=True,
             bufsize=1,
+            env=_runtime_environment(),
         )
         assert proc.stdout is not None
         for raw in proc.stdout:
@@ -81,10 +84,25 @@ def run_command(
             log_f.close()
 
     if rc != 0:
-        raise ColmapError(
-            f"colmap {args[0] if args else '?'} failed (rc={rc}):\n" + "\n".join(tail[-15:])
-        )
+        raise ColmapError(f"colmap {args[0] if args else '?'} failed (rc={rc}):\n" + "\n".join(tail[-15:]))
     return CommandResult(command=full, returncode=rc, log_tail=tail)
+
+
+def _runtime_environment() -> dict[str, str]:
+    """COLMAP の ONNX CUDA provider が同じ venv の CUDA runtime を見つけられる環境を返す."""
+    env = os.environ.copy()
+    if os.name == "nt":
+        torch_lib = Path(sys.prefix) / "Lib" / "site-packages" / "torch" / "lib"
+        variable = "PATH"
+    else:
+        candidates = list((Path(sys.prefix) / "lib").glob("python*/site-packages/torch/lib"))
+        torch_lib = candidates[0] if candidates else Path()
+        variable = "LD_LIBRARY_PATH"
+    if torch_lib.is_dir():
+        current = env.get(variable, "")
+        values = [str(torch_lib), *(value for value in current.split(os.pathsep) if value)]
+        env[variable] = os.pathsep.join(dict.fromkeys(values))
+    return env
 
 
 # -- 各サブコマンドの薄いヘルパ ---------------------------------------------------
@@ -100,6 +118,7 @@ def feature_extractor(
     single_camera_per_folder: bool = False,
     camera_params: str | None = None,
     use_gpu: bool = True,
+    feature_type: str = "SIFT",
     mask_path: Path | None = None,
     camera_mask_path: Path | None = None,
     extra_args: list[str] | None = None,
@@ -108,10 +127,16 @@ def feature_extractor(
 ) -> CommandResult:
     args = [
         "feature_extractor",
-        "--database_path", str(database_path),
-        "--image_path", str(image_path),
-        "--ImageReader.camera_model", camera_model,
-        "--FeatureExtraction.use_gpu", "1" if use_gpu else "0",
+        "--database_path",
+        str(database_path),
+        "--image_path",
+        str(image_path),
+        "--ImageReader.camera_model",
+        camera_model,
+        "--FeatureExtraction.use_gpu",
+        "1" if use_gpu else "0",
+        "--FeatureExtraction.type",
+        feature_type,
     ]
     if single_camera_per_folder:
         # rig 使用時: 各サブフォルダを独立カメラにする (pinhole rig は 12, native は front/back の 2).
@@ -144,17 +169,17 @@ def rig_configurator(
     """既知の rig 相対姿勢を DB に設定する. feature_extractor の後, mapper の前に呼ぶ."""
     args = [
         "rig_configurator",
-        "--database_path", str(database_path),
-        "--rig_config_path", str(rig_config_path),
+        "--database_path",
+        str(database_path),
+        "--rig_config_path",
+        str(rig_config_path),
     ]
     return run_command(colmap_bin, args, log_path=log_path, on_line=on_line)
 
 
 def database_creator(colmap_bin: str, *, database_path: Path) -> CommandResult:
     """空の COLMAP DB を現行スキーマで作る (ALIKED 経路で自前書き込みする前段)."""
-    return run_command(
-        colmap_bin, ["database_creator", "--database_path", str(database_path)]
-    )
+    return run_command(colmap_bin, ["database_creator", "--database_path", str(database_path)])
 
 
 def matches_importer(
@@ -173,10 +198,14 @@ def matches_importer(
     """
     args = [
         "matches_importer",
-        "--database_path", str(database_path),
-        "--match_list_path", str(match_list_path),
-        "--match_type", match_type,
-        "--TwoViewGeometry.min_num_inliers", str(min_num_inliers),
+        "--database_path",
+        str(database_path),
+        "--match_list_path",
+        str(match_list_path),
+        "--match_type",
+        match_type,
+        "--TwoViewGeometry.min_num_inliers",
+        str(min_num_inliers),
     ]
     return run_command(colmap_bin, args, log_path=log_path, on_line=on_line)
 
@@ -189,20 +218,28 @@ def sequential_matcher(
     loop_detection: bool = False,
     vocab_tree_path: Path | None = None,
     use_gpu: bool = True,
+    matching_type: str = "SIFT_BRUTEFORCE",
     extra_args: list[str] | None = None,
     log_path: Path | None = None,
     on_line: Callable[[str], None] | None = None,
 ) -> CommandResult:
     args = [
         "sequential_matcher",
-        "--database_path", str(database_path),
-        "--SequentialMatching.overlap", str(overlap),
-        "--FeatureMatching.use_gpu", "1" if use_gpu else "0",
+        "--database_path",
+        str(database_path),
+        "--SequentialMatching.overlap",
+        str(overlap),
+        "--FeatureMatching.use_gpu",
+        "1" if use_gpu else "0",
+        "--FeatureMatching.type",
+        matching_type,
     ]
     if loop_detection and vocab_tree_path is not None:
         args += [
-            "--SequentialMatching.loop_detection", "1",
-            "--SequentialMatching.vocab_tree_path", str(vocab_tree_path),
+            "--SequentialMatching.loop_detection",
+            "1",
+            "--SequentialMatching.vocab_tree_path",
+            str(vocab_tree_path),
         ]
     if extra_args:
         args += extra_args
@@ -215,6 +252,7 @@ def vocab_tree_matcher(
     database_path: Path,
     vocab_tree_path: Path,
     use_gpu: bool = True,
+    matching_type: str = "SIFT_BRUTEFORCE",
     extra_args: list[str] | None = None,
     log_path: Path | None = None,
     on_line: Callable[[str], None] | None = None,
@@ -222,9 +260,14 @@ def vocab_tree_matcher(
     """vocab tree による全体マッチ (順序非依存). 大量/ループ撮影向け."""
     args = [
         "vocab_tree_matcher",
-        "--database_path", str(database_path),
-        "--VocabTreeMatching.vocab_tree_path", str(vocab_tree_path),
-        "--FeatureMatching.use_gpu", "1" if use_gpu else "0",
+        "--database_path",
+        str(database_path),
+        "--VocabTreeMatching.vocab_tree_path",
+        str(vocab_tree_path),
+        "--FeatureMatching.use_gpu",
+        "1" if use_gpu else "0",
+        "--FeatureMatching.type",
+        matching_type,
     ]
     if extra_args:
         args += extra_args
@@ -236,14 +279,19 @@ def exhaustive_matcher(
     *,
     database_path: Path,
     use_gpu: bool = True,
+    matching_type: str = "SIFT_BRUTEFORCE",
     extra_args: list[str] | None = None,
     log_path: Path | None = None,
     on_line: Callable[[str], None] | None = None,
 ) -> CommandResult:
     args = [
         "exhaustive_matcher",
-        "--database_path", str(database_path),
-        "--FeatureMatching.use_gpu", "1" if use_gpu else "0",
+        "--database_path",
+        str(database_path),
+        "--FeatureMatching.use_gpu",
+        "1" if use_gpu else "0",
+        "--FeatureMatching.type",
+        matching_type,
     ]
     if extra_args:
         args += extra_args
@@ -266,16 +314,22 @@ def mapper(
     output_path.mkdir(parents=True, exist_ok=True)
     args = [
         "mapper",
-        "--database_path", str(database_path),
-        "--image_path", str(image_path),
-        "--output_path", str(output_path),
+        "--database_path",
+        str(database_path),
+        "--image_path",
+        str(image_path),
+        "--output_path",
+        str(output_path),
     ]
     if not refine_intrinsics:
         # 既知の厳密 intrinsics を固定する (仮想 pinhole rig).
         args += [
-            "--Mapper.ba_refine_focal_length", "0",
-            "--Mapper.ba_refine_principal_point", "0",
-            "--Mapper.ba_refine_extra_params", "0",
+            "--Mapper.ba_refine_focal_length",
+            "0",
+            "--Mapper.ba_refine_principal_point",
+            "0",
+            "--Mapper.ba_refine_extra_params",
+            "0",
         ]
     if not refine_rig:
         # rig 外参 (sensor_from_rig) を固定する. offset_v3 の校正を厳密に信頼する場合や,
@@ -288,3 +342,87 @@ def mapper(
     if extra_args:
         args += extra_args
     return run_command(colmap_bin, args, log_path=log_path, on_line=on_line)
+
+
+def view_graph_calibrator(
+    colmap_bin: str,
+    *,
+    database_path: Path,
+    log_path: Path | None = None,
+    on_line: Callable[[str], None] | None = None,
+) -> CommandResult:
+    return run_command(
+        colmap_bin,
+        ["view_graph_calibrator", "--database_path", str(database_path)],
+        log_path=log_path,
+        on_line=on_line,
+    )
+
+
+def global_mapper(
+    colmap_bin: str,
+    *,
+    database_path: Path,
+    image_path: Path,
+    output_path: Path,
+    refine_intrinsics: bool = True,
+    refine_rig: bool = True,
+    use_gpu: bool = True,
+    extra_args: list[str] | None = None,
+    log_path: Path | None = None,
+    on_line: Callable[[str], None] | None = None,
+) -> CommandResult:
+    output_path.mkdir(parents=True, exist_ok=True)
+    args = [
+        "global_mapper",
+        "--database_path",
+        str(database_path),
+        "--image_path",
+        str(image_path),
+        "--output_path",
+        str(output_path),
+        "--GlobalMapper.ba_ceres_use_gpu",
+        "1" if use_gpu else "0",
+        "--GlobalMapper.gp_use_gpu",
+        "1" if use_gpu else "0",
+    ]
+    if not refine_intrinsics:
+        args += [
+            "--GlobalMapper.ba_refine_focal_length",
+            "0",
+            "--GlobalMapper.ba_refine_principal_point",
+            "0",
+            "--GlobalMapper.ba_refine_extra_params",
+            "0",
+        ]
+    if not refine_rig:
+        args += ["--GlobalMapper.refine_sensor_from_rig", "0"]
+    if extra_args:
+        args += extra_args
+    return run_command(colmap_bin, args, log_path=log_path, on_line=on_line)
+
+
+def model_transformer(
+    colmap_bin: str,
+    *,
+    input_path: Path,
+    output_path: Path,
+    transform_path: Path,
+    log_path: Path | None = None,
+    on_line: Callable[[str], None] | None = None,
+) -> CommandResult:
+    output_path.mkdir(parents=True, exist_ok=True)
+    return run_command(
+        colmap_bin,
+        [
+            "model_transformer",
+            "--input_path",
+            str(input_path),
+            "--output_path",
+            str(output_path),
+            "--transform_path",
+            str(transform_path),
+        ],
+        log_path=log_path,
+        on_line=on_line,
+    )

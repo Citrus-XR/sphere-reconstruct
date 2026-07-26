@@ -1,7 +1,4 @@
-"""settings API (最小構成).
-
-現段階は read-only. 書き込みは Phase 7 で SAM3 パステスト等と合わせて実装.
-"""
+"""Read-only runtime settings と軽量 dependency check API."""
 
 from __future__ import annotations
 
@@ -25,13 +22,14 @@ async def read_settings() -> dict[str, Any]:
         "filesystem": {"allowed_roots": [str(p) for p in s.filesystem.allowed_roots]},
         "binaries": s.binaries.model_dump(),
         "sam3": s.sam3.model_dump(),
+        "aliked": s.aliked.model_dump(),
         "log": s.log.model_dump(),
     }
 
 
 @router.post("/test-sam3")
 async def test_sam3() -> dict[str, Any]:
-    """SAM3 のパス設定を検証する. Torch import は行わない (それは Phase 4 で Worker に)."""
+    """SAM3 の path だけを検証する. API process では Torch を import しない."""
     check = sam3_quick_check()
     return {
         "ok": check.ok,

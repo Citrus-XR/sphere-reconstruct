@@ -1,6 +1,6 @@
 """キャリブレーションモデル.
 
-INSV / PB / 内蔵 profile / ユーザ手動 のいずれかから得られた 「デュアル鱼眼
+INSV / PB / 内蔵 profile / manual override のいずれかから得られた「デュアル魚眼
 キャリブレーション」を統一データ構造で保持する.
 
 - MeiLensCalibration: 1 レンズ. MEI (Mei-Rives) + 拡張 (radial k1-k3, tangential
@@ -23,8 +23,8 @@ lens B の tz が -32.3mm = X5 前後鏡頭の物理ベースライン (~30mm) �
 lens B の cx が 8064.92 = 2686.41 + 5376.0 なので, 参照座標系は 「左右横並び
 10752 x 5376」の合成画像で表現されている (共通イメージ座標).
 
-`source_priority` は spec で定義した降級鎖:
-  PB完整 -> offset_v3 -> 機種内蔵 profile -> ユーザ手動 -> エラー
+`source_priority` の降級鎖:
+  PB -> offset_v3 -> 機種内蔵 profile -> manual override -> エラー
 """
 
 from __future__ import annotations
@@ -32,11 +32,11 @@ from __future__ import annotations
 import re
 import struct
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 
-class CalibSource(str, Enum):
+class CalibSource(StrEnum):
     PB = "pb"
     OFFSET_V3 = "offset_v3"
     BUILTIN_PROFILE = "builtin_profile"
@@ -125,7 +125,7 @@ _ASCII_CALIB_RE = re.compile(rb"-?[0-9]+(?:\.[0-9]+)?(?:_-?[0-9]+(?:\.[0-9]+)?){
 class OffsetV3Ascii:
     """inst box 内で発見された ASCII underscore-separated calibration 文字列."""
 
-    inst_offset: int   # inst box data 内の byte offset
+    inst_offset: int  # inst box data 内の byte offset
     text: str
     values: list[float]
 
@@ -193,19 +193,43 @@ def _parse_lens(items: list[float]) -> MeiLensCalibration:
     if len(items) != LENS_ITEMS:
         raise ValueError(f"lens block must have {LENS_ITEMS} items, got {len(items)}")
     (
-        xi, fx, fy, cx, cy,
-        a1, a2, a3,
-        tx, ty, tz,
-        k1, k2, k3,
-        p1, p2,
-        ref_w, ref_h, lens_flags,
+        xi,
+        fx,
+        fy,
+        cx,
+        cy,
+        a1,
+        a2,
+        a3,
+        tx,
+        ty,
+        tz,
+        k1,
+        k2,
+        k3,
+        p1,
+        p2,
+        ref_w,
+        ref_h,
+        lens_flags,
     ) = items
     return MeiLensCalibration(
-        xi=xi, fx=fx, fy=fy, cx=cx, cy=cy,
-        yaw=a1, pitch=a2, roll=a3,
-        tx=tx, ty=ty, tz=tz,
-        k1=k1, k2=k2, k3=k3,
-        p1=p1, p2=p2,
+        xi=xi,
+        fx=fx,
+        fy=fy,
+        cx=cx,
+        cy=cy,
+        yaw=a1,
+        pitch=a2,
+        roll=a3,
+        tx=tx,
+        ty=ty,
+        tz=tz,
+        k1=k1,
+        k2=k2,
+        k3=k3,
+        p1=p1,
+        p2=p2,
         ref_image_width=int(ref_w),
         ref_image_height=int(ref_h),
         lens_flags=int(lens_flags),
@@ -238,6 +262,7 @@ def parse_offset_v3_bytes(payload: bytes) -> OffsetV3Raw:
 
 
 # ---------- 選択ロジック --------------------------------------------------------
+
 
 def choose(*candidates: DualLensCalibration | None) -> DualLensCalibration | None:
     """降級鎖に従って最初に is_valid() な候補を返す.

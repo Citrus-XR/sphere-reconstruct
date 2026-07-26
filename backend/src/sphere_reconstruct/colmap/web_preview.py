@@ -12,7 +12,7 @@ points.bin (float32/uint8 のインターリーブ列):
   -> 1 点 = 12 + 4 + 4 = 20 bytes
   ヘッダ: uint32 num_points, uint32 stride(=20)
 
-点が多すぎる場合は max_points まで間引く (spec: 30万〜100万).
+点が多すぎる場合は max_points まで決定的に間引く.
 """
 
 from __future__ import annotations
@@ -22,25 +22,7 @@ import struct
 from dataclasses import dataclass
 from pathlib import Path
 
-import numpy as np
-
 from .model import Reconstruction
-
-
-def _qvec_to_camera_position(qvec, tvec) -> tuple[float, float, float]:
-    """world->cam の (q, t) からカメラの world 座標 C = -R^T t を求める."""
-    qw, qx, qy, qz = qvec
-    # 回転行列 R (world->cam).
-    R = np.array(
-        [
-            [1 - 2 * (qy * qy + qz * qz), 2 * (qx * qy - qz * qw), 2 * (qx * qz + qy * qw)],
-            [2 * (qx * qy + qz * qw), 1 - 2 * (qx * qx + qz * qz), 2 * (qy * qz - qx * qw)],
-            [2 * (qx * qz - qy * qw), 2 * (qy * qz + qx * qw), 1 - 2 * (qx * qx + qy * qy)],
-        ]
-    )
-    t = np.array(tvec)
-    C = -R.T @ t
-    return (float(C[0]), float(C[1]), float(C[2]))
 
 
 @dataclass
@@ -64,7 +46,7 @@ def build_web_preview(recon: Reconstruction, *, max_points: int = 500_000) -> We
     ]
     images_json = []
     for img in recon.images.values():
-        pos = _qvec_to_camera_position(img.qvec, img.tvec)
+        pos = img.camera_center
         images_json.append(
             {
                 "id": img.image_id,

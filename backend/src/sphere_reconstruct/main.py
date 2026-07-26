@@ -4,7 +4,7 @@
 
 - SQLite を workspace/state.db に置く.
 - JobSupervisor を lifespan で初期化.
-- Frontend (React 静的 build) の配信は Phase 7 で追加予定.
+- frontend/dist があれば React SPA を同一 origin で配信する.
 """
 
 from __future__ import annotations
@@ -43,8 +43,7 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
             "WHERE status IN ('running', 'queued')"
         )
         await conn.execute(
-            "UPDATE stage_run SET status='failed', error_text='interrupted by restart' "
-            "WHERE status='running'"
+            "UPDATE stage_run SET status='failed', error_text='interrupted by restart' WHERE status='running'"
         )
 
     logger.info("sphere-reconstruct backend started (db=%s)", db_path)

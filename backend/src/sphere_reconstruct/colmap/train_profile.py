@@ -10,24 +10,17 @@ from __future__ import annotations
 
 import numpy as np
 
-from .gravity_align import _quat_to_R
 from .model import Reconstruction
-
-
-def _cam_center(qvec, tvec) -> np.ndarray:
-    return -_quat_to_R(qvec).T @ np.asarray(tvec, dtype=float)
 
 
 def compute_profile(recon: Reconstruction) -> dict:
     prof: dict = dict(recon.summary())
 
-    cams = (
-        np.array([_cam_center(im.qvec, im.tvec) for im in recon.images.values()])
-        if recon.images else np.zeros((0, 3))
-    )
+    cams = np.array([im.camera_center for im in recon.images.values()]) if recon.images else np.zeros((0, 3))
     pts = (
         np.array([p.xyz for p in recon.points3D.values()], dtype=float)
-        if recon.points3D else np.zeros((0, 3))
+        if recon.points3D
+        else np.zeros((0, 3))
     )
 
     if len(cams) >= 1:

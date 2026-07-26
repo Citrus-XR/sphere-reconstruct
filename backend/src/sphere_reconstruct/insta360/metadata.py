@@ -32,24 +32,34 @@ import struct
 from dataclasses import dataclass, field
 from pathlib import Path
 
-
 # 末尾トレイラの ASCII シグネチャ (32 バイト). バイナリ UUID ではない.
 FOOTER_SIGNATURE = b"8db42d694ccc418790edff439fe026bf"
 assert len(FOOTER_SIGNATURE) == 32
 
 # トレイラヘッダ (シグネチャ直前 8 バイト) のフィールド構造.
-_TRAILER_HEADER_STRUCT = struct.Struct("<II")   # inst_box_data_size, version
+_TRAILER_HEADER_STRUCT = struct.Struct("<II")  # inst_box_data_size, version
 TRAILER_HEADER_SIZE = _TRAILER_HEADER_STRUCT.size  # 8
-SIGNATURE_SIZE = len(FOOTER_SIGNATURE)             # 32
+SIGNATURE_SIZE = len(FOOTER_SIGNATURE)  # 32
 
 # インストールボックスヘッダ ("inst" プレフィックス) のサイズ (MP4 box 通常形式).
-_INST_HEADER_STRUCT = struct.Struct(">I4s")     # box_size BE u32, box_type 4s
+_INST_HEADER_STRUCT = struct.Struct(">I4s")  # box_size BE u32, box_type 4s
 _INST_BOX_TYPE = b"inst"
-INST_HEADER_SIZE = _INST_HEADER_STRUCT.size        # 8
+INST_HEADER_SIZE = _INST_HEADER_STRUCT.size  # 8
 
 
 class FooterNotFoundError(Exception):
     """Insta360 独自フッタが検出できなかった. 通常の MP4 かフォーマット違い."""
+
+
+@dataclass(frozen=True)
+class ExtraMetadata:
+    camera_type: str
+    first_frame_timestamp: int
+    gyro_timestamp: float
+    has_gyro_timestamp: bool
+    is_raw_gyro: bool
+    acc_range: int | None
+    gyro_range: int | None
 
 
 @dataclass
@@ -59,19 +69,19 @@ class InsvFooter:
     file_size: int
 
     # inst box (Insta360 メタデータボックス).
-    inst_box_offset: int      # ボックスヘッダの開始 offset
+    inst_box_offset: int  # ボックスヘッダの開始 offset
     inst_box_total_size: int  # ヘッダ含めた全長 (BE u32)
-    inst_box_data_offset: int # ヘッダ 8 バイト後
-    inst_box_data_size: int   # data 部の bytes (== box_total_size - 8)
+    inst_box_data_offset: int  # ヘッダ 8 バイト後
+    inst_box_data_size: int  # data 部の bytes (== box_total_size - 8)
 
     # 末尾トレイラ (512 バイトを実サンプルで観測).
-    trailer_offset: int       # inst box の直後
-    trailer_size: int         # file_size - trailer_offset
+    trailer_offset: int  # inst box の直後
+    trailer_size: int  # file_size - trailer_offset
 
     # トレイラヘッダ (シグネチャ直前 8 バイト).
     trailer_header_offset: int
     reported_inst_data_size: int  # トレイラヘッダの u32 (inst_box_data_size と一致すべき)
-    version: int                  # X5 サンプルでは 3
+    version: int  # X5 サンプルでは 3
 
     # ASCII シグネチャ.
     signature_offset: int
@@ -100,9 +110,7 @@ def read_footer(path: Path, footer_offset: int) -> InsvFooter:
             raise FooterNotFoundError("cannot read inst box header")
         box_size, box_type = _INST_HEADER_STRUCT.unpack(header)
         if box_type != _INST_BOX_TYPE:
-            raise FooterNotFoundError(
-                f"expected inst box, got {box_type!r} at offset {footer_offset}"
-            )
+            raise FooterNotFoundError(f"expected inst box, got {box_type!r} at offset {footer_offset}")
         if box_size < INST_HEADER_SIZE:
             raise FooterNotFoundError(f"nonsensical inst box size {box_size}")
 
@@ -110,9 +118,7 @@ def read_footer(path: Path, footer_offset: int) -> InsvFooter:
         inst_box_data_size = box_size - INST_HEADER_SIZE
         trailer_offset = footer_offset + box_size
         if trailer_offset > file_size:
-            raise FooterNotFoundError(
-                f"inst box overruns EOF (ends at {trailer_offset}, size={file_size})"
-            )
+            raise FooterNotFoundError(f"inst box overruns EOF (ends at {trailer_offset}, size={file_size})")
         trailer_size = file_size - trailer_offset
 
         # 2) 末尾シグネチャ. ファイル末尾に必ず 32 バイトあると仮定して直接読む.
@@ -126,9 +132,7 @@ def read_footer(path: Path, footer_offset: int) -> InsvFooter:
         # 3) トレイラヘッダ.
         trailer_header_offset = signature_offset - TRAILER_HEADER_SIZE
         f.seek(trailer_header_offset)
-        reported_size, version = _TRAILER_HEADER_STRUCT.unpack(
-            f.read(TRAILER_HEADER_SIZE)
-        )
+        reported_size, version = _TRAILER_HEADER_STRUCT.unpack(f.read(TRAILER_HEADER_SIZE))
 
     return InsvFooter(
         file_size=file_size,
@@ -241,3 +245,76 @@ def iter_trailer_records(footer: InsvFooter):
         if size == 0:
             break
         offset += size + _DESC_SIZE
+
+
+def read_extra_metadata(footer: InsvFooter) -> ExtraMetadata | None:
+    """record id=1 の protobuf から IMU 時刻正規化に必要な field だけを読む."""
+    for record_id, record_format, data in iter_trailer_records(footer):
+        if record_id == 1:
+            if record_format != 1:
+                raise ValueError(f"metadata record must be protobuf, got format={record_format}")
+            return parse_extra_metadata(data)
+    return None
+
+
+def parse_extra_metadata(data: bytes) -> ExtraMetadata:
+    fields = {field: value for field, _wire, value in _iter_protobuf_fields(data)}
+    camera_type = bytes(fields.get(2, b"")).decode("utf-8", "replace")
+    gyro_config = fields.get(65)
+    acc_range = gyro_range = None
+    if isinstance(gyro_config, bytes):
+        config_fields = {field: value for field, _wire, value in _iter_protobuf_fields(gyro_config)}
+        acc_range = int(config_fields[1]) if 1 in config_fields else None
+        gyro_range = int(config_fields[2]) if 2 in config_fields else None
+    return ExtraMetadata(
+        camera_type=camera_type,
+        first_frame_timestamp=int(fields.get(24, 0)),
+        gyro_timestamp=float(fields.get(28, 0.0)),
+        has_gyro_timestamp=bool(fields.get(29, 0)),
+        is_raw_gyro=bool(fields.get(62, 0)),
+        acc_range=acc_range,
+        gyro_range=gyro_range,
+    )
+
+
+def _iter_protobuf_fields(data: bytes):
+    offset = 0
+    while offset < len(data):
+        key, offset = _read_varint(data, offset)
+        field = key >> 3
+        wire = key & 0x07
+        if wire == 0:
+            value, offset = _read_varint(data, offset)
+        elif wire == 1:
+            if offset + 8 > len(data):
+                raise ValueError("truncated protobuf fixed64")
+            value = struct.unpack_from("<d", data, offset)[0]
+            offset += 8
+        elif wire == 2:
+            length, offset = _read_varint(data, offset)
+            end = offset + length
+            if end > len(data):
+                raise ValueError("truncated protobuf bytes field")
+            value = data[offset:end]
+            offset = end
+        elif wire == 5:
+            if offset + 4 > len(data):
+                raise ValueError("truncated protobuf fixed32")
+            value = struct.unpack_from("<f", data, offset)[0]
+            offset += 4
+        else:
+            raise ValueError(f"unsupported protobuf wire type: {wire}")
+        yield field, wire, value
+
+
+def _read_varint(data: bytes, offset: int) -> tuple[int, int]:
+    value = 0
+    shift = 0
+    while offset < len(data) and shift < 70:
+        byte = data[offset]
+        offset += 1
+        value |= (byte & 0x7F) << shift
+        if byte & 0x80 == 0:
+            return value, offset
+        shift += 7
+    raise ValueError("invalid protobuf varint")

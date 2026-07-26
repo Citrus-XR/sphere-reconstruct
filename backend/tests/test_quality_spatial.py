@@ -58,13 +58,15 @@ def test_optical_flow_median_positive_on_shift():
 
 
 def _cand(idx, ts, sharp, exp_ok=True, feats=100):
-    return sampling.Candidate(index=idx, timestamp_us=ts, sharpness=sharp, exposure_ok=exp_ok, feature_count=feats)
+    return sampling.Candidate(
+        index=idx, timestamp_us=ts, sharpness=sharp, exposure_ok=exp_ok, feature_count=feats
+    )
 
 
 def test_select_spatial_fast_layer_rejects_blur_and_exposure():
     cands = [
         _cand(0, 0, 100.0),
-        _cand(1, 1000, 5.0),            # blur (below min_sharpness)
+        _cand(1, 1000, 5.0),  # blur (below min_sharpness)
         _cand(2, 2000, 100.0, exp_ok=False),  # exposure
         _cand(3, 3000, 100.0),
     ]
@@ -111,3 +113,5 @@ def test_select_spatial_max_frames_cap():
     cfg = sampling.SpatialConfig(target_motion=1.0, max_frames=3)
     res = sampling.select_spatial(cands, lambda a, b: float(b - a), cfg)
     assert len(res.selected_indices) <= 3
+    assert res.selected_indices[0] == 0
+    assert res.selected_indices[-1] == 19

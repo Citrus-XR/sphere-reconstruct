@@ -1,6 +1,7 @@
-// ステージパラメータの型・既定値・params_by_stage 生成. StageSettings と Run All で共用.
+// 各 stage の UI state と API parameter 変換. 重い処理を独立再実行できる粒度に保つ.
 
 export type ReconMode = 'native_fisheye' | 'pinhole_rig' | 'equirectangular'
+export type QualityPreset = 'draft' | 'standard' | 'high' | 'custom'
 
 export interface StageParams {
   fps: number
@@ -8,7 +9,6 @@ export interface StageParams {
   sharpnessLevel: 'basic' | 'better' | 'best'
   maxFrames: number
   targetMotion: number
-  // spatial 抽帧の高级参数.
   candidateFps: number
   minSharpness: number
   minFeatures: number
@@ -18,51 +18,80 @@ export interface StageParams {
   dilate: number
   dilateOn: boolean
   prompt: string
-  backend: 'sift' | 'aliked'
-  device: 'auto' | 'cuda' | 'cpu'
-  matcher: 'sequential' | 'exhaustive' | 'vocab_tree'
-  loopClosure: boolean
-  baUseGpu: boolean
-  extractCapOn: boolean
-  extractMaxSize: number
-  overlap: number
-  size: number
-  emitTrainConfigs: boolean
-  // COLMAP 詳細 (高级选项). 0/false = COLMAP 既定. プリセットが「大」値を snap する.
-  colmapPreset: 'draft' | 'standard' | 'high' | 'custom'
-  siftMaxFeatures: number
-  siftMaxImageSize: number
+  qualityPreset: QualityPreset
+  featureType: 'SIFT' | 'ALIKED_N16ROT' | 'ALIKED_N32'
+  featureUseGpu: boolean
+  featureMaxImageSize: number
+  featureMaxNumFeatures: number
   siftPeakThreshold: number
   siftEdgeThreshold: number
   siftAffineDsp: boolean
+  matcherType: 'bruteforce' | 'lightglue'
+  pairing: 'sequential' | 'exhaustive' | 'vocab_tree'
+  matchingUseGpu: boolean
+  overlap: number
+  loopClosure: boolean
   maxNumMatches: number
   guidedMatching: boolean
   twoViewMinInliers: number
+  mapper: 'global' | 'incremental'
+  viewGraphCalibration: boolean
+  baUseGpu: boolean
+  mapperRandomSeed: number
   mapperMinNumMatches: number
   initMinNumInliers: number
+  initImageId1: number
+  initImageId2: number
   absPoseMaxError: number
   filterMaxReprojError: number
   filterMinTriAngle: number
   baLocalIters: number
   baGlobalIters: number
   minModelSize: number
+  minRegisteredRatio: number
+  minPoints3D: number
+  alignmentMethod: 'auto' | 'imu' | 'none'
+  size: number
+  emitTrainConfigs: boolean
 }
 
-// COLMAP 品質プリセット: 「大」ノブを snap する. SIFT 特徴/マッチ数は backend=sift のみ効くが,
-// BA 反復数は両 backend 共通なので, ALIKED でもプリセット変更が可視・有効になるよう含める.
-export const COLMAP_PRESETS: Record<'draft' | 'standard' | 'high', Partial<StageParams>> = {
-  draft: { siftMaxFeatures: 4096, siftMaxImageSize: 2048, maxNumMatches: 16384, baLocalIters: 15, baGlobalIters: 25 },
-  standard: { siftMaxFeatures: 8192, siftMaxImageSize: 3200, maxNumMatches: 32768, baLocalIters: 0, baGlobalIters: 0 },
-  high: { siftMaxFeatures: 16384, siftMaxImageSize: 4096, maxNumMatches: 65536, baLocalIters: 40, baGlobalIters: 75 },
+export const QUALITY_PRESETS: Record<Exclude<QualityPreset, 'custom'>, Partial<StageParams>> = {
+  draft: {
+    featureType: 'SIFT',
+    featureMaxImageSize: 1536,
+    featureMaxNumFeatures: 4096,
+    matcherType: 'bruteforce',
+    maxNumMatches: 8192,
+    baLocalIters: 15,
+    baGlobalIters: 50,
+  },
+  standard: {
+    featureType: 'SIFT',
+    featureMaxImageSize: 2048,
+    featureMaxNumFeatures: 8192,
+    matcherType: 'bruteforce',
+    maxNumMatches: 16384,
+    baLocalIters: 25,
+    baGlobalIters: 100,
+  },
+  high: {
+    featureType: 'ALIKED_N16ROT',
+    featureMaxImageSize: 2048,
+    featureMaxNumFeatures: 4096,
+    matcherType: 'lightglue',
+    maxNumMatches: 32768,
+    baLocalIters: 40,
+    baGlobalIters: 200,
+  },
 }
 
 export const DEFAULT_PARAMS: StageParams = {
-  fps: 1.0,
+  fps: 1,
   method: 'sharpness',
-  sharpnessLevel: 'basic',
+  sharpnessLevel: 'better',
   maxFrames: 0,
-  targetMotion: 1.5,
-  candidateFps: 3.0,
+  targetMotion: 8,
+  candidateFps: 1.5,
   minSharpness: 0,
   minFeatures: 50,
   maxClip: 0.25,
@@ -71,111 +100,146 @@ export const DEFAULT_PARAMS: StageParams = {
   dilate: 8,
   dilateOn: true,
   prompt: '',
-  backend: 'sift',
-  device: 'auto',
-  matcher: 'sequential',
-  loopClosure: false,
-  baUseGpu: false,
-  extractCapOn: false,
-  extractMaxSize: 2048,
-  overlap: 10,
-  size: 1024,
-  emitTrainConfigs: false,
-  colmapPreset: 'standard',
-  siftMaxFeatures: 8192,
-  siftMaxImageSize: 3200,
+  qualityPreset: 'standard',
+  featureType: 'SIFT',
+  featureUseGpu: true,
+  featureMaxImageSize: 2048,
+  featureMaxNumFeatures: 8192,
   siftPeakThreshold: 0,
   siftEdgeThreshold: 0,
   siftAffineDsp: false,
-  maxNumMatches: 32768,
+  matcherType: 'bruteforce',
+  pairing: 'sequential',
+  matchingUseGpu: true,
+  overlap: 4,
+  loopClosure: false,
+  maxNumMatches: 16384,
   guidedMatching: false,
-  twoViewMinInliers: 0,
+  twoViewMinInliers: 15,
+  mapper: 'global',
+  viewGraphCalibration: true,
+  baUseGpu: false,
+  mapperRandomSeed: 0,
   mapperMinNumMatches: 0,
   initMinNumInliers: 0,
+  initImageId1: 0,
+  initImageId2: 0,
   absPoseMaxError: 0,
   filterMaxReprojError: 0,
   filterMinTriAngle: 0,
-  baLocalIters: 0,
-  baGlobalIters: 0,
+  baLocalIters: 25,
+  baGlobalIters: 100,
   minModelSize: 0,
+  minRegisteredRatio: 0.8,
+  minPoints3D: 100,
+  alignmentMethod: 'auto',
+  size: 1024,
+  emitTrainConfigs: true,
 }
 
-const sharpnessCandidates = (s: StageParams['sharpnessLevel']) =>
-  s === 'better' ? 5 : s === 'best' ? 8 : 3
+const sharpnessCandidates = (level: StageParams['sharpnessLevel']) =>
+  level === 'better' ? 5 : level === 'best' ? 8 : 3
 
 export const paramsForStage = (
   stage: string,
-  p: StageParams,
-  reconMode: ReconMode,
+  params: StageParams,
+  mode: ReconMode,
 ): Record<string, unknown> => {
   switch (stage) {
     case 'extract_frames':
-      if (p.method === 'spatial') {
-        // 密集候補 → 品質門閾(清晰度/曝光/特徴) → 光流等間隔.
+      if (params.method === 'spatial') {
         return {
           selection_mode: 'spatial',
-          candidate_fps: p.candidateFps,
-          target_motion: p.targetMotion,
-          min_sharpness: p.minSharpness,
-          min_features: p.minFeatures,
-          max_clip: p.maxClip,
-          max_frames: p.maxFrames,
+          candidate_fps: params.candidateFps,
+          target_motion: params.targetMotion,
+          min_sharpness: params.minSharpness,
+          min_features: params.minFeatures,
+          max_clip: params.maxClip,
+          max_frames: params.maxFrames,
         }
       }
       return {
-        interval_sec: 1 / p.fps,
-        selection_mode: p.method, // 'interval' | 'sharpness'
-        sharpness_candidates: p.method === 'sharpness' ? sharpnessCandidates(p.sharpnessLevel) : 1,
-        max_frames: p.maxFrames,
+        interval_sec: 1 / params.fps,
+        selection_mode: params.method,
+        sharpness_candidates: params.method === 'sharpness'
+          ? sharpnessCandidates(params.sharpnessLevel)
+          : 1,
+        max_frames: params.maxFrames,
       }
+    case 'reproject_views':
+      return { size: params.size, fov_deg: 90 }
     case 'generate_masks':
       return {
-        max_inference_size: p.downsampleOn ? p.maskSize : 0, // 0 = 縮小しない.
-        dilate_px: p.dilateOn ? p.dilate : 0,                // 0 = 膨張しない.
-        prompt: p.prompt, // 常に送る (空なら SAM3 スキップ = 円マスクのみ).
-        // レイアウトは再構成モードで決まる: fisheye(生魚眼) / pinhole(再投影像) / erp(生 ERP).
-        layout: reconMode === 'native_fisheye' ? 'fisheye' : reconMode === 'pinhole_rig' ? 'pinhole' : 'erp',
+        max_inference_size: params.downsampleOn ? params.maskSize : 0,
+        dilate_px: params.dilateOn ? params.dilate : 0,
+        prompt: params.prompt,
+        layout: mode === 'native_fisheye' ? 'fisheye' : mode === 'pinhole_rig' ? 'pinhole' : 'erp',
+      }
+    case 'extract_features':
+      return {
+        reconstruction_mode: mode,
+        feature_type: params.featureType,
+        use_gpu: params.featureUseGpu,
+        use_masks: true,
+        max_image_size: params.featureMaxImageSize,
+        max_num_features: params.featureMaxNumFeatures,
+        sift_peak_threshold: params.siftPeakThreshold,
+        sift_edge_threshold: params.siftEdgeThreshold,
+        sift_affine_dsp: params.siftAffineDsp,
+      }
+    case 'match_features':
+      return {
+        feature_type: params.featureType,
+        matcher_type: params.matcherType,
+        pairing: params.pairing,
+        use_gpu: params.matchingUseGpu,
+        overlap: params.overlap,
+        loop_closure: params.loopClosure,
+        max_num_matches: params.maxNumMatches,
+        guided_matching: params.guidedMatching,
+        min_num_inliers: params.twoViewMinInliers,
       }
     case 'reconstruct':
       return {
-        reconstruction_mode: reconMode,
-        feature_backend: p.backend,
-        matcher: p.matcher,
-        overlap: p.overlap,
-        loop_closure: p.loopClosure,
-        ba_use_gpu: p.baUseGpu,
-        ...(p.backend === 'aliked' ? { extraction_device: p.device, extract_max_size: p.extractCapOn ? p.extractMaxSize : 0 } : {}),
-        // COLMAP 詳細 (0/false = 既定).
-        sift_max_num_features: p.siftMaxFeatures,
-        sift_max_image_size: p.siftMaxImageSize,
-        sift_peak_threshold: p.siftPeakThreshold,
-        sift_edge_threshold: p.siftEdgeThreshold,
-        sift_affine_dsp: p.siftAffineDsp,
-        max_num_matches: p.maxNumMatches,
-        guided_matching: p.guidedMatching,
-        two_view_min_num_inliers: p.twoViewMinInliers,
-        mapper_min_num_matches: p.mapperMinNumMatches,
-        init_min_num_inliers: p.initMinNumInliers,
-        abs_pose_max_error: p.absPoseMaxError,
-        filter_max_reproj_error: p.filterMaxReprojError,
-        filter_min_tri_angle: p.filterMinTriAngle,
-        ba_local_max_num_iterations: p.baLocalIters,
-        ba_global_max_num_iterations: p.baGlobalIters,
-        min_model_size: p.minModelSize,
+        mapper: params.mapper,
+        view_graph_calibration: params.viewGraphCalibration,
+        ba_use_gpu: params.baUseGpu,
+        random_seed: params.mapperRandomSeed,
+        mapper_min_num_matches: params.mapperMinNumMatches,
+        init_min_num_inliers: params.initMinNumInliers,
+        init_image_id1: params.initImageId1,
+        init_image_id2: params.initImageId2,
+        abs_pose_max_error: params.absPoseMaxError,
+        filter_max_reproj_error: params.filterMaxReprojError,
+        filter_min_tri_angle: params.filterMinTriAngle,
+        ba_local_max_num_iterations: params.baLocalIters,
+        ba_global_max_num_iterations: params.baGlobalIters,
+        min_model_size: params.minModelSize,
+        min_registered_ratio: params.minRegisteredRatio,
+        min_points3D: params.minPoints3D,
       }
-    case 'reproject_views':
-      return { size: p.size, fov_deg: 90 }
+    case 'align_reconstruction':
+      return { method: params.alignmentMethod, normalize_scale: true }
     case 'export_dataset':
-      return { emit_train_configs: p.emitTrainConfigs }
+      return { emit_train_configs: params.emitTrainConfigs }
     default:
       return {}
   }
 }
 
-// Run All 用: 全ステージ分の params_by_stage.
-export const allParams = (p: StageParams, reconMode: ReconMode): Record<string, Record<string, unknown>> => {
-  const stages = ['extract_frames', 'generate_masks', 'reconstruct', 'reproject_views', 'export_dataset']
-  const out: Record<string, Record<string, unknown>> = {}
-  for (const s of stages) out[s] = paramsForStage(s, p, reconMode)
-  return out
+export const allParams = (
+  params: StageParams,
+  mode: ReconMode,
+): Record<string, Record<string, unknown>> => {
+  const stages = [
+    'extract_frames',
+    'reproject_views',
+    'generate_masks',
+    'extract_features',
+    'match_features',
+    'reconstruct',
+    'align_reconstruction',
+    'export_dataset',
+  ]
+  return Object.fromEntries(stages.map(stage => [stage, paramsForStage(stage, params, mode)]))
 }

@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import sys
 from dataclasses import dataclass, field
-from pathlib import Path
 
 import numpy as np
 
@@ -47,7 +46,7 @@ class Sam3Engine:
         self._autocast_dtype = None  # cuda + bf16/fp16 のとき torch.dtype, それ以外 None
 
     @classmethod
-    def from_settings(cls) -> "Sam3Engine":
+    def from_settings(cls) -> Sam3Engine:
         paths = resolve()
         if paths is None:
             raise RuntimeError("SAM3 paths not configured (sam3.repo_path / checkpoint_path)")
@@ -74,9 +73,7 @@ class Sam3Engine:
 
         device = self._paths.device
         if device.startswith("cuda") and not torch.cuda.is_available():
-            raise RuntimeError(
-                f"SAM3 device is '{device}' but CUDA is not available on this machine"
-            )
+            raise RuntimeError(f"SAM3 device is '{device}' but CUDA is not available on this machine")
 
         # SAM3 の build_sam3_image_model 内 _setup_device_and_mode は device == "cuda"
         # の完全一致でしか model.cuda() しない ("cuda:0" だと重みが CPU に残り, 入力

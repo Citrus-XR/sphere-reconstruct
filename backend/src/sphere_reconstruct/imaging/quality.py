@@ -27,7 +27,7 @@ def _cv2():
 @dataclass
 class ExposureStats:
     under_ratio: float  # 暗部 (<= low) に張り付いた画素の割合
-    over_ratio: float   # 明部 (>= high) に張り付いた画素の割合
+    over_ratio: float  # 明部 (>= high) に張り付いた画素の割合
     mean: float
 
     def is_ok(self, max_clip: float = 0.25) -> bool:
@@ -65,7 +65,9 @@ def sift_feature_count(gray: np.ndarray, downscale: int = 2) -> int:
         gray = cv2.cvtColor(gray, cv2.COLOR_BGR2GRAY)
     if downscale > 1:
         h, w = gray.shape[:2]
-        gray = cv2.resize(gray, (max(1, w // downscale), max(1, h // downscale)), interpolation=cv2.INTER_AREA)
+        gray = cv2.resize(
+            gray, (max(1, w // downscale), max(1, h // downscale)), interpolation=cv2.INTER_AREA
+        )
     kp = _get_sift().detect(gray, None)
     return len(kp)
 
@@ -87,8 +89,16 @@ def optical_flow_median(prev_gray: np.ndarray, cur_gray: np.ndarray, downscale: 
         prev_gray = cv2.resize(prev_gray, size, interpolation=cv2.INTER_AREA)
         cur_gray = cv2.resize(cur_gray, size, interpolation=cv2.INTER_AREA)
     flow = cv2.calcOpticalFlowFarneback(
-        prev_gray, cur_gray, None,
-        pyr_scale=0.5, levels=3, winsize=15, iterations=3, poly_n=5, poly_sigma=1.2, flags=0,
+        prev_gray,
+        cur_gray,
+        None,
+        pyr_scale=0.5,
+        levels=3,
+        winsize=15,
+        iterations=3,
+        poly_n=5,
+        poly_sigma=1.2,
+        flags=0,
     )
     mag = np.sqrt(flow[..., 0] ** 2 + flow[..., 1] ** 2)
     return float(np.median(mag))

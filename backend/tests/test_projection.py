@@ -19,23 +19,49 @@ from sphere_reconstruct.insta360.calibration import MeiLensCalibration
 def _make_lens_a() -> MeiLensCalibration:
     # 実 X5 サンプルの lens A.
     return MeiLensCalibration(
-        xi=2.0, fx=4278.30, fy=4277.33, cx=2694.63, cy=2681.84,
-        yaw=0.615, pitch=0.016, roll=89.937,
-        tx=0.0, ty=0.0, tz=0.0,
-        k1=0.18366432, k2=2.07332635, k3=-3.27984834,
-        p1=-0.00005305, p2=0.00065176,
-        ref_image_width=10752, ref_image_height=5376, lens_flags=113,
+        xi=2.0,
+        fx=4278.30,
+        fy=4277.33,
+        cx=2694.63,
+        cy=2681.84,
+        yaw=0.615,
+        pitch=0.016,
+        roll=89.937,
+        tx=0.0,
+        ty=0.0,
+        tz=0.0,
+        k1=0.18366432,
+        k2=2.07332635,
+        k3=-3.27984834,
+        p1=-0.00005305,
+        p2=0.00065176,
+        ref_image_width=10752,
+        ref_image_height=5376,
+        lens_flags=113,
     )
 
 
 def _make_lens_b() -> MeiLensCalibration:
     return MeiLensCalibration(
-        xi=2.0, fx=4296.81, fy=4298.54, cx=8064.92, cy=2686.41,
-        yaw=-0.718, pitch=0.211, roll=89.840,
-        tx=-0.000048, ty=0.000131, tz=-0.032273,
-        k1=0.18302010, k2=2.05338216, k3=-3.26668859,
-        p1=0.00187136, p2=0.00038193,
-        ref_image_width=10752, ref_image_height=5376, lens_flags=113,
+        xi=2.0,
+        fx=4296.81,
+        fy=4298.54,
+        cx=8064.92,
+        cy=2686.41,
+        yaw=-0.718,
+        pitch=0.211,
+        roll=89.840,
+        tx=-0.000048,
+        ty=0.000131,
+        tz=-0.032273,
+        k1=0.18302010,
+        k2=2.05338216,
+        k3=-3.26668859,
+        p1=0.00187136,
+        p2=0.00038193,
+        ref_image_width=10752,
+        ref_image_height=5376,
+        lens_flags=113,
     )
 
 

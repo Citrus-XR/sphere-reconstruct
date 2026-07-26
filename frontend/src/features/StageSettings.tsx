@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, type FrameSelection, type SourceInfo, type StageStatus } from '../api/client'
-import { paramsForStage, COLMAP_PRESETS, type ReconMode, type StageParams } from './stageParams'
+import { paramsForStage, QUALITY_PRESETS, type ReconMode, type StageParams } from './stageParams'
 import { ProgressRing } from '../components/ProgressRing'
 import { useSettings } from '../ui/settings'
 
@@ -45,6 +45,7 @@ export const StageSettings = ({
 }) => {
   const { t } = useSettings()
   const qc = useQueryClient()
+  const { data: doctor } = useQuery({ queryKey: ['doctor'], queryFn: api.getDoctor, staleTime: 30_000 })
   const [advOpen, setAdvOpen] = useState(false)
   const [colmapAdvOpen, setColmapAdvOpen] = useState(false)
   // 実行中は 1s 毎に now を進めて経過/予測終了を更新する.
@@ -77,21 +78,17 @@ export const StageSettings = ({
 
   const predBase = sourceInfo?.duration_sec ? Math.floor(sourceInfo.duration_sec * params.fps) : null
   const predCapped = predBase != null && params.maxFrames > 0 ? Math.min(predBase, params.maxFrames) : predBase
-  // 源の検査ボタンを隠す (緑扱い) のは「ERP ソース かつ equirectangular モード」だけ.
-  // ERP+pinhole は reproject という処理が要るので, 源ステップも通常の生成ボタンを出す.
-  const hideRun = stage === 'inspect_source' && sourceKind !== 'insv' && reconMode === 'equirectangular'
-
   return (
     <div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
         <strong style={{ flex: 1 }}>{t(`st_${stage}`)}</strong>
-        {!hideRun && (processing && stageIsRunning
+        {processing && stageIsRunning
           ? <button className="btn stop" onClick={onStop}>■ {t('stop')}</button>
           : <button className="btn" disabled={run.isPending || !hasSource || processing}
               title={!hasSource ? t('noSource') : processing ? t('otherRunning') : ''}
               onClick={() => run.mutate()}>
               {status?.has_output ? t('regenerate') : t('generate')}
-            </button>)}
+            </button>}
         <button className="btn btn-secondary" disabled={clear.isPending || !status?.has_output || processing}
           onClick={() => clear.mutate()}>{t('clear')}</button>
       </div>
@@ -119,6 +116,7 @@ export const StageSettings = ({
       {!hasSource && stage !== 'inspect_source' && <div className="hint" style={{ color: '#d69a2a', marginBottom: 8 }}>{t('needSource')}</div>}
       {run.error && <div className="error">{String(run.error)}</div>}
       {clear.error && <div className="error">{String(clear.error)}</div>}
+      {status?.has_output && status.extra && <StageResult stage={stage} extra={status.extra} />}
 
       {stage === 'extract_frames' && (
         <>
@@ -240,83 +238,20 @@ export const StageSettings = ({
         </>
       )}
 
-      {stage === 'reconstruct' && (
+      {stage === 'extract_features' && (
         <>
           <div className="hint" style={{ marginBottom: 8 }}>
             {t('lbl_mode')}: {reconMode === 'native_fisheye' ? t('modeNative')
               : reconMode === 'equirectangular' ? t('modeEquirect') : t('modePinhole')} ({t('st_inspect_source')})
           </div>
           <div className="ctl">
-            <label>{t('lbl_backend')}</label>
-            <select className="input" value={params.backend} onChange={e => setParams({ backend: e.target.value as StageParams['backend'] })}>
-              <option value="sift">SIFT</option><option value="aliked">ALIKED</option>
-            </select>
-            <div className="hint">{t('hint_backend')}</div>
-          </div>
-          {params.backend === 'sift' && (
-            <>
-              <div className="ctl">
-                <label>{t('lbl_matcher')}</label>
-                <select className="input" value={params.matcher}
-                  onChange={e => setParams({ matcher: e.target.value as StageParams['matcher'] })}>
-                  <option value="sequential">{t('matcher_sequential')}</option>
-                  <option value="exhaustive">{t('matcher_exhaustive')}</option>
-                  <option value="vocab_tree">{t('matcher_vocab')}</option>
-                </select>
-                <div className="hint">{t('hint_matcher')}</div>
-              </div>
-              {params.matcher === 'sequential' && (
-                <div className="ctl">
-                  <label style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
-                    <input type="checkbox" checked={params.loopClosure}
-                      onChange={() => setParams({ loopClosure: !params.loopClosure })} /> {t('lbl_loopClosure')}
-                  </label>
-                  <div className="hint">{t('hint_loopClosure')}</div>
-                </div>
-              )}
-            </>
-          )}
-          {params.backend === 'aliked' && (
-            <div className="ctl">
-              <label>{t('lbl_device')}</label>
-              <select className="input" value={params.device} onChange={e => setParams({ device: e.target.value as StageParams['device'] })}>
-                <option value="auto">auto</option><option value="cuda">GPU</option><option value="cpu">CPU</option>
-              </select>
-              <div className="hint">{t('hint_device')}</div>
-              {params.device === 'cuda' && <div className="hint" style={{ color: '#d69a2a' }}>{t('oomWarn')}</div>}
-            </div>
-          )}
-          <Slider label={t('lbl_overlap')} hint={t('hint_overlap')} min={2} max={20} step={1}
-            value={params.overlap} onChange={v => setParams({ overlap: Math.round(v) })} fmt={v => `${v}`} />
-          {params.backend === 'aliked' && (
-            <div className="ctl">
-              <div style={{ cursor: 'pointer', userSelect: 'none', color: 'var(--fg-mute)', fontSize: 12 }}
-                onClick={() => setAdvOpen(v => !v)}>{advOpen ? '▾' : '▸'} {t('lbl_advanced')}</div>
-              {advOpen && (
-                <div style={{ marginTop: 6 }}>
-                  <div className="ctl">
-                    <label style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
-                      <input type="checkbox" checked={params.extractCapOn}
-                        onChange={() => setParams({ extractCapOn: !params.extractCapOn })} /> {t('lbl_extractCap')}
-                    </label>
-                    <div className="hint">{t('hint_extractCap')}</div>
-                  </div>
-                  {params.extractCapOn && (
-                    <Slider label={t('lbl_extractCap')} hint="" min={6} max={14} step={1}
-                      value={Math.round(Math.log2(params.extractMaxSize))}
-                      onChange={v => setParams({ extractMaxSize: 2 ** v })} fmt={v => `${2 ** v}px`} />
-                  )}
-                </div>
-              )}
-            </div>
-          )}
-
-          <div className="ctl">
             <label>{t('lbl_qualityPreset')}</label>
-            <select className="input" value={params.colmapPreset}
+            <select className="input" value={params.qualityPreset}
               onChange={e => {
-                const v = e.target.value as StageParams['colmapPreset']
-                setParams(v === 'custom' ? { colmapPreset: v } : { colmapPreset: v, ...COLMAP_PRESETS[v] })
+                const value = e.target.value as StageParams['qualityPreset']
+                setParams(value === 'custom'
+                  ? { qualityPreset: value }
+                  : { qualityPreset: value, ...QUALITY_PRESETS[value] })
               }}>
               <option value="draft">{t('preset_draft')}</option>
               <option value="standard">{t('preset_standard')}</option>
@@ -325,51 +260,136 @@ export const StageSettings = ({
             </select>
             <div className="hint">{t('hint_qualityPreset')}</div>
           </div>
+          <div className="ctl">
+            <label>{t('lbl_backend')}</label>
+            <select className="input" value={params.featureType}
+              onChange={e => setParams({ featureType: e.target.value as StageParams['featureType'], qualityPreset: 'custom' })}>
+              <option value="ALIKED_N16ROT">ALIKED N16ROT</option>
+              <option value="ALIKED_N32">ALIKED N32</option>
+              <option value="SIFT">SIFT</option>
+            </select>
+            <div className="hint">{t('hint_backend')}</div>
+          </div>
+          <NumField label={t('f_maxImageSize')} value={params.featureMaxImageSize}
+            onChange={value => setParams({ featureMaxImageSize: value, qualityPreset: 'custom' })} />
+          <NumField label={t('f_maxFeatures')} value={params.featureMaxNumFeatures}
+            onChange={value => setParams({ featureMaxNumFeatures: value, qualityPreset: 'custom' })} />
+          <label style={{ display: 'inline-flex', gap: 6, alignItems: 'center', margin: '4px 0' }}>
+            <input type="checkbox" checked={params.featureUseGpu}
+              onChange={() => setParams({ featureUseGpu: !params.featureUseGpu })} /> GPU
+          </label>
+          {params.featureType === 'SIFT' && <>
+            <NumField label={t('f_peakThreshold')} value={params.siftPeakThreshold} step={0.0001}
+              onChange={value => setParams({ siftPeakThreshold: value, qualityPreset: 'custom' })} />
+            <NumField label={t('f_edgeThreshold')} value={params.siftEdgeThreshold} step={0.5}
+              onChange={value => setParams({ siftEdgeThreshold: value, qualityPreset: 'custom' })} />
+            <label style={{ display: 'inline-flex', gap: 6, alignItems: 'center', margin: '4px 0' }}>
+              <input type="checkbox" checked={params.siftAffineDsp}
+                onChange={() => setParams({ siftAffineDsp: !params.siftAffineDsp, qualityPreset: 'custom' })} /> {t('f_affineDsp')}
+            </label>
+          </>}
+        </>
+      )}
 
+      {stage === 'match_features' && (
+        <>
+          <div className="ctl">
+            <label>{t('lbl_matcher')}</label>
+            <select className="input" value={params.matcherType}
+              onChange={e => setParams({ matcherType: e.target.value as StageParams['matcherType'], qualityPreset: 'custom' })}>
+              <option value="bruteforce">Brute-force</option>
+              <option value="lightglue">LightGlue</option>
+            </select>
+          </div>
+          <div className="ctl">
+            <label>{t('lbl_pairing')}</label>
+            <select className="input" value={params.pairing}
+              onChange={e => setParams({ pairing: e.target.value as StageParams['pairing'] })}>
+              <option value="sequential">{t('matcher_sequential')}</option>
+              <option value="exhaustive">{t('matcher_exhaustive')}</option>
+              <option value="vocab_tree">{t('matcher_vocab')}</option>
+            </select>
+          </div>
+          {params.pairing === 'sequential' && <>
+            <Slider label={t('lbl_overlap')} hint={t('hint_overlap')} min={2} max={20} step={1}
+              value={params.overlap} onChange={value => setParams({ overlap: Math.round(value) })} fmt={value => `${value}`} />
+            <label style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
+              <input type="checkbox" checked={params.loopClosure}
+                onChange={() => setParams({ loopClosure: !params.loopClosure })} /> {t('lbl_loopClosure')}
+            </label>
+          </>}
+          <NumField label={t('f_maxMatches')} value={params.maxNumMatches}
+            onChange={value => setParams({ maxNumMatches: value, qualityPreset: 'custom' })} />
+          <NumField label={t('f_twoViewInliers')} value={params.twoViewMinInliers}
+            onChange={value => setParams({ twoViewMinInliers: value })} />
+          <label style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
+            <input type="checkbox" checked={params.guidedMatching}
+              onChange={() => setParams({ guidedMatching: !params.guidedMatching })} /> {t('f_guidedMatching')}
+          </label>
+        </>
+      )}
+
+      {stage === 'reconstruct' && (
+        <>
+          <div className="ctl">
+            <label>{t('lbl_mapper')}</label>
+            <select className="input" value={params.mapper}
+              onChange={e => setParams({
+                mapper: e.target.value as StageParams['mapper'],
+                viewGraphCalibration: e.target.value === 'global',
+              })}>
+              <option value="global">Global Mapper</option>
+              <option value="incremental">Incremental Mapper</option>
+            </select>
+          </div>
+          {params.mapper === 'global' && <label style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
+            <input type="checkbox" checked={params.viewGraphCalibration}
+              onChange={() => setParams({ viewGraphCalibration: !params.viewGraphCalibration })} /> View graph calibration
+          </label>}
+          <label style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
+            <input type="checkbox" checked={params.baUseGpu}
+              disabled={!doctor?.checks.colmap.capabilities?.gpu_bundle_adjustment}
+              onChange={() => setParams({ baUseGpu: !params.baUseGpu })} /> {t('f_baUseGpu')}
+          </label>
+          {!doctor?.checks.colmap.capabilities?.gpu_bundle_adjustment && (
+            <div className="hint" style={{ color: '#d69a2a' }}>
+              Ceres CUDA/cuDSS unavailable; BA uses CPU.
+            </div>
+          )}
           <div className="ctl">
             <div style={{ cursor: 'pointer', userSelect: 'none', color: 'var(--fg-mute)', fontSize: 12 }}
-              onClick={() => setColmapAdvOpen(v => !v)}>{colmapAdvOpen ? '▾' : '▸'} {t('lbl_colmapAdvanced')}</div>
-            {colmapAdvOpen && (() => {
-              // 詳細フィールドを編集したらプリセットは custom 扱いにする.
-              const setC = (patch: Partial<StageParams>) => setParams({ ...patch, colmapPreset: 'custom' })
-              return (
-                <div style={{ marginTop: 6 }}>
-                  <div className="hint" style={{ marginBottom: 6 }}>{t('hint_colmapZeroDefault')}</div>
-                  {params.backend === 'sift' && <>
-                    <div className="hint" style={{ fontWeight: 600 }}>{t('grp_features')}</div>
-                    <NumField label={t('f_maxFeatures')} value={params.siftMaxFeatures} onChange={v => setC({ siftMaxFeatures: v })} />
-                    <NumField label={t('f_maxImageSize')} value={params.siftMaxImageSize} onChange={v => setC({ siftMaxImageSize: v })} />
-                    <NumField label={t('f_peakThreshold')} value={params.siftPeakThreshold} step={0.0001} onChange={v => setC({ siftPeakThreshold: v })} />
-                    <NumField label={t('f_edgeThreshold')} value={params.siftEdgeThreshold} step={0.5} onChange={v => setC({ siftEdgeThreshold: v })} />
-                    <label style={{ display: 'inline-flex', gap: 6, alignItems: 'center', margin: '4px 0' }}>
-                      <input type="checkbox" checked={params.siftAffineDsp} onChange={() => setC({ siftAffineDsp: !params.siftAffineDsp })} /> {t('f_affineDsp')}
-                    </label>
-                  </>}
-                  <div className="hint" style={{ fontWeight: 600, marginTop: 6 }}>{t('grp_matching')}</div>
-                  {params.backend === 'sift' && <>
-                    <NumField label={t('f_maxMatches')} value={params.maxNumMatches} onChange={v => setC({ maxNumMatches: v })} />
-                    <label style={{ display: 'inline-flex', gap: 6, alignItems: 'center', margin: '4px 0' }}>
-                      <input type="checkbox" checked={params.guidedMatching} onChange={() => setC({ guidedMatching: !params.guidedMatching })} /> {t('f_guidedMatching')}
-                    </label>
-                  </>}
-                  <NumField label={t('f_twoViewInliers')} value={params.twoViewMinInliers} onChange={v => setC({ twoViewMinInliers: v })} />
-                  <div className="hint" style={{ fontWeight: 600, marginTop: 6 }}>{t('grp_mapper')}</div>
-                  <label style={{ display: 'inline-flex', gap: 6, alignItems: 'center', margin: '4px 0' }}>
-                    <input type="checkbox" checked={params.baUseGpu} onChange={() => setC({ baUseGpu: !params.baUseGpu })} /> {t('f_baUseGpu')}
-                  </label>
-                  <NumField label={t('f_mapperMinMatches')} value={params.mapperMinNumMatches} onChange={v => setC({ mapperMinNumMatches: v })} />
-                  <NumField label={t('f_initMinInliers')} value={params.initMinNumInliers} onChange={v => setC({ initMinNumInliers: v })} />
-                  <NumField label={t('f_absPoseMaxError')} value={params.absPoseMaxError} step={0.5} onChange={v => setC({ absPoseMaxError: v })} />
-                  <NumField label={t('f_filterMaxReproj')} value={params.filterMaxReprojError} step={0.5} onChange={v => setC({ filterMaxReprojError: v })} />
-                  <NumField label={t('f_filterMinTriAngle')} value={params.filterMinTriAngle} step={0.5} onChange={v => setC({ filterMinTriAngle: v })} />
-                  <NumField label={t('f_baLocalIters')} value={params.baLocalIters} onChange={v => setC({ baLocalIters: v })} />
-                  <NumField label={t('f_baGlobalIters')} value={params.baGlobalIters} onChange={v => setC({ baGlobalIters: v })} />
-                  <NumField label={t('f_minModelSize')} value={params.minModelSize} onChange={v => setC({ minModelSize: v })} />
-                </div>
-              )
-            })()}
+              onClick={() => setColmapAdvOpen(value => !value)}>{colmapAdvOpen ? '▾' : '▸'} {t('lbl_colmapAdvanced')}</div>
+            {colmapAdvOpen && <div style={{ marginTop: 6 }}>
+              <NumField label={t('f_mapperMinMatches')} value={params.mapperMinNumMatches} onChange={value => setParams({ mapperMinNumMatches: value })} />
+              <NumField label="random_seed" value={params.mapperRandomSeed} onChange={value => setParams({ mapperRandomSeed: value })} />
+              {params.mapper === 'incremental' && <>
+                <NumField label={t('f_initMinInliers')} value={params.initMinNumInliers} onChange={value => setParams({ initMinNumInliers: value })} />
+                <NumField label="init_image_id1" value={params.initImageId1} onChange={value => setParams({ initImageId1: value })} />
+                <NumField label="init_image_id2" value={params.initImageId2} onChange={value => setParams({ initImageId2: value })} />
+                <NumField label={t('f_absPoseMaxError')} value={params.absPoseMaxError} step={0.5} onChange={value => setParams({ absPoseMaxError: value })} />
+                <NumField label={t('f_filterMaxReproj')} value={params.filterMaxReprojError} step={0.5} onChange={value => setParams({ filterMaxReprojError: value })} />
+                <NumField label={t('f_filterMinTriAngle')} value={params.filterMinTriAngle} step={0.5} onChange={value => setParams({ filterMinTriAngle: value })} />
+                <NumField label={t('f_baLocalIters')} value={params.baLocalIters} onChange={value => setParams({ baLocalIters: value })} />
+                <NumField label={t('f_minModelSize')} value={params.minModelSize} onChange={value => setParams({ minModelSize: value })} />
+              </>}
+              <NumField label={t('f_baGlobalIters')} value={params.baGlobalIters} onChange={value => setParams({ baGlobalIters: value })} />
+              <NumField label="min_points3D" value={params.minPoints3D} onChange={value => setParams({ minPoints3D: value })} />
+            </div>}
           </div>
         </>
+      )}
+
+      {stage === 'align_reconstruction' && (
+        <div className="ctl">
+          <label>{t('lbl_alignment')}</label>
+          <select className="input" value={params.alignmentMethod}
+            onChange={e => setParams({ alignmentMethod: e.target.value as StageParams['alignmentMethod'] })}>
+            <option value="auto">IMU auto</option>
+            <option value="imu">IMU required</option>
+            <option value="none">Disabled</option>
+          </select>
+          <div className="hint">{t('hint_alignment')}</div>
+        </div>
       )}
 
       {stage === 'reproject_views' && (
@@ -466,6 +486,22 @@ const NumField = ({ label, value, step = 1, onChange }: {
       placeholder="default (0)" onChange={e => onChange(Number(e.target.value) || 0)} />
   </div>
 )
+
+const StageResult = ({ stage, extra }: { stage: string; extra: Record<string, unknown> }) => {
+  const rows: Array<[string, unknown]> = stage === 'extract_features'
+    ? [['images', extra.images], ['avg keypoints', Math.round(Number(extra.average_keypoints ?? 0))]]
+    : stage === 'match_features'
+    ? [['verified pairs', extra.verified_pairs], ['avg inliers', Number(extra.average_inliers ?? 0).toFixed(1)]]
+    : stage === 'reconstruct'
+    ? [['registered', `${extra.num_images ?? 0}`], ['points', extra.num_points3D], ['error', `${Number(extra.mean_reprojection_error ?? 0).toFixed(3)} px`]]
+    : stage === 'align_reconstruction'
+    ? [['applied', String(extra.applied)], ['spread', `${Number(extra.spread_deg ?? 0).toFixed(2)}°`], ['inliers', extra.inlier_count], ['time offset', `${Number(extra.time_offset_sec ?? 0).toFixed(3)} s`]]
+    : []
+  if (!rows.length) return null
+  return <div className="predict" style={{ marginBottom: 10 }}>
+    {rows.map(([label, value]) => <div key={label}><span className="hint">{label}: </span>{String(value ?? '—')}</div>)}
+  </div>
+}
 
 const Slider = ({
   label, hint, min, max, step, value, onChange, fmt,

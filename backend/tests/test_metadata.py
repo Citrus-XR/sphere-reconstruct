@@ -16,11 +16,11 @@ def _make_box(box_type: bytes, payload: bytes) -> bytes:
 
 
 def _make_insv(inst_payload_size: int = 32, version: int = 3) -> bytes:
-    ftyp = _make_box(b"ftyp", b"\x00" * 8)   # 16 bytes
-    mdat = _make_box(b"mdat", b"\x00" * 8)   # 16 bytes
-    moov = _make_box(b"moov", b"\x00" * 8)   # 16 bytes
+    ftyp = _make_box(b"ftyp", b"\x00" * 8)  # 16 bytes
+    mdat = _make_box(b"mdat", b"\x00" * 8)  # 16 bytes
+    moov = _make_box(b"moov", b"\x00" * 8)  # 16 bytes
     inst_data = bytes(range(inst_payload_size))
-    inst = _make_box(b"inst", inst_data)     # 8 + N bytes
+    inst = _make_box(b"inst", inst_data)  # 8 + N bytes
 
     # trailer: (protobuf/padding 適当) + 8 バイトヘッダ + 32 バイト署名
     trailer_body = b"\x00" * 24  # 適当な padding
@@ -74,3 +74,42 @@ def test_footer_not_found_on_pure_mp4(tmp_path: Path):
     p.write_bytes(ftyp + mdat)
     lay = insv.layout(p)
     assert lay.footer_offset is None
+
+
+def _varint(value: int) -> bytes:
+    encoded = bytearray()
+    while value >= 0x80:
+        encoded.append((value & 0x7F) | 0x80)
+        value >>= 7
+    encoded.append(value)
+    return bytes(encoded)
+
+
+def _protobuf_varint(field: int, value: int) -> bytes:
+    return _varint(field << 3) + _varint(value)
+
+
+def _protobuf_bytes(field: int, value: bytes) -> bytes:
+    return _varint((field << 3) | 2) + _varint(len(value)) + value
+
+
+def test_parse_extra_metadata_fields_needed_for_imu_timestamps():
+    gyro_config = _protobuf_varint(1, 32) + _protobuf_varint(2, 2000)
+    payload = b"".join(
+        [
+            _protobuf_bytes(2, b"Insta360 X5"),
+            _protobuf_varint(24, 158_412_034_768),
+            _varint((28 << 3) | 1) + struct.pack("<d", 1.6),
+            _protobuf_varint(29, 1),
+            _protobuf_varint(62, 1),
+            _protobuf_bytes(65, gyro_config),
+        ]
+    )
+    parsed = metadata.parse_extra_metadata(payload)
+    assert parsed.camera_type == "Insta360 X5"
+    assert parsed.first_frame_timestamp == 158_412_034_768
+    assert parsed.gyro_timestamp == 1.6
+    assert parsed.has_gyro_timestamp is True
+    assert parsed.is_raw_gyro is True
+    assert parsed.acc_range == 32
+    assert parsed.gyro_range == 2000

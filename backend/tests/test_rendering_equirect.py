@@ -34,8 +34,8 @@ def test_front_center_maps_to_erp_center(tmp_path):
     assert st.valid_ratio == 1.0
     assert st.dst_size == (64, 64)
     c = img[32, 32]
-    assert abs(int(c[2]) - 128) <= 4   # 経度 0 -> u=W/2
-    assert abs(int(c[1]) - 128) <= 4   # 緯度 0 -> v=H/2
+    assert abs(int(c[2]) - 128) <= 4  # 経度 0 -> u=W/2
+    assert abs(int(c[1]) - 128) <= 4  # 緯度 0 -> v=H/2
 
 
 def test_up_and_down_do_not_wrap_vertically(tmp_path):
@@ -52,4 +52,4 @@ def test_front_horizontal_gradient_increases_rightward(tmp_path):
     img, _ = rendering.render_perspective_from_equirect(_gradient_erp(tmp_path), _views()["front"])
     left = int(img[32, 8][2])
     right = int(img[32, 56][2])
-    assert right > left   # 右へ行くほど経度(u)大
+    assert right > left  # 右へ行くほど経度(u)大

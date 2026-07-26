@@ -1,5 +1,4 @@
-// バックエンドの API 型と fetch ヘルパ.
-// Phase 7 で OpenAPI から自動生成に置き換える予定. それまでは手書きで最小限持つ.
+// バックエンドの API 型と fetch ヘルパ. Browser 固有の binary points parser もここに集約する.
 
 export type PipelineState =
   | 'created'
@@ -7,7 +6,10 @@ export type PipelineState =
   | 'extracted'
   | 'reprojected'
   | 'masked'
+  | 'features_extracted'
+  | 'matched'
   | 'reconstructed'
+  | 'aligned'
   | 'exported'
 
 export type SourceKind = 'insv' | 'erp_video' | 'erp_images'
@@ -81,6 +83,9 @@ export interface ReconstructionData {
     num_points3D: number
     mean_reprojection_error: number
     mean_track_length: number
+    camera_center_span?: number[]
+    camera_trajectory_diameter?: number
+    unique_camera_centers?: number
     registered_ratio?: number
   }
   points_file: string
@@ -156,6 +161,7 @@ export const api = {
     }),
   // system / filesystem / stages.
   getSystemStats: () => req<SystemStats>('/api/system/stats'),
+  getDoctor: () => req<DoctorReport>('/api/system/doctor'),
   getFsRoots: () => req<{ roots: string[] }>('/api/fs/roots'),
   getFsDrives: () => req<{ drives: string[] }>('/api/fs/drives'),
   browseFs: (path: string) =>
@@ -163,7 +169,7 @@ export const api = {
   getSourceInfo: (id: string) => req<SourceInfo>(`/api/projects/${id}/source-info`),
   getStages: (id: string) => req<StagesStatus>(`/api/projects/${id}/stages`),
   clearStage: (id: string, stage: string) =>
-    req<{ cleared: string; state: string }>(`/api/projects/${id}/stages/${stage}/clear`, {
+    req<{ cleared: string; invalidated: string[]; state: string }>(`/api/projects/${id}/stages/${stage}/clear`, {
       method: 'POST',
     }),
   clearOutputs: (id: string) =>
@@ -182,6 +188,19 @@ export interface SystemStats {
   cpu_percent: number | null
   ram: { percent: number; used_mb: number; total_mb: number } | null
   gpus: SystemGpu[]
+}
+export interface DoctorCheck {
+  ok: boolean
+  optional?: boolean
+  message: string
+  path?: string | null
+  version?: string
+  capabilities?: Record<string, boolean>
+}
+export interface DoctorReport {
+  ready: boolean
+  platform: Record<string, string>
+  checks: Record<string, DoctorCheck>
 }
 export interface FsEntry {
   name: string
@@ -213,6 +232,7 @@ export interface StageStatus {
   started_at: string | null
   finished_at: string | null
   params: Record<string, unknown> | null
+  extra: Record<string, unknown> | null
 }
 export interface StagesStatus {
   project_id: string

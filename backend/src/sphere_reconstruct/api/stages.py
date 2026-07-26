@@ -11,14 +11,19 @@
 from __future__ import annotations
 
 import json
-import shutil
 
 from fastapi import APIRouter, HTTPException
 
 from ..domain import project as project_domain
 from ..domain.artifacts import manifest_path
-from ..domain.pipeline_state import STAGE_ORDER, STAGE_TO_STATE, PipelineState, StageName
+from ..domain.pipeline_state import (
+    STAGE_ORDER,
+    STAGE_TO_STATE,
+    PipelineState,
+    StageName,
+)
 from ..infrastructure.database import get_db
+from ..pipeline.invalidation import clear_pipeline, invalidate_from, is_stale
 from ..settings import workspace_root
 
 router = APIRouter(tags=["stages"])
@@ -57,22 +62,31 @@ async def list_stages(project_id: str) -> dict:
         mf = manifest_path(proj_dir, st.value)
         has_output = mf.exists()
         params = None
+        extra = None
         if has_output:
             try:
-                params = json.loads(mf.read_text()).get("params")
+                manifest_data = json.loads(mf.read_text())
+                params = manifest_data.get("params")
+                extra = manifest_data.get("extra")
             except (OSError, json.JSONDecodeError):
                 params = None
         run = latest.get(st.value, {})
+        status = run.get("status")
+        if not has_output and is_stale(proj_dir, st):
+            status = "stale"
+        elif not has_output and status == "succeeded":
+            status = None
         stages.append(
             {
                 "stage": st.value,
                 "has_output": has_output,
-                "status": run.get("status"),  # None = 未実行
+                "status": status,
                 "error_text": run.get("error_text"),
                 "job_id": run.get("job_id"),
                 "started_at": run.get("started_at"),
                 "finished_at": run.get("finished_at"),
                 "params": params,
+                "extra": extra,
             }
         )
     return {"project_id": project_id, "state": p.state.value, "stages": stages}
@@ -88,31 +102,23 @@ async def clear_stage(project_id: str, stage: str) -> dict:
         raise HTTPException(status_code=404, detail="project not found")
 
     proj_dir = _project_dir(project_id)
-    # 出力ディレクトリ + tmp + manifest を削除.
-    for d in (proj_dir / stage, proj_dir / f".{stage}.tmp"):
-        if d.exists():
-            shutil.rmtree(d, ignore_errors=True)
-    mf = manifest_path(proj_dir, stage)
-    if mf.exists():
-        mf.unlink()
-    await db.conn.execute(
-        "DELETE FROM stage_run WHERE project_id=? AND stage=?", (project_id, stage)
-    )
-    await db.conn.commit()
+    invalidated = invalidate_from(proj_dir, StageName(stage), include_self=True)
 
     # state を「先頭から連続して manifest が残っている最後のステージ」に戻す.
     new_state = PipelineState.CREATED
     for st in STAGE_ORDER:
         if manifest_path(proj_dir, st.value).exists():
             new_state = STAGE_TO_STATE[st]
-        else:
-            break
     await db.conn.execute(
         "UPDATE project SET state=?, updated_at=datetime('now') WHERE id=?",
         (new_state.value, project_id),
     )
     await db.conn.commit()
-    return {"cleared": stage, "state": new_state.value}
+    return {
+        "cleared": stage,
+        "invalidated": [item.value for item in invalidated],
+        "state": new_state.value,
+    }
 
 
 @router.post("/api/projects/{project_id}/clear-outputs")
@@ -123,14 +129,7 @@ async def clear_all_outputs(project_id: str) -> dict:
     if p is None:
         raise HTTPException(status_code=404, detail="project not found")
     proj_dir = _project_dir(project_id)
-    for st in STAGE_ORDER:
-        for d in (proj_dir / st.value, proj_dir / f".{st.value}.tmp"):
-            if d.exists():
-                shutil.rmtree(d, ignore_errors=True)
-        mf = manifest_path(proj_dir, st.value)
-        if mf.exists():
-            mf.unlink()
-    await db.conn.execute("DELETE FROM stage_run WHERE project_id=?", (project_id,))
+    clear_pipeline(proj_dir)
     await db.conn.execute(
         "UPDATE project SET state=?, updated_at=datetime('now') WHERE id=?",
         (PipelineState.CREATED.value, project_id),

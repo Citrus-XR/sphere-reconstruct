@@ -82,4 +82,3 @@ def test_extract_gravity_raw_u16_format(monkeypatch) -> None:
     g = extract_gravity(_FakeFooter(None))
     assert g is not None and g.sample_count == 40
     assert g.gravity_imu == (0.0, -1.0, 0.0)
-

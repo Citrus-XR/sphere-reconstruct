@@ -67,9 +67,9 @@ class LogConfig(BaseModel):
 
 
 class AlikedConfig(BaseModel):
-    extractor_path: str = ""   # ALIKED の .onnx
-    matcher_path: str = ""      # LightGlue の .onnx
-    device: str = "cuda"        # LightGlue マッチングの onnxruntime provider
+    extractor_path: str = ""  # ALIKED の .onnx
+    matcher_path: str = ""  # LightGlue の .onnx
+    device: str = "cuda"  # LightGlue マッチングの onnxruntime provider
     # ALIKED 抽出の実行デバイス. 魚眼は縮小すると角分解能が落ちるため全解像度で抽出するが,
     # 8K 級 (3840^2) だと GPU VRAM を使い切って OOM する. "auto" は空き VRAM と画像
     # 画素数から GPU/CPU を自動選択し, 実行時 OOM も CPU へフォールバックする.

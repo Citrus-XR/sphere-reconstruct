@@ -2,19 +2,19 @@
 
 参考: PIPELINE.md (insv-stitch) の MEI 説明を独立に実装 + サンプル観測.
 
-方針 (spec より):
+方針:
 - 「目標 pinhole 画素 -> 目標射線 -> 物理镜头座標系 -> MEI 投影 -> 一回 backward
   remap」で最終画素を得る. fisheye を先に等距柱状 (ERP) に展開してから再投影する
   複数段パイプは避ける.
 - 単体テストはリファレンス解像度と抽出解像度が違っても成立するように, 抜きだし
   時のスケールを常に明示引数で渡す.
 
-このモジュールは numpy 依存. cv2 は使わない (画像 remap は phase 4 で追加する
-`imaging/rendering.py` に分離する). 数値核だけをここに置く.
+このモジュールは numpy 依存. cv2 は使わず, 画像 remap は
+`imaging/rendering.py` に分離する. 数値核だけをここに置く.
 
 座標系:
 - 世界座標: rig の原点 (レンズ A の光心) 起点, 右手系, +Z 前方 / +Y 下向き / +X 右向き
-  (spec で明示していないため, offset_v3 の座標系を採用. lens A tx=ty=tz=0 を基準に取ると
+  (offset_v3 の座標系を採用. lens A tx=ty=tz=0 を基準に取ると
   lens B tz=-0.032273 が観測されるので, lens B が背面側なら「+Z 前方」に一致).
 """
 
@@ -50,8 +50,8 @@ class LensIntrinsics:
     k3: float
     p1: float
     p2: float
-    width: int          # 実画像の幅
-    height: int         # 実画像の高さ
+    width: int  # 実画像の幅
+    height: int  # 実画像の高さ
 
 
 def lens_to_intrinsics(
@@ -156,12 +156,12 @@ def _apply_distortion(x: np.ndarray, y: np.ndarray, intr: LensIntrinsics) -> tup
 class PinholeView:
     """1 個の virtual pinhole 视图. rig 内で lens A の光心を共有する."""
 
-    name: str        # "front" / "back" / "left" / ...
-    fov_deg: float   # 水平 FoV.
+    name: str  # "front" / "back" / "left" / ...
+    fov_deg: float  # 水平 FoV.
     width: int
     height: int
-    yaw_deg: float   # rig 座標系上の水平回転 (right-handed, +Y 下向き)
-    pitch_deg: float # 垂直回転
+    yaw_deg: float  # rig 座標系上の水平回転 (right-handed, +Y 下向き)
+    pitch_deg: float  # 垂直回転
 
 
 def cubemap_views(size: int = 1024, fov_deg: float = 90.0) -> list[PinholeView]:
@@ -169,10 +169,10 @@ def cubemap_views(size: int = 1024, fov_deg: float = 90.0) -> list[PinholeView]:
     return [
         PinholeView("front", fov_deg, size, size, yaw_deg=0.0, pitch_deg=0.0),
         PinholeView("right", fov_deg, size, size, yaw_deg=90.0, pitch_deg=0.0),
-        PinholeView("back",  fov_deg, size, size, yaw_deg=180.0, pitch_deg=0.0),
-        PinholeView("left",  fov_deg, size, size, yaw_deg=-90.0, pitch_deg=0.0),
-        PinholeView("up",    fov_deg, size, size, yaw_deg=0.0, pitch_deg=-90.0),
-        PinholeView("down",  fov_deg, size, size, yaw_deg=0.0, pitch_deg=90.0),
+        PinholeView("back", fov_deg, size, size, yaw_deg=180.0, pitch_deg=0.0),
+        PinholeView("left", fov_deg, size, size, yaw_deg=-90.0, pitch_deg=0.0),
+        PinholeView("up", fov_deg, size, size, yaw_deg=0.0, pitch_deg=-90.0),
+        PinholeView("down", fov_deg, size, size, yaw_deg=0.0, pitch_deg=90.0),
     ]
 
 

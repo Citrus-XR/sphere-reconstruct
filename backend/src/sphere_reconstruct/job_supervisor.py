@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -71,9 +72,7 @@ class JobSupervisor:
         )
         # pid を job テーブルへ書き込む.
         async with self._db.transaction() as conn:
-            await conn.execute(
-                "UPDATE job SET pid=? WHERE id=?", (handle.pid, job_id)
-            )
+            await conn.execute("UPDATE job SET pid=? WHERE id=?", (handle.pid, job_id))
         self._handles[job_id] = handle
         task = asyncio.create_task(self._await_worker(job_id, handle))
         self._tasks[job_id] = task
@@ -93,6 +92,24 @@ class JobSupervisor:
                 await self._finalize_if_orphaned(job_id, code)
             except Exception:  # 回収失敗でも監視タスク自体は落とさない.
                 pass
+            await self._cleanup_scratch(job_id)
+
+    async def _cleanup_scratch(self, job_id: str) -> None:
+        cur = await self._db.conn.execute("SELECT project_id FROM job WHERE id=?", (job_id,))
+        row = await cur.fetchone()
+        if row is None:
+            return
+        project_dir = workspace_root() / "projects" / row["project_id"]
+        scratch = [
+            *project_dir.glob(".extract-frames-sharpness-*"),
+            *project_dir.glob(".extract-frames-spatial-*"),
+        ]
+
+        def cleanup() -> None:
+            for path in scratch:
+                shutil.rmtree(path, ignore_errors=True)
+
+        await asyncio.to_thread(cleanup)
 
     async def _finalize_if_orphaned(self, job_id: str, exit_code: int) -> None:
         """worker 終了後, job がまだ running/queued のままなら failed にして原因を通知する."""
@@ -104,8 +121,8 @@ class JobSupervisor:
                 return  # 正常に終了済み (worker が status を書けた).
             msg = (
                 f"worker が異常終了しました (exit code {exit_code}). "
-                "ネイティブクラッシュ (CUDA/ONNX の VRAM 不足など) か手動 kill の可能性があります. "
-                "ALIKED を 8K 原寸で回すと VRAM 不足でクラッシュしやすいので device=cpu を試してください."
+                "ネイティブ subprocess の失敗か手動停止です. stage log と直前の Console を確認し, "
+                "GPU memory 不足なら画像上限・特徴数・SAM 解像度を下げてください."
             )
             await conn.execute(
                 "UPDATE job SET status='failed', finished_at=?, error_text=? WHERE id=?",

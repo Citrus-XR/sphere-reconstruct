@@ -41,16 +41,14 @@ class ColmapDatabase:
 
     def __init__(self, path: Path) -> None:
         if not path.exists():
-            raise FileNotFoundError(
-                f"{path} does not exist. create it first with `colmap database_creator`."
-            )
+            raise FileNotFoundError(f"{path} does not exist. create it first with `colmap database_creator`.")
         self._conn = sqlite3.connect(str(path))
 
     def close(self) -> None:
         self._conn.commit()
         self._conn.close()
 
-    def __enter__(self) -> "ColmapDatabase":
+    def __enter__(self) -> ColmapDatabase:
         return self
 
     def __exit__(self, *exc) -> None:

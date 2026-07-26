@@ -16,7 +16,6 @@ import pytest
 
 cv2 = pytest.importorskip("cv2")
 
-from sphere_reconstruct.domain.pipeline_state import StageName  # noqa: E402
 from sphere_reconstruct.pipeline.stage import ProgressReporter, StageContext  # noqa: E402
 from sphere_reconstruct.sam3 import engine as sam3_engine  # noqa: E402
 from sphere_reconstruct.stages.generate_masks import GenerateMasks  # noqa: E402
@@ -104,7 +103,9 @@ def test_generate_masks_with_fake_engine(tmp_path: Path, monkeypatch):
         ),
         source_path=None,
         source_kind="insv",
-        progress=ProgressReporter(_emit=lambda level, prog, msg, key=None, args=None, kind="log": events.append((level, msg))),
+        progress=ProgressReporter(
+            _emit=lambda level, prog, msg, key=None, args=None, kind="log": events.append((level, msg))
+        ),
     )
 
     manifest = stage.execute(ctx)
@@ -145,7 +146,9 @@ def _make_extract_output(project_dir: Path) -> None:
             rec[f"lens{lens}"] = str(p.relative_to(project_dir))
         frames.append(rec)
     (ef / "manifest_frames.json").write_text(
-        json.dumps({"kind": "insv_dual", "fps": 30, "width": 256, "height": 256, "count": 2, "frames": frames}),
+        json.dumps(
+            {"kind": "insv_dual", "fps": 30, "width": 256, "height": 256, "count": 2, "frames": frames}
+        ),
         encoding="utf-8",
     )
 
@@ -170,7 +173,9 @@ def test_generate_masks_fisheye(tmp_path: Path, monkeypatch):
         ),
         source_path=None,
         source_kind="insv",
-        progress=ProgressReporter(_emit=lambda level, prog, msg, key=None, args=None, kind="log": events.append((level, msg))),
+        progress=ProgressReporter(
+            _emit=lambda level, prog, msg, key=None, args=None, kind="log": events.append((level, msg))
+        ),
     )
     manifest = stage.execute(ctx)
 

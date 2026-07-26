@@ -41,7 +41,7 @@ def feature_extra_args(p: dict, backend: str) -> list[str]:
     if _pos(p.get("sift_max_num_features")):
         out += ["--SiftExtraction.max_num_features", _num(p["sift_max_num_features"])]
     if _pos(p.get("sift_max_image_size")):
-        out += ["--SiftExtraction.max_image_size", _num(p["sift_max_image_size"])]
+        out += ["--FeatureExtraction.max_image_size", _num(p["sift_max_image_size"])]
     if _pos(p.get("sift_peak_threshold")):
         out += ["--SiftExtraction.peak_threshold", _num(p["sift_peak_threshold"])]
     if _pos(p.get("sift_edge_threshold")):
@@ -57,9 +57,9 @@ def matcher_extra_args(p: dict, backend: str) -> list[str]:
         return []
     out: list[str] = []
     if _pos(p.get("max_num_matches")):
-        out += ["--SiftMatching.max_num_matches", _num(p["max_num_matches"])]
+        out += ["--FeatureMatching.max_num_matches", _num(p["max_num_matches"])]
     if p.get("guided_matching"):
-        out += ["--SiftMatching.guided_matching", "1"]
+        out += ["--FeatureMatching.guided_matching", "1"]
     if _pos(p.get("two_view_min_num_inliers")):
         out += ["--TwoViewGeometry.min_num_inliers", _num(p["two_view_min_num_inliers"])]
     return out
@@ -73,4 +73,16 @@ def mapper_extra_args(p: dict) -> list[str]:
     if p.get("ba_use_gpu"):
         # GPU バンドル調整 (PBA). COLMAP CLI で BA を GPU に載せる (plugin の "Ceres GPU" 相当).
         out += ["--Mapper.ba_use_gpu", "1"]
+    return out
+
+
+def global_mapper_extra_args(p: dict) -> list[str]:
+    out: list[str] = ["--GlobalMapper.random_seed", str(int(p.get("random_seed", 0)))]
+    if _pos(p.get("mapper_min_num_matches")):
+        out += ["--GlobalMapper.min_num_matches", _num(p["mapper_min_num_matches"])]
+    if _pos(p.get("ba_global_max_num_iterations")):
+        out += [
+            "--GlobalMapper.ba_ceres_max_num_iterations",
+            _num(p["ba_global_max_num_iterations"]),
+        ]
     return out

@@ -1,55 +1,45 @@
-# sphere-reconstruct 実行時設定
-# ローカル単一ユーザ向け. 127.0.0.1 のみ bind する.
+# sphere-reconstruct runtime 設定. 個別 machine の絶対 path は別 config に置き,
+# SPHERE_CONFIG で指定する.
 
 [server]
 host = "127.0.0.1"
 port = 8787
 
 [workspace]
-# プロジェクト成果物を置くルート. project-id ごとにサブディレクトリを作る.
 root = "./workspace"
 
 [filesystem]
-# サーバサイド file browser が列挙してよいディレクトリ. 未列挙のパスは弾く.
-# 絶対パスで指定する.
-allowed_roots = [
-    "/home/own",
-    "/home/own/Downloads",
-]
+# UI file browser が表示できる root. 空なら source browser を禁止する.
+allowed_roots = []
 
 [binaries]
-# 外部バイナリのパス. 未指定なら PATH を見る.
+# 空文字は PATH から解決する. COLMAP は 4.1 以上が必要.
 ffmpeg = ""
 ffprobe = ""
 colmap = ""
+# SIFT sequential loop closure / vocab-tree pairing を使う場合だけ設定する.
+vocab_tree = ""
 
 [sam3]
-# SAM3 は手動配置方式. HuggingFace token 経由の自動 DL は行わない.
-repo_path = "/home/own/Models/sam3/sam3-main"
-checkpoint_path = "/home/own/Models/sam3/sam3.pt"
+# SAM3 は任意. 使用しない場合は path を空にする.
+repo_path = ""
+checkpoint_path = ""
 config_path = ""
-# この機で CUDA 不可のため cpu. 実推論は極めて遅くなる想定 (実測は 4070Ti 機で).
-device = "cpu"
-dtype = "float32"
-# デフォルトの検出 prompt (comma 区切り, 各語を個別に推論して mask を union する).
-# nekostreaming:D:/3DGSWorkscope/sam3prompt.txt と同一内容.
+device = "cuda:0"
+dtype = "bfloat16"
 default_prompt = "person,camera operator,selfie stick,tripod,person shadow,selfie stick shadow,tripod shadow"
-# SAM3 に渡す前に長辺をこの画素数へ縮小する (8K 入力は極端に遅いため).
-# SAM3 は縮小画像で mask を出し, それを元解像度へ bilinear 拡大して使う.
 max_inference_size = 1024
-# 検出信頼度しきい値.
 confidence_threshold = 0.5
 
 [aliked]
-# ALIKED + LightGlue の ONNX 特徴抽出/マッチング (COLMAP feature_backend="aliked" で使う).
-# SAM3 同様の手動配置方式. モデルは ONNX Runtime で動かす.
-# 空なら SIFT にフォールバック. モデルは fabio-sim/LightGlue-ONNX (Apache-2.0) 等から取得.
-extractor_path = ""   # aliked の .onnx (例 aliked-n16rot.onnx)
-matcher_path = ""     # lightglue の .onnx (例 aliked-lightglue.onnx)
-device = "cuda"       # LightGlue マッチングの onnxruntime provider: "cuda" | "cpu"
-# ALIKED 抽出デバイス. 魚眼は全解像度で抽出するため 8K だと GPU が OOM しうる.
-# "auto" は空き VRAM から自動選択し, 実行時 OOM も CPU へフォールバックする.
-extraction_device = "auto"  # "auto" | "cuda" | "cpu"
+# COLMAP native ALIKED model の optional override. 空なら COLMAP が URL+SHA-256 付き
+# 既定 model を download/cache する.
+extractor_path = ""
+matcher_path = ""
+# 以下は旧 external ALIKED engine の diagnostic/benchmark 用設定.
+device = "cuda"
+extraction_device = "auto"
+max_extract_size = 0
 max_keypoints = 4096
 min_score = 0.2
 

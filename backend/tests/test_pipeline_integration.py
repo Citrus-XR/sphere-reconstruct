@@ -22,7 +22,6 @@ from sphere_reconstruct.domain.project import SourceKind
 from sphere_reconstruct.infrastructure.database import close_db, init_db
 from sphere_reconstruct.job_supervisor import init_supervisor, shutdown_supervisor
 
-
 pytestmark = pytest.mark.skipif(
     shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
     reason="ffmpeg / ffprobe not found in PATH",
@@ -31,13 +30,32 @@ pytestmark = pytest.mark.skipif(
 
 def _make_dual_stream_mp4(dst: Path, duration: float = 2.0, fps: int = 10) -> None:
     args = [
-        "ffmpeg", "-y", "-hide_banner", "-v", "error",
-        "-f", "lavfi", "-i", f"testsrc=duration={duration}:size=160x160:rate={fps}",
-        "-f", "lavfi", "-i", f"smptebars=duration={duration}:size=160x160:rate={fps}",
-        "-map", "0:v", "-map", "1:v",
-        "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+        "ffmpeg",
+        "-y",
+        "-hide_banner",
+        "-v",
+        "error",
+        "-f",
+        "lavfi",
+        "-i",
+        f"testsrc=duration={duration}:size=160x160:rate={fps}",
+        "-f",
+        "lavfi",
+        "-i",
+        f"smptebars=duration={duration}:size=160x160:rate={fps}",
+        "-map",
+        "0:v",
+        "-map",
+        "1:v",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "ultrafast",
+        "-pix_fmt",
+        "yuv420p",
         # .insv 拡張子でも MP4 として書きたいので明示指定.
-        "-f", "mp4",
+        "-f",
+        "mp4",
         str(dst),
     ]
     subprocess.run(args, check=True, capture_output=True)
@@ -56,9 +74,11 @@ async def _wait_job(db, jid: str, timeout: int = 60) -> tuple[str, str | None]:
 async def _run_pipeline(tmp_workspace: Path, src: Path, kind: SourceKind):
     """FastAPI レイヤは経由せず, domain + supervisor 直接使う."""
     import os
+
     os.environ["SPHERE_WORKSPACE__ROOT"] = str(tmp_workspace)
     # lru_cache をクリアして env を再読ませる.
     from sphere_reconstruct.settings import get_settings
+
     get_settings.cache_clear()
 
     db_path = tmp_workspace / "state.db"

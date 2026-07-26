@@ -79,7 +79,9 @@ async def frame_image(project_id: str, index: int, lens: int = 0) -> FileRespons
 
 
 @router.get("/api/projects/{project_id}/pinhole/{index}/{view}")
-async def pinhole_view(project_id: str, index: int, view: str, lens: int = 0, mask: bool = False) -> FileResponse:
+async def pinhole_view(
+    project_id: str, index: int, view: str, lens: int = 0, mask: bool = False
+) -> FileResponse:
     """reproject_views の pinhole 画像, または generate_masks の mask を返す."""
     project_dir = await _project_dir(project_id)
     if mask:
@@ -111,12 +113,11 @@ async def export_info(project_id: str) -> dict:
     export = project_dir / "export_dataset"
     if not export.exists():
         raise HTTPException(status_code=404, detail="export_dataset not run yet")
-    dataset = export / "dataset"
     preview = export / "preview"
     train_configs = export / "train_configs"
     return {
         "dir": str(export),
-        "dataset_dir": str(dataset) if dataset.exists() else None,
+        "dataset_dir": str(export) if (export / "sparse" / "0" / "cameras.bin").exists() else None,
         "preview_dir": str(preview) if preview.exists() else None,
         "train_configs_dir": str(train_configs) if train_configs.exists() else None,
     }
@@ -131,12 +132,13 @@ class FisheyeRegion(BaseModel):
 async def get_fisheye_region(project_id: str) -> dict:
     """魚眼有効領域 (円) の保存値を返す. 未保存なら既定 (中心, r=0.485).
 
-    saved: ユーザが明示的に保存したか (fisheye_region.json が存在するか). 魚眼モードでは
+    saved: UI から明示的に保存済みか (fisheye_region.json が存在するか). 魚眼モードでは
     有効領域の設定を必須にするため, フロントはこのフラグでゲートする.
     """
     project_dir = await _project_dir(project_id)
-    region = fisheye_region.load_region(project_dir)
-    return {**region, "saved": fisheye_region.region_path(project_dir).exists()}
+    saved = fisheye_region.region_path(project_dir).exists()
+    region = fisheye_region.load_region(project_dir) if saved else fisheye_region.detect_region(project_dir)
+    return {**region, "saved": saved, "detected": not saved}
 
 
 @router.put("/api/projects/{project_id}/fisheye-region")
@@ -169,9 +171,7 @@ async def source_info(project_id: str) -> dict:
         # 画像フォルダ等は尺が無い.
         return {"kind": p.source_kind.value if p.source_kind else None, "duration_sec": None}
 
-    probe = await run_in_threadpool(
-        ffprobe.probe, src, ffprobe_bin=get_settings().binaries.ffprobe or None
-    )
+    probe = await run_in_threadpool(ffprobe.probe, src, ffprobe_bin=get_settings().binaries.ffprobe or None)
     vs = probe.video_streams[0] if probe.video_streams else None
     return {
         "kind": p.source_kind.value if p.source_kind else None,
@@ -197,16 +197,16 @@ async def fisheye_mask(project_id: str, index: int, lens: int = 0) -> FileRespon
 @router.get("/api/projects/{project_id}/reconstruction")
 async def reconstruction(project_id: str) -> FileResponse:
     project_dir = await _project_dir(project_id)
-    path = project_dir / "export_dataset" / "preview" / "reconstruction.json"
+    path = project_dir / "align_reconstruction" / "preview" / "reconstruction.json"
     if not path.exists():
-        raise HTTPException(status_code=404, detail="reconstruction not exported yet")
+        raise HTTPException(status_code=404, detail="reconstruction not aligned yet")
     return FileResponse(path, media_type="application/json")
 
 
 @router.get("/api/projects/{project_id}/reconstruction/points")
 async def reconstruction_points(project_id: str) -> FileResponse:
     project_dir = await _project_dir(project_id)
-    path = project_dir / "export_dataset" / "preview" / "points.bin"
+    path = project_dir / "align_reconstruction" / "preview" / "points.bin"
     if not path.exists():
-        raise HTTPException(status_code=404, detail="points not exported yet")
+        raise HTTPException(status_code=404, detail="reconstruction not aligned yet")
     return FileResponse(path, media_type="application/octet-stream")

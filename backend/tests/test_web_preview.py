@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import struct
 
 from sphere_reconstruct.colmap import web_preview

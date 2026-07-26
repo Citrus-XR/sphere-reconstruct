@@ -6,10 +6,10 @@ reconstruct の結果を 2 つの形で書き出す:
      <project>/preview/reconstruction.json
      <project>/preview/points.bin
 
-2. 標準 COLMAP データセット (学習/再利用向け):
-     <project>/export/images/...             (pinhole 画像 link/copy)
-     <project>/export/sparse/0/*.bin         (COLMAP model)
-     <project>/export/masks/...              (任意)
+2. LichtFeld Studio が直接選択できる COLMAP データセット:
+     <project>/export_dataset/images/...
+     <project>/export_dataset/masks/...      (任意)
+     <project>/export_dataset/sparse/0/*
 
 パラメータ:
   max_preview_points: int   プレビュー点群の上限 (default 500000)
@@ -23,8 +23,8 @@ import os
 import shutil
 from pathlib import Path
 
+from ..colmap import lichtfeld_config, train_profile
 from ..colmap import model as colmap_model
-from ..colmap import gravity_align, lichtfeld_config, train_profile, web_preview
 from ..domain.artifacts import FileRef, StageManifest
 from ..domain.pipeline_state import StageName
 from ..infrastructure.filesystem import sha256_file
@@ -35,21 +35,34 @@ from ..pipeline.stage import Stage, StageContext, new_manifest
 @register
 class ExportDataset(Stage):
     name = StageName.EXPORT_DATASET
-    impl_version = "0.4"  # equirect gut 修正
+    impl_version = "0.5"
 
     def collect_inputs(self, ctx: StageContext) -> list[FileRef]:
-        summary = ctx.project_dir / "reconstruct" / "model_summary.json"
-        if summary.exists():
-            return [
-                FileRef(path=str(summary.relative_to(ctx.project_dir)), size=summary.stat().st_size, sha256=sha256_file(summary))
-            ]
-        return []
+        candidates = [
+            ctx.project_dir / "manifests" / "align_reconstruction.json",
+            ctx.project_dir / "manifests" / "extract_features.json",
+            ctx.project_dir / "align_reconstruction" / "alignment.json",
+            ctx.project_dir / "align_reconstruction" / "sparse" / "0" / "rigs.bin",
+            ctx.project_dir / "align_reconstruction" / "sparse" / "0" / "cameras.bin",
+            ctx.project_dir / "align_reconstruction" / "sparse" / "0" / "frames.bin",
+            ctx.project_dir / "align_reconstruction" / "sparse" / "0" / "images.bin",
+            ctx.project_dir / "align_reconstruction" / "sparse" / "0" / "points3D.bin",
+        ]
+        return [
+            FileRef(
+                path=str(path.relative_to(ctx.project_dir)),
+                size=path.stat().st_size,
+                sha256=sha256_file(path),
+            )
+            for path in candidates
+            if path.exists()
+        ]
 
     def normalize_params(self, raw: dict) -> dict:
         return {
             "max_preview_points": int(raw.get("max_preview_points", 500_000)),
             "include_dataset": bool(raw.get("include_dataset", True)),
-            "emit_train_configs": bool(raw.get("emit_train_configs", False)),
+            "emit_train_configs": bool(raw.get("emit_train_configs", True)),
         }
 
     def execute(self, ctx: StageContext) -> StageManifest:
@@ -57,84 +70,99 @@ class ExportDataset(Stage):
         manifest.inputs = self.collect_inputs(ctx)
         manifest.params = ctx.params
 
-        model_dir = ctx.project_dir / "reconstruct" / "sparse" / "0"
+        model_dir = ctx.project_dir / "align_reconstruction" / "sparse" / "0"
         if not (model_dir / "cameras.bin").exists():
-            raise RuntimeError("reconstruct must run first (sparse/0 missing)")
+            raise RuntimeError("align_reconstruction must run first (sparse/0 missing)")
 
         recon = colmap_model.read_model(model_dir)
         out = ctx.stage_out_dir
         outputs: list[FileRef] = []
 
-        # 学習プロファイル (scene_scale / 点数 / 相机モデル / 品質) は回転不変なので align 前に取る.
-        train_profile_data = (
-            train_profile.compute_profile(recon) if ctx.params.get("emit_train_configs") else None
-        )
+        train_profile_data = train_profile.compute_profile(recon)
 
-        # 重力対齐: IMU 重力方向 (inspect_source) + カメラ姿勢から点群を起こす. viewer 用の
-        # web preview にのみ適用 (COLMAP データセットは正準のまま). 重力が無い / 一致度が悪い
-        # 場合は見送る.
-        gravity_imu = _read_gravity_imu(ctx.project_dir)
-        R_align, ga_info = gravity_align.compute_align_rotation(recon, gravity_imu)
-        if R_align is not None:
-            gravity_align.apply_alignment(recon, R_align)
-            ctx.progress.info(
-                f"gravity align applied: up={ga_info['up_world']} spread={ga_info['spread_deg']}deg",
-                progress=0.15, key="log.export_gravity_align",
-                args={"up": str(ga_info["up_world"]), "spread": ga_info["spread_deg"], "n": ga_info["front_images"]},
-            )
-        else:
-            ctx.progress.info(
-                f"gravity align skipped ({ga_info.get('reason')})",
-                progress=0.15, key="log.export_gravity_skip",
-                args={"reason": str(ga_info.get("reason"))},
-            )
-
-        # 1) Web preview. これは project 直下 preview/ に置きたいが, ステージ出力は
-        # stage_out_dir (export_dataset/) に集約するので, preview サブフォルダに置く.
+        # 1) alignment stage が作った viewer preview を同梱する.
         preview_dir = out / "preview"
         ctx.progress.info(
             "building web preview (reconstruction.json + points.bin)",
             progress=0.2,
             key="log.export_web_preview",
         )
-        wp = web_preview.write_web_preview(recon, preview_dir, max_points=ctx.params["max_preview_points"])
+        shutil.copytree(ctx.project_dir / "align_reconstruction" / "preview", preview_dir)
+        preview_points = min(len(recon.points3D), ctx.params["max_preview_points"])
         ctx.progress.info(
-            f"preview: {wp.num_points_written}/{wp.num_points_total} points",
+            f"preview: {preview_points}/{len(recon.points3D)} points",
             progress=0.5,
             key="log.export_preview_points",
-            args={"written": wp.num_points_written, "total": wp.num_points_total},
+            args={"written": preview_points, "total": len(recon.points3D)},
         )
         for name in ("reconstruction.json", "points.bin"):
             p = preview_dir / name
             outputs.append(FileRef(path=_relpath(p, ctx), size=p.stat().st_size, sha256="", mime=None))
 
-        # 2) 標準 COLMAP データセット.
+        # 2) export_dataset 自体を LFStudio が直接選択できるデータセット root にする.
         if ctx.params["include_dataset"]:
             ctx.progress.info(
                 "assembling standard COLMAP dataset", progress=0.6, key="log.export_assemble_dataset"
             )
-            ds = out / "dataset"
+            ds = out
             ds_sparse = ds / "sparse" / "0"
             ds_images = ds / "images"
             ds_sparse.mkdir(parents=True, exist_ok=True)
             ds_images.mkdir(parents=True, exist_ok=True)
-            for name in ("cameras.bin", "images.bin", "points3D.bin"):
-                shutil.copy2(model_dir / name, ds_sparse / name)
-            # 画像は reconstruct/images をそのまま link/copy.
-            recon_images = ctx.project_dir / "reconstruct" / "images"
+            for source in model_dir.iterdir():
+                if source.is_file() and source.suffix.lower() in {".bin", ".txt", ".ini"}:
+                    shutil.copy2(source, ds_sparse / source.name)
+            # 画像名は images.bin の相対 path をそのまま保つ.
+            recon_images = ctx.project_dir / "extract_features" / "images"
             if recon_images.exists():
-                for img_file in recon_images.rglob("*.jpg"):
+                image_extensions = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
+                for img_file in recon_images.rglob("*"):
+                    if not img_file.is_file() or img_file.suffix.lower() not in image_extensions:
+                        continue
                     rel = img_file.relative_to(recon_images)
                     dst = ds_images / rel
                     dst.parent.mkdir(parents=True, exist_ok=True)
                     _link_or_copy(img_file, dst)
-            outputs.append(
-                FileRef(path=_relpath(ds_sparse / "cameras.bin", ctx), size=(ds_sparse / "cameras.bin").stat().st_size, sha256="", mime=None)
+            masks_written = _copy_masks(ctx.project_dir / "extract_features" / "masks", ds / "masks")
+            validation = _validate_lf_dataset(ds, recon)
+            export_manifest = {
+                "format": "sphere-reconstruct-export",
+                "version": 1,
+                "load_in_lichtfeld_studio": ".",
+                "camera_models": sorted({camera.model for camera in recon.cameras.values()}),
+                "images": len(recon.images),
+                "points3D": len(recon.points3D),
+                "masks": masks_written,
+                "validation": validation,
+            }
+            export_manifest_path = ds / "export_manifest.json"
+            export_manifest_path.write_text(
+                json.dumps(export_manifest, ensure_ascii=False, indent=2), encoding="utf-8"
             )
+            for required in (ds_sparse / "cameras.bin", ds_sparse / "images.bin", export_manifest_path):
+                outputs.append(
+                    FileRef(path=_relpath(required, ctx), size=required.stat().st_size, sha256="", mime=None)
+                )
+            for directory_name in ("images", "masks"):
+                directory = ds / directory_name
+                if directory.exists():
+                    outputs.extend(
+                        FileRef(
+                            path=_relpath(path, ctx),
+                            size=path.stat().st_size,
+                            sha256="",
+                        )
+                        for path in directory.rglob("*")
+                        if path.is_file()
+                    )
+        else:
+            masks_written = 0
 
         # 3) LichtFeld-Studio 推奨 config (任意).
-        if train_profile_data is not None:
-            configs, cfg_info = lichtfeld_config.build_configs(train_profile_data)
+        if ctx.params["emit_train_configs"]:
+            configs, cfg_info = lichtfeld_config.build_configs(
+                train_profile_data, has_masks=masks_written > 0
+            )
             tc_dir = out / "train_configs"
             tc_dir.mkdir(parents=True, exist_ok=True)
             for cname, cfg in configs.items():
@@ -146,37 +174,34 @@ class ExportDataset(Stage):
                 json.dumps({"profile": train_profile_data, **cfg_info}, ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
-            outputs.append(FileRef(path=_relpath(rec_path, ctx), size=rec_path.stat().st_size, sha256="", mime="application/json"))
+            outputs.append(
+                FileRef(
+                    path=_relpath(rec_path, ctx),
+                    size=rec_path.stat().st_size,
+                    sha256="",
+                    mime="application/json",
+                )
+            )
             ctx.progress.info(
                 f"train configs: cap_max={cfg_info['max_cap']}, camera={cfg_info['camera_class']}, "
                 f"warnings={cfg_info['warnings']}",
-                progress=0.9, key="log.export_train_configs",
-                args={"cap": cfg_info["max_cap"], "camera": cfg_info["camera_class"], "warn": str(cfg_info["warnings"])},
+                progress=0.9,
+                key="log.export_train_configs",
+                args={
+                    "cap": cfg_info["max_cap"],
+                    "camera": cfg_info["camera_class"],
+                    "warn": str(cfg_info["warnings"]),
+                },
             )
 
         manifest.outputs = outputs
         manifest.extra = {
-            "preview_points": wp.num_points_written,
-            "total_points": wp.num_points_total,
+            "preview_points": preview_points,
+            "total_points": len(recon.points3D),
             **recon.summary(),
         }
         ctx.progress.info("export_dataset done", progress=1.0, key="log.export_done")
         return manifest
-
-
-def _read_gravity_imu(project_dir: Path):
-    """inspect_source/source.json から IMU 重力方向 (list[3]) を読む. 無ければ None."""
-    src = project_dir / "inspect_source" / "source.json"
-    if not src.exists():
-        return None
-    try:
-        data = json.loads(src.read_text())
-    except (OSError, json.JSONDecodeError):
-        return None
-    grav = data.get("gravity")
-    if isinstance(grav, dict) and isinstance(grav.get("imu"), list) and len(grav["imu"]) == 3:
-        return grav["imu"]
-    return None
 
 
 def _link_or_copy(src: Path, dst: Path) -> None:
@@ -186,6 +211,38 @@ def _link_or_copy(src: Path, dst: Path) -> None:
         os.link(src, dst)
     except OSError:
         shutil.copy2(src, dst)
+
+
+def _copy_masks(source_dir: Path, destination_dir: Path) -> int:
+    if not source_dir.exists():
+        return 0
+    count = 0
+    for source in source_dir.rglob("*.png"):
+        destination = destination_dir / source.relative_to(source_dir)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        _link_or_copy(source, destination)
+        count += 1
+    return count
+
+
+def _validate_lf_dataset(dataset_dir: Path, recon: colmap_model.Reconstruction) -> dict:
+    missing_images = [
+        image.name for image in recon.images.values() if not (dataset_dir / "images" / image.name).is_file()
+    ]
+    summary = recon.summary()
+    warnings: list[str] = []
+    if summary.get("camera_trajectory_diameter", 0.0) < 1e-4 and len(recon.images) > 1:
+        warnings.append("collapsed_camera_trajectory")
+    if missing_images:
+        warnings.append("missing_images")
+    return {
+        "loadable": not missing_images,
+        "missing_image_count": len(missing_images),
+        "missing_image_examples": missing_images[:10],
+        "camera_trajectory_diameter": summary.get("camera_trajectory_diameter", 0.0),
+        "unique_camera_centers": summary.get("unique_camera_centers", 0),
+        "warnings": warnings,
+    }
 
 
 def _relpath(p: Path, ctx: StageContext) -> str:

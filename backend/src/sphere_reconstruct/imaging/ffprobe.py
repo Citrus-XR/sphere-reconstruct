@@ -17,7 +17,7 @@ class VideoStream:
     width: int
     height: int
     pix_fmt: str
-    r_frame_rate: str      # "24/1"
+    r_frame_rate: str  # "24/1"
     avg_frame_rate: str
     duration: float | None
     nb_frames: int | None

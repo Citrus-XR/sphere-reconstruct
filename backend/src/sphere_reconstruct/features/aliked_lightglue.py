@@ -44,15 +44,16 @@ def _is_oom_error(exc: BaseException) -> bool:
         or "cuda_error_out_of_memory" in s
         or "cudaerrormemoryallocation" in s
         or "failed to allocate memory" in s
-        or "cublas" in s and "alloc" in s
+        or "cublas" in s
+        and "alloc" in s
     )
 
 
 @dataclass
 class Features:
-    keypoints: np.ndarray   # (N, 2) float32, 画素座標
+    keypoints: np.ndarray  # (N, 2) float32, 画素座標
     descriptors: np.ndarray  # (N, 128) float32
-    scores: np.ndarray       # (N,) float32
+    scores: np.ndarray  # (N,) float32
     image_size: tuple[int, int]  # (width, height)
 
 
@@ -190,8 +191,11 @@ class AlikedLightGlue:
         cap = self._config.max_extract_size
         if cap and max(h0, w0) > cap:
             scale = cap / max(h0, w0)
-            proc = cv2.resize(image_rgb, (max(1, round(w0 * scale)), max(1, round(h0 * scale))),
-                              interpolation=cv2.INTER_AREA)
+            proc = cv2.resize(
+                image_rgb,
+                (max(1, round(w0 * scale)), max(1, round(h0 * scale))),
+                interpolation=cv2.INTER_AREA,
+            )
         else:
             proc, scale = image_rgb, 1.0
         h, w = proc.shape[:2]
@@ -209,7 +213,9 @@ class AlikedLightGlue:
         except Exception as exc:  # noqa: BLE001
             if self._extractor_device == "cuda" and _is_oom_error(exc):
                 # GPU が足りない. CPU で作り直して 1 度だけ再試行. 以降の画像も CPU.
-                self.cpu_fallback_reason = f"GPU OOM at {w}x{h} (extract_cap={self._config.max_extract_size or 'off'})"
+                self.cpu_fallback_reason = (
+                    f"GPU OOM at {w}x{h} (extract_cap={self._config.max_extract_size or 'off'})"
+                )
                 self._rebuild_extractor_on_cpu()
                 outs = self._extractor.run(None, feed)
             else:

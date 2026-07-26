@@ -14,21 +14,27 @@ import struct
 from dataclasses import dataclass, field
 from pathlib import Path
 
-
 # COLMAP camera model id -> (name, num_params).
 # https://github.com/colmap/colmap/blob/main/src/colmap/sensor/models.h
 _CAMERA_MODELS: dict[int, tuple[str, int]] = {
-    0: ("SIMPLE_PINHOLE", 3),   # f, cx, cy
-    1: ("PINHOLE", 4),          # fx, fy, cx, cy
-    2: ("SIMPLE_RADIAL", 4),    # f, cx, cy, k
-    3: ("RADIAL", 5),           # f, cx, cy, k1, k2
-    4: ("OPENCV", 8),           # fx, fy, cx, cy, k1, k2, p1, p2
+    0: ("SIMPLE_PINHOLE", 3),  # f, cx, cy
+    1: ("PINHOLE", 4),  # fx, fy, cx, cy
+    2: ("SIMPLE_RADIAL", 4),  # f, cx, cy, k
+    3: ("RADIAL", 5),  # f, cx, cy, k1, k2
+    4: ("OPENCV", 8),  # fx, fy, cx, cy, k1, k2, p1, p2
     5: ("OPENCV_FISHEYE", 8),
     6: ("FULL_OPENCV", 12),
     7: ("FOV", 5),
-    8: ("SIMPLE_RADIAL_FISHEYE", 5),
-    9: ("RADIAL_FISHEYE", 6),
+    8: ("SIMPLE_RADIAL_FISHEYE", 4),
+    9: ("RADIAL_FISHEYE", 5),
     10: ("THIN_PRISM_FISHEYE", 12),
+    11: ("RAD_TAN_THIN_PRISM_FISHEYE", 16),
+    12: ("SIMPLE_DIVISION", 4),
+    13: ("DIVISION", 5),
+    14: ("SIMPLE_FISHEYE", 3),
+    15: ("FISHEYE", 4),
+    16: ("EUCM", 6),
+    17: ("EQUIRECTANGULAR", 2),
 }
 
 
@@ -61,6 +67,10 @@ class Image:
     def num_registered_points(self) -> int:
         return sum(1 for p in self.points2D if p.point3D_id != _INVALID_POINT3D)
 
+    @property
+    def camera_center(self) -> tuple[float, float, float]:
+        return camera_center(self.qvec, self.tvec)
+
 
 @dataclass
 class Point3D:
@@ -82,16 +92,47 @@ class Reconstruction:
         mean_err = sum(errs) / len(errs) if errs else 0.0
         track_lengths = [len(p.track) for p in self.points3D.values()]
         mean_track = sum(track_lengths) / len(track_lengths) if track_lengths else 0.0
-        return {
+        sorted_errors = sorted(errs)
+        sorted_tracks = sorted(track_lengths)
+        result = {
             "num_cameras": len(self.cameras),
             "num_images": len(self.images),
             "num_points3D": len(self.points3D),
             "mean_reprojection_error": mean_err,
+            "median_reprojection_error": _percentile(sorted_errors, 0.5),
+            "p95_reprojection_error": _percentile(sorted_errors, 0.95),
             "mean_track_length": mean_track,
+            "median_track_length": _percentile(sorted_tracks, 0.5),
+            "num_observations": sum(track_lengths),
         }
+        if self.images:
+            centers = [image.camera_center for image in self.images.values()]
+            mins = [min(center[axis] for center in centers) for axis in range(3)]
+            maxs = [max(center[axis] for center in centers) for axis in range(3)]
+            spans = [maxs[axis] - mins[axis] for axis in range(3)]
+            result.update(
+                {
+                    "camera_center_span": spans,
+                    "camera_trajectory_diameter": sum(span * span for span in spans) ** 0.5,
+                    "unique_camera_centers": len(
+                        {tuple(round(value, 6) for value in center) for center in centers}
+                    ),
+                }
+            )
+        return result
 
 
 _INVALID_POINT3D = 2**64 - 1
+
+
+def _percentile(sorted_values, fraction: float) -> float:
+    if not sorted_values:
+        return 0.0
+    position = fraction * (len(sorted_values) - 1)
+    low = int(position)
+    high = min(len(sorted_values) - 1, low + 1)
+    weight = position - low
+    return float(sorted_values[low] * (1.0 - weight) + sorted_values[high] * weight)
 
 
 def _read(fmt: str, f) -> tuple:
@@ -102,13 +143,44 @@ def _read(fmt: str, f) -> tuple:
     return struct.unpack(fmt, data)
 
 
+def qvec_to_rotation(qvec) -> tuple[tuple[float, float, float], ...]:
+    """COLMAP の world->camera quaternion を 3x3 回転行列へ変換する."""
+    qw, qx, qy, qz = qvec
+    return (
+        (
+            1 - 2 * (qy * qy + qz * qz),
+            2 * (qx * qy - qz * qw),
+            2 * (qx * qz + qy * qw),
+        ),
+        (
+            2 * (qx * qy + qz * qw),
+            1 - 2 * (qx * qx + qz * qz),
+            2 * (qy * qz - qx * qw),
+        ),
+        (
+            2 * (qx * qz - qy * qw),
+            2 * (qy * qz + qx * qw),
+            1 - 2 * (qx * qx + qy * qy),
+        ),
+    )
+
+
+def camera_center(qvec, tvec) -> tuple[float, float, float]:
+    """world->camera pose から world 座標の中心 C=-R^T t を返す."""
+    rotation = qvec_to_rotation(qvec)
+    return tuple(-sum(rotation[row][axis] * tvec[row] for row in range(3)) for axis in range(3))
+
+
 def read_cameras_bin(path: Path) -> dict[int, Camera]:
     cameras: dict[int, Camera] = {}
     with path.open("rb") as f:
         (num,) = _read("<Q", f)
         for _ in range(num):
             camera_id, model_id, width, height = _read("<iiQQ", f)
-            name, nparams = _CAMERA_MODELS.get(model_id, (f"UNKNOWN_{model_id}", 0))
+            try:
+                name, nparams = _CAMERA_MODELS[model_id]
+            except KeyError as error:
+                raise ValueError(f"unsupported COLMAP camera model id: {model_id}") from error
             params = list(_read(f"<{nparams}d", f)) if nparams else []
             cameras[camera_id] = Camera(camera_id, name, width, height, params)
     return cameras

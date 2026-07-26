@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from sphere_reconstruct.insta360 import calibration as calib
 
-
 # 実 INSV (VID_20260724_021825_00_001.insv, X5) の inst box 内で観測された
 # offset_v3 ASCII 文字列 (40 items, 1 + 19*2 + 1).
 _REAL_OFFSET_V3 = (

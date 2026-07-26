@@ -56,7 +56,12 @@ class ProgressReporter:
         self._emit("error", progress, message, key, args, "log")
 
     def tick(
-        self, progress: float | None = None, *, message: str = "", key: str | None = None, args: dict | None = None
+        self,
+        progress: float | None = None,
+        *,
+        message: str = "",
+        key: str | None = None,
+        args: dict | None = None,
     ) -> None:
         """進捗のみの一時イベント (kind=progress). Console には出さず, 環形インジケータだけ更新する."""
         self._emit("info", progress, message, key, args, "progress")
@@ -65,8 +70,8 @@ class ProgressReporter:
 @dataclass
 class StageContext:
     project_id: str
-    project_dir: Path       # workspace/projects/<id>
-    stage_out_dir: Path     # 出力書き込み先 (tmp, 成功後に atomic replace)
+    project_dir: Path  # workspace/projects/<id>
+    stage_out_dir: Path  # 出力書き込み先 (tmp, 成功後に atomic replace)
     params: dict[str, Any]
     source_path: Path | None
     source_kind: str | None

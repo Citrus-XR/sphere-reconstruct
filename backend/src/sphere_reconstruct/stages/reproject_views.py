@@ -76,9 +76,7 @@ class ReprojectViews(Stage):
 
         ov3 = src.get("offset_v3") or {}
         if not ov3.get("valid"):
-            raise RuntimeError(
-                "offset_v3 not valid; PB / builtin calibration paths not implemented yet"
-            )
+            raise RuntimeError("offset_v3 not valid; PB / builtin calibration paths not implemented yet")
         lens_dicts = ov3["lenses"]
         # dict -> MeiLensCalibration.
         lenses = [_lens_from_dict(d) for d in lens_dicts]
@@ -113,7 +111,7 @@ class ReprojectViews(Stage):
             frames = frames[: ctx.params["max_frames"]]
         n = len(frames)
         ctx.progress.info(
-            f"reproject {n} frames x 6 views x 2 lenses = {n*12} renders",
+            f"reproject {n} frames x 6 views x 2 lenses = {n * 12} renders",
             progress=0.05,
             key="log.reproject_start",
             args={"frames": n, "renders": n * 12},
@@ -137,9 +135,7 @@ class ReprojectViews(Stage):
                     src_path = ctx.project_dir / fr[f"lens{li}"]
                     if not src_path.exists():
                         raise RuntimeError(f"missing extract frame: {src_path}")
-                    img, stats = rendering.render_pinhole(
-                        src_path, view, intr, extra_rotation=R_lens
-                    )
+                    img, stats = rendering.render_pinhole(src_path, view, intr, extra_rotation=R_lens)
                     out_path = frame_dir / f"{view.name}_lens{li}.jpg"
                     rendering.write_jpeg(img, out_path, quality=92)
                     outputs.append(
@@ -171,16 +167,19 @@ class ReprojectViews(Stage):
             "kind": "insv_pinhole_cubemap",
             "view_count": len(views),
             "views": [
-                {"name": v.name, "fov_deg": v.fov_deg, "size": v.width, "yaw_deg": v.yaw_deg, "pitch_deg": v.pitch_deg}
+                {
+                    "name": v.name,
+                    "fov_deg": v.fov_deg,
+                    "size": v.width,
+                    "yaw_deg": v.yaw_deg,
+                    "pitch_deg": v.pitch_deg,
+                }
                 for v in views
             ],
             "lens_count": len(lenses),
             # 各レンズの光学中心オフセット (offset_v3 の tx/ty/tz, 単位 m). rig 拘束の
             # cam_from_rig 計算に使う. lens0 は原点, lens1 は物理ベースライン分ずれる.
-            "lenses": [
-                {"index": i, "tx": l.tx, "ty": l.ty, "tz": l.tz}
-                for i, l in enumerate(lenses)
-            ],
+            "lenses": [{"index": i, "tx": l.tx, "ty": l.ty, "tz": l.tz} for i, l in enumerate(lenses)],
             "frames": rig_records,
         }
         rig_path = ctx.stage_out_dir / "manifest_rig.json"
@@ -210,7 +209,7 @@ class ReprojectViews(Stage):
             frames = frames[: ctx.params["max_frames"]]
         n = len(frames)
         ctx.progress.info(
-            f"reproject(ERP) {n} frames x {len(views)} views = {n*len(views)} renders",
+            f"reproject(ERP) {n} frames x {len(views)} views = {n * len(views)} renders",
             progress=0.05,
             key="log.reproject_erp_start",
             args={"frames": n, "views": len(views), "renders": n * len(views)},
@@ -234,9 +233,21 @@ class ReprojectViews(Stage):
                 img, stats = rendering.render_perspective_from_equirect(erp_path, view)
                 out_path = frame_dir / f"{view.name}_lens0.jpg"
                 rendering.write_jpeg(img, out_path, quality=92)
-                outputs.append(FileRef(path=_final_relpath(out_path, ctx), size=out_path.stat().st_size, sha256="", mime="image/jpeg"))
+                outputs.append(
+                    FileRef(
+                        path=_final_relpath(out_path, ctx),
+                        size=out_path.stat().st_size,
+                        sha256="",
+                        mime="image/jpeg",
+                    )
+                )
                 frame_rec["views"].append(
-                    {"view": view.name, "lens": 0, "path": _final_relpath(out_path, ctx), "valid_ratio": stats.valid_ratio}
+                    {
+                        "view": view.name,
+                        "lens": 0,
+                        "path": _final_relpath(out_path, ctx),
+                        "valid_ratio": stats.valid_ratio,
+                    }
                 )
             rig_records.append(frame_rec)
             ctx.progress.tick(
@@ -250,7 +261,13 @@ class ReprojectViews(Stage):
             "kind": "erp_pinhole_cubemap",
             "view_count": len(views),
             "views": [
-                {"name": v.name, "fov_deg": v.fov_deg, "size": v.width, "yaw_deg": v.yaw_deg, "pitch_deg": v.pitch_deg}
+                {
+                    "name": v.name,
+                    "fov_deg": v.fov_deg,
+                    "size": v.width,
+                    "yaw_deg": v.yaw_deg,
+                    "pitch_deg": v.pitch_deg,
+                }
                 for v in views
             ],
             "lens_count": 1,
@@ -260,7 +277,14 @@ class ReprojectViews(Stage):
         }
         rig_path = ctx.stage_out_dir / "manifest_rig.json"
         rig_path.write_text(json.dumps(rig_manifest, indent=2, ensure_ascii=False), encoding="utf-8")
-        outputs.append(FileRef(path=_final_relpath(rig_path, ctx), size=rig_path.stat().st_size, sha256=sha256_file(rig_path), mime="application/json"))
+        outputs.append(
+            FileRef(
+                path=_final_relpath(rig_path, ctx),
+                size=rig_path.stat().st_size,
+                sha256=sha256_file(rig_path),
+                mime="application/json",
+            )
+        )
         manifest.outputs = outputs
         ctx.progress.info("reproject_views(ERP) done", progress=1.0, key="log.reproject_erp_done")
         return manifest

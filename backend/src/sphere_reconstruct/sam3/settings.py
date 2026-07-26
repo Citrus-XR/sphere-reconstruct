@@ -71,7 +71,7 @@ def quick_check() -> Sam3PathCheck:
     if not repo_exists:
         msg = f"repo_path が存在しない: {paths.repo_path}"
     elif not pkg_present:
-        msg = f"sam3 パッケージが repo_path/sam3/__init__.py に見つからない"
+        msg = "sam3 パッケージが repo_path/sam3/__init__.py に見つからない"
     elif not checkpoint_exists:
         msg = f"checkpoint が存在しない: {paths.checkpoint_path}"
     elif size < 1024 * 1024:

@@ -10,7 +10,6 @@ import numpy as np
 
 from sphere_reconstruct.colmap import rig
 
-
 _VIEWS = [
     {"name": "front", "yaw_deg": 0.0, "pitch_deg": 0.0},
     {"name": "right", "yaw_deg": 90.0, "pitch_deg": 0.0},

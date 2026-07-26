@@ -16,7 +16,6 @@ import pytest
 
 from sphere_reconstruct.imaging import ffmpeg, ffprobe
 
-
 pytestmark = pytest.mark.skipif(
     shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
     reason="ffmpeg / ffprobe not found in PATH",
@@ -29,16 +28,26 @@ def _make_dual_stream_mp4(dst: Path, duration: float = 2.0, fps: int = 10, size:
         "ffmpeg",
         "-y",
         "-hide_banner",
-        "-v", "error",
-        "-f", "lavfi",
-        "-i", f"testsrc=duration={duration}:size={size}:rate={fps}",
-        "-f", "lavfi",
-        "-i", f"smptebars=duration={duration}:size={size}:rate={fps}",
-        "-map", "0:v",
-        "-map", "1:v",
-        "-c:v", "libx264",
-        "-preset", "ultrafast",
-        "-pix_fmt", "yuv420p",
+        "-v",
+        "error",
+        "-f",
+        "lavfi",
+        "-i",
+        f"testsrc=duration={duration}:size={size}:rate={fps}",
+        "-f",
+        "lavfi",
+        "-i",
+        f"smptebars=duration={duration}:size={size}:rate={fps}",
+        "-map",
+        "0:v",
+        "-map",
+        "1:v",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "ultrafast",
+        "-pix_fmt",
+        "yuv420p",
         str(dst),
     ]
     subprocess.run(args, check=True, capture_output=True)
@@ -76,3 +85,9 @@ def test_extract_paired_frames_roundtrip(tmp_path: Path):
 
     # extract できたペアが同時刻で対応することを確認するのは難しいので, ここでは
     # ファイル数と非空サイズだけを担保する.
+
+
+def test_selection_expression_compresses_arithmetic_runs():
+    expression = ffmpeg._selection_expression([0, 6, 12, 18, 25, 31, 37])
+    assert "between(n\\,0\\,18)*not(mod(n-0\\,6))" in expression
+    assert "between(n\\,25\\,37)*not(mod(n-25\\,6))" in expression

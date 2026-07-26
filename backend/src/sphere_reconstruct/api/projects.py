@@ -17,6 +17,7 @@ from ..domain import project as project_domain
 from ..domain.pipeline_state import PipelineState
 from ..infrastructure.database import get_db
 from ..infrastructure.filesystem import PathNotAllowedError, ensure_within_any
+from ..pipeline.invalidation import clear_pipeline
 from ..settings import get_settings
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
@@ -93,6 +94,10 @@ async def set_source(project_id: str, body: SetSourceBody) -> ProjectRead:
         raise HTTPException(status_code=404, detail=f"source not found: {resolved}")
 
     p = await project_domain.set_source(db, project_id, kind=body.kind, path=str(resolved))
+    clear_pipeline(p.workspace_dir)
+    region = p.workspace_dir / "fisheye_region.json"
+    if region.exists():
+        region.unlink()
     return _to_read(p)
 
 

@@ -14,7 +14,9 @@ import asyncio
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query
+from fastapi.concurrency import run_in_threadpool
 
+from ..diagnostics import diagnose
 from ..infrastructure.filesystem import PathNotAllowedError, ensure_within_any
 from ..settings import get_settings
 
@@ -29,6 +31,11 @@ async def system_stats() -> dict:
     cpu = _cpu_percent()
     gpus = await _gpu_stats()
     return {"cpu_percent": cpu, "ram": _ram_stats(), "gpus": gpus}
+
+
+@router.get("/api/system/doctor")
+async def system_doctor() -> dict:
+    return await run_in_threadpool(diagnose)
 
 
 def _ram_stats() -> dict | None:

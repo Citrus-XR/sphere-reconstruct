@@ -59,8 +59,12 @@ def test_match_assignment_to_pairs():
     matches0 = np.array([2, -1, 0], dtype=np.int64)
     mscores = np.array([0.9, 0.0, 0.7], dtype=np.float32)
     eng._matcher = _FakeSession([matches0, mscores])
-    f0 = al.Features(np.zeros((3, 2), np.float32), np.zeros((3, 128), np.float32), np.zeros(3, np.float32), (640, 480))
-    f1 = al.Features(np.zeros((3, 2), np.float32), np.zeros((3, 128), np.float32), np.zeros(3, np.float32), (640, 480))
+    f0 = al.Features(
+        np.zeros((3, 2), np.float32), np.zeros((3, 128), np.float32), np.zeros(3, np.float32), (640, 480)
+    )
+    f1 = al.Features(
+        np.zeros((3, 2), np.float32), np.zeros((3, 128), np.float32), np.zeros(3, np.float32), (640, 480)
+    )
     m = eng.match(f0, f1)
     # 有効対: (0,2), (2,0). i=1 は -1 で除外.
     assert m.shape == (2, 2)
@@ -70,7 +74,11 @@ def test_match_assignment_to_pairs():
 
 def test_match_empty_features():
     eng = _engine()
-    f0 = al.Features(np.empty((0, 2), np.float32), np.empty((0, 128), np.float32), np.empty(0, np.float32), (640, 480))
-    f1 = al.Features(np.zeros((3, 2), np.float32), np.zeros((3, 128), np.float32), np.zeros(3, np.float32), (640, 480))
+    f0 = al.Features(
+        np.empty((0, 2), np.float32), np.empty((0, 128), np.float32), np.empty(0, np.float32), (640, 480)
+    )
+    f1 = al.Features(
+        np.zeros((3, 2), np.float32), np.zeros((3, 128), np.float32), np.zeros(3, np.float32), (640, 480)
+    )
     m = eng.match(f0, f1)
     assert m.shape == (0, 2)

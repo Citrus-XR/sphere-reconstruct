@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 
 from pydantic import BaseModel, Field
@@ -17,7 +17,7 @@ from ..settings import workspace_root
 from .pipeline_state import PipelineState
 
 
-class SourceKind(str, Enum):
+class SourceKind(StrEnum):
     INSV = "insv"
     ERP_VIDEO = "erp_video"
     ERP_IMAGES = "erp_images"
@@ -88,9 +88,7 @@ async def get_project(db: Database, project_id: str) -> Project | None:
     return _project_from_row(row) if row else None
 
 
-async def set_source(
-    db: Database, project_id: str, *, kind: SourceKind, path: str
-) -> Project:
+async def set_source(db: Database, project_id: str, *, kind: SourceKind, path: str) -> Project:
     """ソースを差し替えた時点で以降のパイプライン結果は無効化される (呼び出し側で state を戻す)."""
     async with db.transaction() as conn:
         await conn.execute(

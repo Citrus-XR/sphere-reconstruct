@@ -1,8 +1,6 @@
-"""sam3 パッケージ.
+"""SAM3 path 検証と Worker 専用 inference wrapper.
 
-Phase 4 で本格実装. 現状は path 検証 + 遅延 import ヘルパのみ.
-
-方針 (spec より):
+方針:
 - HuggingFace Token 不要, 自動 DL 一切なし.
 - 手動配置: settings.sam3.repo_path / checkpoint_path / config_path.
 - 実際の推論は Worker サブプロセス内で `sam3` パッケージを import する.

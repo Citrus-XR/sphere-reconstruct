@@ -27,9 +27,9 @@ def _make_box(box_type: bytes, payload_size: int) -> bytes:
 
 
 def _make_test_insv() -> bytes:
-    ftyp = _make_box(b"ftyp", 8)   # 16 bytes
-    moov = _make_box(b"moov", 8)   # 16 bytes
-    mdat = _make_box(b"mdat", 8)   # 16 bytes
+    ftyp = _make_box(b"ftyp", 8)  # 16 bytes
+    moov = _make_box(b"moov", 8)  # 16 bytes
+    mdat = _make_box(b"mdat", 8)  # 16 bytes
     footer = b"INSTA360-FOOTER-DUMMY-BYTES-32B!"  # ちょうど 32 bytes
     assert len(footer) == 32
     return ftyp + moov + mdat + footer

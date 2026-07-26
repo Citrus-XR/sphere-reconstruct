@@ -43,7 +43,7 @@ def test_extract_no_downscale_when_within_cap():
     eng._extractor = _FakeSession([kpts[None], np.zeros((1, 128), np.float32), np.array([0.9], np.float32)])
     f = eng.extract(np.zeros((480, 640, 3), dtype=np.uint8))
     assert f.image_size == (640, 480)
-    assert np.allclose(f.keypoints, kpts)   # scale=1.0, 変化なし
+    assert np.allclose(f.keypoints, kpts)  # scale=1.0, 変化なし
 
 
 def test_decide_device_cpu_forced():

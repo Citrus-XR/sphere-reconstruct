@@ -4,8 +4,7 @@ Worker が SQLite の event テーブルに書き込む log を, ID 昇順で fo
 クライアントは ?since=<id> で古いのを飛ばせる. tail するのが目的なので, 未来の
 event が入ってくるまで poll する.
 
-将来的にはより効率的な pubsub (multiprocessing Queue + Manager) に置換する
-候補があるが, Phase 1 では単純さ優先.
+SQLite WAL を単一の event source とし, process restart 後も同じ cursor 契約を保つ.
 """
 
 from __future__ import annotations

@@ -18,7 +18,9 @@ from ..domain.pipeline_state import StageName
 from ..infrastructure.filesystem import sha256_file
 from ..insta360 import calibration as calib
 from ..insta360 import imu as insv_imu
-from ..insta360 import insv, metadata as insv_metadata, protobuf as pb
+from ..insta360 import insv
+from ..insta360 import metadata as insv_metadata
+from ..insta360 import protobuf as pb
 from ..pipeline.manifest import register
 from ..pipeline.stage import Stage, StageContext, new_manifest
 
@@ -167,7 +169,8 @@ class InspectSource(Stage):
                 else:
                     ctx.progress.info(
                         "IMU gravity not found (no Gyro record)",
-                        progress=0.6, key="log.inspect_gravity_none",
+                        progress=0.6,
+                        key="log.inspect_gravity_none",
                     )
             except insv_metadata.FooterNotFoundError as e:
                 ctx.progress.warn(
@@ -176,9 +179,7 @@ class InspectSource(Stage):
                     args={"error": str(e)},
                 )
 
-        ctx.progress.info(
-            "looking for external .insv.pb", progress=0.7, key="log.inspect_look_pb"
-        )
+        ctx.progress.info("looking for external .insv.pb", progress=0.7, key="log.inspect_look_pb")
         pb_path = pb.find_pb_for(path)
         if pb_path is not None:
             probe = pb.probe(pb_path)
@@ -212,7 +213,9 @@ class InspectSource(Stage):
                 "fps": vs.fps if vs else 0.0,
                 "codec": vs.codec_name if vs else "",
                 "nb_frames": vs.nb_frames if vs else None,
-            } if vs else None,
+            }
+            if vs
+            else None,
         }
 
     def _inspect_erp_images(self, path: Path, ctx: StageContext) -> dict:

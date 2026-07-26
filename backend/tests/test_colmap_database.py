@@ -7,13 +7,11 @@
 from __future__ import annotations
 
 import sqlite3
-import struct
 from pathlib import Path
 
 import numpy as np
 
 from sphere_reconstruct.colmap import database as db
-
 
 # COLMAP database_creator が作る最小限のテーブル (テスト用).
 _SCHEMA = """

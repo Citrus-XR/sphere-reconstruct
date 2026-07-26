@@ -180,7 +180,7 @@ export const PointCloudViewer = ({
     setPoints(null); setError(null)
     fetchPoints(projectId).then(p => alive && setPoints(p)).catch(e => alive && setError(String(e)))
     return () => { alive = false }
-  }, [projectId])
+  }, [projectId, recon])
 
   // bbox から scene の中心とスケールを 1 度算出.
   const scene = useMemo(() => {

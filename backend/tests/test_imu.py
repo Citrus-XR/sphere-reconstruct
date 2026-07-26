@@ -7,6 +7,7 @@ import struct
 from sphere_reconstruct.insta360.imu import (
     IMU_ENTRY_SIZE,
     parse_imu_payload,
+    parse_raw_imu_payload,
     sample_rate_hz,
 )
 
@@ -28,7 +29,7 @@ def test_parse_single_entry():
 def test_parse_multi_entry_and_rate():
     entries = [
         _make_entry(0, 0, 0, 0, 0, 0, 0),
-        _make_entry(5_000, 0, 0, 0, 0, 0, 0),      # 5ms -> 200Hz
+        _make_entry(5_000, 0, 0, 0, 0, 0, 0),  # 5ms -> 200Hz
         _make_entry(10_000, 0, 0, 0, 0, 0, 0),
     ]
     samples = parse_imu_payload(b"".join(entries))
@@ -36,3 +37,20 @@ def test_parse_multi_entry_and_rate():
     rate = sample_rate_hz(samples)
     assert rate is not None
     assert 199.0 < rate < 201.0
+
+
+def test_parse_raw_entry():
+    payload = struct.pack(
+        "<Q6H",
+        1_000,
+        32768 + 10,
+        32768 - 20,
+        32768 + 30,
+        32768 + 1,
+        32768 + 2,
+        32768 + 3,
+    )
+    (sample,) = parse_raw_imu_payload(payload)
+    assert sample.timestamp_us == 1_000
+    assert sample.accel_xyz == (10.0, -20.0, 30.0)
+    assert sample.gyro_xyz == (1.0, 2.0, 3.0)

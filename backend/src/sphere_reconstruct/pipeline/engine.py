@@ -29,6 +29,7 @@ from typing import Any
 from ..domain.artifacts import StageManifest, manifest_path
 from ..domain.pipeline_state import STAGE_ORDER, STAGE_TO_STATE, StageName
 from ..infrastructure.filesystem import atomic_replace_dir
+from .invalidation import clear_stale, invalidate_from
 from .manifest import get as get_stage_cls
 from .stage import ProgressReporter, StageContext
 
@@ -51,9 +52,7 @@ class Engine:
         self._job_id = job_id
         # ステージ実装が別スレッドから progress を出すことがあるので check_same_thread=False.
         # 全 write を Lock で直列化する (SQLite の書き込み衝突を回避).
-        self._conn = sqlite3.connect(
-            str(db_path), isolation_level=None, check_same_thread=False
-        )
+        self._conn = sqlite3.connect(str(db_path), isolation_level=None, check_same_thread=False)
         self._lock = threading.Lock()
         self._conn.execute("PRAGMA journal_mode=WAL;")
         self._conn.execute("PRAGMA foreign_keys=ON;")
@@ -188,6 +187,7 @@ class Engine:
 
         # tmp -> final を原子置換.
         atomic_replace_dir(tmp_dir, final_dir)
+        clear_stale(project_dir, stage_name)
         manifest_file = manifest_path(project_dir, stage_name.value)
         manifest.dump(manifest_file)
 
@@ -209,6 +209,7 @@ class Engine:
                 stage_run_id,
             ),
         )
+        self._invalidate_downstream(stage_name)
         self._mark_state_up_to(stage_name)
 
     def _cached_matches(self, stage, ctx: StageContext) -> StageManifest | None:
@@ -233,7 +234,14 @@ class Engine:
             return None
         if temp.params_hash != existing.params_hash:
             return None
+        for output in existing.outputs:
+            path = self.project_dir() / output.path
+            if not path.is_file() or path.stat().st_size != output.size:
+                return None
         return existing
+
+    def _invalidate_downstream(self, stage: StageName) -> None:
+        invalidate_from(self.project_dir(), stage, include_self=False)
 
     def _mark_state_up_to(self, stage: StageName) -> None:
         state = STAGE_TO_STATE[stage]
@@ -253,8 +261,8 @@ class Engine:
         # pinhole_rig 以外 (native_fisheye / equirectangular) は生フレームを直接 COLMAP に
         # 渡すため, pinhole 再投影 (reproject_views) は不要でスキップする. SAM3 マスクは
         # generate_masks が入力形式に応じたレイアウトで作るので, これは従来通り実行する.
-        recon = params_by_stage.get(StageName.RECONSTRUCT, {})
-        mode = recon.get("reconstruction_mode", "native_fisheye")
+        features = params_by_stage.get(StageName.EXTRACT_FEATURES, {})
+        mode = features.get("reconstruction_mode", "native_fisheye")
         if mode != "pinhole_rig":
             skip.add(StageName.REPROJECT_VIEWS)
         for st in STAGE_ORDER:

@@ -8,6 +8,8 @@ from __future__ import annotations
 import struct
 from pathlib import Path
 
+import pytest
+
 from sphere_reconstruct.colmap import model
 
 
@@ -26,7 +28,7 @@ def _write_images(path: Path):
         f.write(struct.pack("<idddddddi", 1, 1.0, 0.0, 0.0, 0.0, 1.0, 2.0, 3.0, 1))
         f.write(b"front_lens0.jpg\x00")
         f.write(struct.pack("<Q", 2))
-        f.write(struct.pack("<ddQ", 10.0, 20.0, 100))       # registered to point 100
+        f.write(struct.pack("<ddQ", 10.0, 20.0, 100))  # registered to point 100
         f.write(struct.pack("<ddQ", 30.0, 40.0, 2**64 - 1))  # unregistered
 
 
@@ -78,4 +80,35 @@ def test_summary(tmp_path: Path):
     assert s["num_images"] == 1
     assert s["num_points3D"] == 1
     assert abs(s["mean_reprojection_error"] - 0.7) < 1e-9
+    assert abs(s["median_reprojection_error"] - 0.7) < 1e-9
+    assert abs(s["p95_reprojection_error"] - 0.7) < 1e-9
     assert s["mean_track_length"] == 1.0
+    assert s["num_observations"] == 1
+    assert s["unique_camera_centers"] == 1
+    assert s["camera_center_span"] == [0.0, 0.0, 0.0]
+
+
+def test_equirectangular_camera_model(tmp_path: Path):
+    with (tmp_path / "cameras.bin").open("wb") as f:
+        f.write(struct.pack("<Q", 1))
+        f.write(struct.pack("<iiQQ", 1, 17, 4096, 2048))
+        f.write(struct.pack("<2d", 4096.0, 2048.0))
+    camera = model.read_cameras_bin(tmp_path / "cameras.bin")[1]
+    assert camera.model == "EQUIRECTANGULAR"
+    assert camera.params == [4096.0, 2048.0]
+
+
+def test_unknown_camera_model_fails_instead_of_desynchronizing(tmp_path: Path):
+    with (tmp_path / "cameras.bin").open("wb") as f:
+        f.write(struct.pack("<Q", 1))
+        f.write(struct.pack("<iiQQ", 1, 999, 512, 512))
+    with pytest.raises(ValueError, match="camera model id: 999"):
+        model.read_cameras_bin(tmp_path / "cameras.bin")
+
+
+def test_camera_center_uses_colmap_world_to_camera_convention():
+    assert model.camera_center((1.0, 0.0, 0.0, 0.0), (1.0, 2.0, 3.0)) == (
+        -1.0,
+        -2.0,
+        -3.0,
+    )

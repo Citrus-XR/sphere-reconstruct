@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import os
 import shutil
+import time
 from pathlib import Path
 
 
@@ -58,21 +59,66 @@ def atomic_replace_dir(tmp_dir: Path, final_dir: Path) -> None:
     tmp_dir = tmp_dir.resolve()
     final_dir = final_dir.resolve()
     final_dir.parent.mkdir(parents=True, exist_ok=True)
+    if os.name == "nt":
+        _atomic_replace_windows(tmp_dir, final_dir)
+        return
     if final_dir.exists():
         old = final_dir.with_name(final_dir.name + f".old-{os.getpid()}")
         # old も残っていたら念のため消しておく.
         if old.exists():
             shutil.rmtree(old)
-        os.rename(final_dir, old)
+        _rename(final_dir, old)
         try:
-            os.rename(tmp_dir, final_dir)
+            _rename(tmp_dir, final_dir)
         except BaseException:
             # rename 失敗したら元に戻す.
-            os.rename(old, final_dir)
+            _rename(old, final_dir)
             raise
         shutil.rmtree(old, ignore_errors=True)
     else:
-        os.rename(tmp_dir, final_dir)
+        _rename(tmp_dir, final_dir)
+
+
+def _atomic_replace_windows(tmp_dir: Path, final_dir: Path) -> None:
+    """Native runtime が tmp handle を保持していても atomic publish できる Windows 経路."""
+    ready = final_dir.with_name(final_dir.name + f".ready-{os.getpid()}")
+    old = final_dir.with_name(final_dir.name + f".old-{os.getpid()}")
+    for stale in (ready, old):
+        if stale.exists():
+            shutil.rmtree(stale)
+    shutil.copytree(tmp_dir, ready, copy_function=_hardlink_or_copy)
+    if final_dir.exists():
+        _rename(final_dir, old)
+    try:
+        _rename(ready, final_dir)
+    except BaseException:
+        if old.exists():
+            _rename(old, final_dir)
+        raise
+    shutil.rmtree(old, ignore_errors=True)
+    shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def _hardlink_or_copy(source: str, destination: str):
+    try:
+        os.link(source, destination)
+        return destination
+    except OSError:
+        return shutil.copy2(source, destination)
+
+
+def _rename(source: Path, destination: Path) -> None:
+    attempts = 30 if os.name == "nt" else 1
+    for attempt in range(attempts):
+        try:
+            os.rename(source, destination)
+            return
+        except PermissionError:
+            if attempt + 1 == attempts:
+                raise
+            # Windows Defender / ONNX Runtime が process 終了直後だけ directory handle を
+            # 保持することがある. 対象と例外を限定し, 最大 6 秒で元の例外を再送出する.
+            time.sleep(0.2)
 
 
 def sha256_file(path: Path, chunk_size: int = 1 << 20) -> str:

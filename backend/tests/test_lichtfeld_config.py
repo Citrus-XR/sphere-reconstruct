@@ -9,8 +9,14 @@ from sphere_reconstruct.colmap import lichtfeld_config as lc
 
 
 def _profile(models, npts=200_000, reproj=0.7):
-    return {"camera_models": models, "num_points3D": npts, "num_images": 120,
-            "mean_reprojection_error": reproj, "scene_scale_point": 3.2, "scene_scale_camera": 5.0}
+    return {
+        "camera_models": models,
+        "num_points3D": npts,
+        "num_images": 120,
+        "mean_reprojection_error": reproj,
+        "scene_scale_point": 3.2,
+        "scene_scale_camera": 5.0,
+    }
 
 
 def test_igsplus_never_enables_gut_on_fisheye():
@@ -38,8 +44,8 @@ def test_equirect_trains_via_gut_except_igsplus():
     # equirect は gut=true (gsplat backend) で mrnf/mcmc は訓練可能.
     assert configs["mrnf"]["gut"] is True and configs["mrnf"]["undistort"] is False
     assert configs["mcmc"]["gut"] is True
-    # igs+ は gut 不可 → equirect 学習不能, 警告を出し gut は付けない.
-    assert configs["igsplus"]["gut"] is False
+    # igs+ は gut 不可 → equirect 学習不能なので config 自体を出さない.
+    assert "igsplus" not in configs
     assert "equirect_igsplus_unsupported" in info["warnings"]
 
 
@@ -62,10 +68,29 @@ def test_high_reproj_warns():
 
 
 def test_all_presets_have_required_keys():
-    required = {"iterations", "means_lr", "shs_lr", "opacity_lr", "scaling_lr", "rotation_lr",
-                "lambda_dssim", "min_opacity", "refine_every", "start_refine", "stop_refine",
-                "grad_threshold", "sh_degree"}
+    required = {
+        "iterations",
+        "means_lr",
+        "shs_lr",
+        "opacity_lr",
+        "scaling_lr",
+        "rotation_lr",
+        "lambda_dssim",
+        "min_opacity",
+        "refine_every",
+        "start_refine",
+        "stop_refine",
+        "grad_threshold",
+        "sh_degree",
+    }
     configs, _ = lc.build_configs(_profile(["PINHOLE"]))
     for name, cfg in configs.items():
         assert required <= set(cfg), f"{name} missing required keys"
         assert cfg["strategy"] in ("mrnf", "igs+", "mcmc")
+
+
+def test_binary_masks_enable_segment_mode():
+    configs, _ = lc.build_configs(_profile(["OPENCV_FISHEYE"]), has_masks=True)
+    for config in configs.values():
+        assert config["mask_mode"] == "segment"
+        assert config["invert_masks"] is False

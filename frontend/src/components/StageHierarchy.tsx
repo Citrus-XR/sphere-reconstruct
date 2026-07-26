@@ -23,7 +23,7 @@ export const StageHierarchy = ({
   selected: string | null
   onSelect: (key: string) => void
 }) => (
-  <div>
+  <div style={{ height: '100%', overflowY: 'auto' }}>
     {items.map(it => {
       const off = it.toggleable && !it.enabled
       return (

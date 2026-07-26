@@ -21,52 +21,157 @@ from copy import deepcopy
 # --- 公式 preset (eval/*.json) を基底テンプレートとして埋め込む ---------------------
 
 _MRNF_PRESET = {
-    "iterations": 30000, "sh_degree_interval": 1000, "means_lr": 0.000128,
-    "means_lr_end": 0.00000016, "shs_lr": 0.005, "opacity_lr": 0.025, "scaling_lr": 0.020,
-    "scaling_lr_end": 0.005, "rotation_lr": 0.0015, "lambda_dssim": 0.2, "min_opacity": 0.0039215689,
-    "refine_every": 200, "start_refine": 500, "stop_refine": 28500, "grad_threshold": 0.003,
-    "sh_degree": 3, "opacity_reg": 0.0, "scale_reg": 0.0, "init_opacity": 0.5, "init_scaling": 0.1,
-    "max_cap": 1000000, "strategy": "mrnf", "eval_steps": [7000, 30000], "save_steps": [7000, 30000],
-    "enable_eval": False, "enable_save_eval_images": True, "mip_filter": False,
-    "use_bilateral_grid": False, "bg_modulation": False, "bilateral_grid_X": 16,
-    "bilateral_grid_Y": 16, "bilateral_grid_W": 8, "bilateral_grid_lr": 0.002, "tv_loss_weight": 10.0,
-    "revised_opacity": True, "steps_scaler": 0, "random": False, "init_num_pts": 100000,
-    "init_extent": 3.0, "mask_mode": "none", "invert_masks": False,
-    "mask_opacity_penalty_weight": 1.0, "mask_opacity_penalty_power": 2.0, "mask_threshold": 0.5,
-    "growth_grad_threshold": 0.003, "grow_fraction": 0.07, "grow_until_iter": 15000,
-    "opacity_decay": 0.004, "scale_decay": 0.002, "means_noise_weight": 50.0,
-    "bounds_percentile": 0.8, "use_error_map": True, "use_edge_map": True,
+    "iterations": 30000,
+    "sh_degree_interval": 1000,
+    "means_lr": 0.000128,
+    "means_lr_end": 0.00000016,
+    "shs_lr": 0.005,
+    "opacity_lr": 0.025,
+    "scaling_lr": 0.020,
+    "scaling_lr_end": 0.005,
+    "rotation_lr": 0.0015,
+    "lambda_dssim": 0.2,
+    "min_opacity": 0.0039215689,
+    "refine_every": 200,
+    "start_refine": 500,
+    "stop_refine": 28500,
+    "grad_threshold": 0.003,
+    "sh_degree": 3,
+    "opacity_reg": 0.0,
+    "scale_reg": 0.0,
+    "init_opacity": 0.5,
+    "init_scaling": 0.1,
+    "max_cap": 1000000,
+    "strategy": "mrnf",
+    "eval_steps": [7000, 30000],
+    "save_steps": [7000, 30000],
+    "enable_eval": False,
+    "enable_save_eval_images": True,
+    "mip_filter": False,
+    "use_bilateral_grid": False,
+    "bg_modulation": False,
+    "bilateral_grid_X": 16,
+    "bilateral_grid_Y": 16,
+    "bilateral_grid_W": 8,
+    "bilateral_grid_lr": 0.002,
+    "tv_loss_weight": 10.0,
+    "revised_opacity": True,
+    "steps_scaler": 0,
+    "random": False,
+    "init_num_pts": 100000,
+    "init_extent": 3.0,
+    "mask_mode": "none",
+    "invert_masks": False,
+    "mask_opacity_penalty_weight": 1.0,
+    "mask_opacity_penalty_power": 2.0,
+    "mask_threshold": 0.5,
+    "growth_grad_threshold": 0.003,
+    "grow_fraction": 0.07,
+    "grow_until_iter": 15000,
+    "opacity_decay": 0.004,
+    "scale_decay": 0.002,
+    "means_noise_weight": 50.0,
+    "bounds_percentile": 0.8,
+    "use_error_map": True,
+    "use_edge_map": True,
 }
 
 _MCMC_PRESET = {
-    "iterations": 30000, "sh_degree_interval": 1000, "means_lr": 0.000128, "shs_lr": 0.0024,
-    "opacity_lr": 0.0335, "scaling_lr": 0.00475, "rotation_lr": 0.00083, "lambda_dssim": 0.2,
-    "min_opacity": 0.005, "refine_every": 100, "start_refine": 500, "stop_refine": 25000,
-    "grad_threshold": 0.0002, "sh_degree": 3, "opacity_reg": 0.0042, "scale_reg": 0.0042,
-    "init_opacity": 0.5, "init_scaling": 0.1, "max_cap": 1000000, "strategy": "mcmc",
-    "eval_steps": [7000, 30000], "save_steps": [7000, 30000], "enable_eval": False,
-    "enable_save_eval_images": True, "mip_filter": False, "use_bilateral_grid": False,
-    "bg_modulation": False, "bilateral_grid_X": 16, "bilateral_grid_Y": 16, "bilateral_grid_W": 8,
-    "bilateral_grid_lr": 0.002, "tv_loss_weight": 10.0, "prune_opacity": 0.005, "grow_scale3d": 0.01,
-    "grow_scale2d": 0.05, "prune_scale3d": 0.1, "prune_scale2d": 0.15, "reset_every": 3000,
-    "pause_refine_after_reset": 0, "revised_opacity": False, "gut": False, "steps_scaler": 0,
-    "random": False, "init_num_pts": 100000, "init_extent": 3.0, "mask_mode": "none",
-    "invert_masks": False, "mask_opacity_penalty_weight": 1.0, "mask_opacity_penalty_power": 2.0,
+    "iterations": 30000,
+    "sh_degree_interval": 1000,
+    "means_lr": 0.000128,
+    "shs_lr": 0.0024,
+    "opacity_lr": 0.0335,
+    "scaling_lr": 0.00475,
+    "rotation_lr": 0.00083,
+    "lambda_dssim": 0.2,
+    "min_opacity": 0.005,
+    "refine_every": 100,
+    "start_refine": 500,
+    "stop_refine": 25000,
+    "grad_threshold": 0.0002,
+    "sh_degree": 3,
+    "opacity_reg": 0.0042,
+    "scale_reg": 0.0042,
+    "init_opacity": 0.5,
+    "init_scaling": 0.1,
+    "max_cap": 1000000,
+    "strategy": "mcmc",
+    "eval_steps": [7000, 30000],
+    "save_steps": [7000, 30000],
+    "enable_eval": False,
+    "enable_save_eval_images": True,
+    "mip_filter": False,
+    "use_bilateral_grid": False,
+    "bg_modulation": False,
+    "bilateral_grid_X": 16,
+    "bilateral_grid_Y": 16,
+    "bilateral_grid_W": 8,
+    "bilateral_grid_lr": 0.002,
+    "tv_loss_weight": 10.0,
+    "prune_opacity": 0.005,
+    "grow_scale3d": 0.01,
+    "grow_scale2d": 0.05,
+    "prune_scale3d": 0.1,
+    "prune_scale2d": 0.15,
+    "reset_every": 3000,
+    "pause_refine_after_reset": 0,
+    "revised_opacity": False,
+    "gut": False,
+    "steps_scaler": 0,
+    "random": False,
+    "init_num_pts": 100000,
+    "init_extent": 3.0,
+    "mask_mode": "none",
+    "invert_masks": False,
+    "mask_opacity_penalty_weight": 1.0,
+    "mask_opacity_penalty_power": 2.0,
     "mask_threshold": 0.5,
 }
 
 _IGSPLUS_PRESET = {
-    "iterations": 30000, "sh_degree_interval": 1000, "means_lr": 0.000128, "shs_lr": 0.005,
-    "opacity_lr": 0.025, "scaling_lr": 0.020, "rotation_lr": 0.0015, "lambda_dssim": 0.20,
-    "min_opacity": 0.005, "refine_every": 500, "start_refine": 500, "stop_refine": 15000,
-    "grad_threshold": 0.0002, "sh_degree": 3, "opacity_reg": 0.0, "scale_reg": 0.0,
-    "init_opacity": 0.3, "init_scaling": 0.2, "max_cap": 1000000, "strategy": "igs+",
-    "eval_steps": [7000, 30000], "save_steps": [7000, 30000], "enable_eval": False,
-    "enable_save_eval_images": True, "use_bilateral_grid": False, "bg_modulation": False,
-    "bilateral_grid_X": 16, "bilateral_grid_Y": 16, "bilateral_grid_W": 8, "bilateral_grid_lr": 0.002,
-    "tv_loss_weight": 5.0, "prune_opacity": 0.005, "grow_scale3d": 0.01, "grow_scale2d": 0.05,
-    "prune_scale3d": 0.1, "prune_scale2d": 0.15, "reset_every": 3000, "pause_refine_after_reset": 0,
-    "revised_opacity": True, "steps_scaler": 0, "random": False, "init_num_pts": 100000,
+    "iterations": 30000,
+    "sh_degree_interval": 1000,
+    "means_lr": 0.000128,
+    "shs_lr": 0.005,
+    "opacity_lr": 0.025,
+    "scaling_lr": 0.020,
+    "rotation_lr": 0.0015,
+    "lambda_dssim": 0.20,
+    "min_opacity": 0.005,
+    "refine_every": 500,
+    "start_refine": 500,
+    "stop_refine": 15000,
+    "grad_threshold": 0.0002,
+    "sh_degree": 3,
+    "opacity_reg": 0.0,
+    "scale_reg": 0.0,
+    "init_opacity": 0.3,
+    "init_scaling": 0.2,
+    "max_cap": 1000000,
+    "strategy": "igs+",
+    "eval_steps": [7000, 30000],
+    "save_steps": [7000, 30000],
+    "enable_eval": False,
+    "enable_save_eval_images": True,
+    "use_bilateral_grid": False,
+    "bg_modulation": False,
+    "bilateral_grid_X": 16,
+    "bilateral_grid_Y": 16,
+    "bilateral_grid_W": 8,
+    "bilateral_grid_lr": 0.002,
+    "tv_loss_weight": 5.0,
+    "prune_opacity": 0.005,
+    "grow_scale3d": 0.01,
+    "grow_scale2d": 0.05,
+    "prune_scale3d": 0.1,
+    "prune_scale2d": 0.15,
+    "reset_every": 3000,
+    "pause_refine_after_reset": 0,
+    "revised_opacity": True,
+    "steps_scaler": 0,
+    "random": False,
+    "init_num_pts": 100000,
     "init_extent": 3.0,
 }
 
@@ -90,7 +195,7 @@ def _camera_class(models: list[str]) -> str:
     return "other"
 
 
-def build_configs(profile: dict) -> tuple[dict[str, dict], dict]:
+def build_configs(profile: dict, *, has_masks: bool = False) -> tuple[dict[str, dict], dict]:
     """profile から 3 strategy の config と, 導出情報 (max_cap / 相机クラス / 警告) を返す."""
     models = profile.get("camera_models", [])
     cclass = _camera_class(models)
@@ -108,6 +213,9 @@ def build_configs(profile: dict) -> tuple[dict[str, dict], dict]:
     for name, preset in _PRESETS.items():
         cfg = deepcopy(preset)
         cfg["max_cap"] = cap
+        cfg["mask_mode"] = "segment" if has_masks else "none"
+        cfg["invert_masks"] = False
+        cfg["mask_threshold"] = 0.5
         if sparse_init:
             cfg["random"] = True
         strat = cfg["strategy"]  # mrnf / igs+ / mcmc
@@ -125,11 +233,10 @@ def build_configs(profile: dict) -> tuple[dict[str, dict], dict]:
                 cfg["undistort"] = False
         elif cclass == "equirect":
             if strat == "igs+":
-                # equirect は gut 必須だが igs+ は gut 不可, かつ undistort も無効 → 学習不能.
-                cfg["gut"] = False
-                cfg["undistort"] = False
+                # equirect は gut 必須だが igs+ は gut 不可, かつ undistort も無効.
                 if "equirect_igsplus_unsupported" not in warnings:
                     warnings.append("equirect_igsplus_unsupported")
+                continue
             else:
                 cfg["gut"] = True  # gsplat backend が equirect をネイティブ描画.
                 cfg["undistort"] = False
@@ -146,6 +253,10 @@ def build_configs(profile: dict) -> tuple[dict[str, dict], dict]:
         "scene_scale_point": profile.get("scene_scale_point"),
         "scene_scale_camera": profile.get("scene_scale_camera"),
         "warnings": warnings,
-        "usage": "LichtFeld-Studio --config train_config.<strategy>.json --data-path dataset/",
+        "supported_configs": sorted(configs),
+        "usage": (
+            "LichtFeld-Studio --config train_configs/train_config.<strategy>.json "
+            "--data-path <export_dataset> --output-path <training_output>"
+        ),
     }
     return configs, info

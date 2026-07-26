@@ -44,7 +44,7 @@ class RunBody(BaseModel):
     # 例: {"reproject_views": {"size": 1024, "max_frames": 10},
     #      "generate_masks": {"prompt": "person,tripod"}}
     params_by_stage: dict[str, dict] | None = None
-    # 全工程実行時にスキップするステージ名 (UI のチェックボックスで無効化した工程).
+    # Batch pipeline API で実行対象から外す optional stage.
     skip: list[str] | None = None
 
 

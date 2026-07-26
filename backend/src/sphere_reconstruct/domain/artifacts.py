@@ -42,9 +42,7 @@ class StageManifest(BaseModel):
     extra: dict[str, Any] = Field(default_factory=dict)
 
     def compute_hashes(self) -> None:
-        self.inputs_hash = _stable_hash(
-            [{"path": f.path, "sha256": f.sha256} for f in self.inputs]
-        )
+        self.inputs_hash = _stable_hash([{"path": f.path, "sha256": f.sha256} for f in self.inputs])
         self.params_hash = _stable_hash(self.params)
 
     def dump(self, path: Path) -> None:
@@ -52,7 +50,7 @@ class StageManifest(BaseModel):
         path.write_text(self.model_dump_json(indent=2), encoding="utf-8")
 
     @classmethod
-    def load(cls, path: Path) -> "StageManifest":
+    def load(cls, path: Path) -> StageManifest:
         return cls.model_validate_json(path.read_text(encoding="utf-8"))
 
 
