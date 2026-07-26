@@ -1,11 +1,11 @@
 """LichtFeld-Studio 向け推奨学習 config の生成.
 
-再構成プロファイル + 相机モデルから, 3 つの densification strategy (mrnf / igs+ / mcmc)
+再構成プロファイル + camera model から, 3 つの densification strategy (mrnf / igs+ / mcmc)
 の config JSON を組み立てる. 公式 preset (eval/*.json, commit dee66c7 相当) を基底にし,
-場面依存の `max_cap` と, 相机モデル互換に関わる `gut` / `undistort` / `random` だけを上書きする.
+場面依存の `max_cap` と, camera model 互換に関わる `gut` / `undistort` / `random` だけを上書きする.
 scene_scale は LichtFeld が読み込み時に自動計算するため config には出さない.
 
-互換の要点 (LichtFeld 源码で確認):
+互換の要点 (LichtFeld source code で確認):
 - `gut` はレンダラ選択フラグ: false=fastgs (既定, PINHOLE 専用), true=gsplat (歪み/FISHEYE/
   EQUIRECTANGULAR をネイティブ描画). `gut=true` は strategy が igs+ のとき **ハードエラー**
   ("GUT and igs+ strategy cannot be used together") → GUT は mcmc / mrnf のみ.
@@ -179,8 +179,12 @@ _PRESETS = {"mrnf": _MRNF_PRESET, "igsplus": _IGSPLUS_PRESET, "mcmc": _MCMC_PRES
 
 # max_cap 導出: SfM 点数の倍率. VRAM/品質のダイヤルなので clamp する.
 _CAP_K = 6
-_CAP_FLOOR = 500_000
+# LFStudio v0.5.3 の再現用 eval preset は 1M。runtime 既定 5M は eager allocation で
+# 12GB 級 GPU に重いため、公式 eval 値を安全な下限にする。
+# https://github.com/MrNeRF/LichtFeld-Studio/blob/d8c50c6a3e2273cb74130a6e9023de8d068af52d/eval/mrnf_optimization_params.json
+_CAP_FLOOR = 1_000_000
 _CAP_CEIL = 3_000_000
+_SPARSE_POINT_WARNING = 10_000
 
 
 def _camera_class(models: list[str]) -> str:
@@ -196,18 +200,20 @@ def _camera_class(models: list[str]) -> str:
 
 
 def build_configs(profile: dict, *, has_masks: bool = False) -> tuple[dict[str, dict], dict]:
-    """profile から 3 strategy の config と, 導出情報 (max_cap / 相机クラス / 警告) を返す."""
+    """profile から 3 strategy の config と, 導出情報 (max_cap / camera class / 警告) を返す."""
     models = profile.get("camera_models", [])
     cclass = _camera_class(models)
     npts = int(profile.get("num_points3D", 0))
     reproj = float(profile.get("mean_reprojection_error", 0.0))
 
     cap = int(min(_CAP_CEIL, max(_CAP_FLOOR, _CAP_K * npts)))
-    sparse_init = npts < 10_000  # SfM が薄すぎる → random init に倒す.
+    random_init = npts == 0
 
     warnings: list[str] = []
     if reproj > 1.5:
         warnings.append("high_reproj_error")
+    if 0 < npts < _SPARSE_POINT_WARNING:
+        warnings.append("sparse_point_cloud")
 
     configs: dict[str, dict] = {}
     for name, preset in _PRESETS.items():
@@ -216,18 +222,18 @@ def build_configs(profile: dict, *, has_masks: bool = False) -> tuple[dict[str, 
         cfg["mask_mode"] = "segment" if has_masks else "none"
         cfg["invert_masks"] = False
         cfg["mask_threshold"] = 0.5
-        if sparse_init:
+        if random_init:
             cfg["random"] = True
         strat = cfg["strategy"]  # mrnf / igs+ / mcmc
 
-        # 相机モデルに応じた歪み処理. gut は igs+ で禁止.
+        # Camera model に応じた歪み処理. gut は igs+ で禁止.
         if cclass == "pinhole":
             cfg["gut"] = False
             cfg["undistort"] = False
         elif cclass in ("fisheye", "distorted_pinhole"):
             if strat == "igs+":
                 cfg["gut"] = False
-                cfg["undistort"] = True  # igs+ は GUT 不可 → on-the-fly 去畸变.
+                cfg["undistort"] = True  # igs+ は GUT 不可なので on-the-fly 歪み補正を使う。
             else:
                 cfg["gut"] = True
                 cfg["undistort"] = False
@@ -246,7 +252,7 @@ def build_configs(profile: dict, *, has_masks: bool = False) -> tuple[dict[str, 
         "camera_class": cclass,
         "camera_models": models,
         "max_cap": cap,
-        "sparse_init": sparse_init,
+        "random_init": random_init,
         "num_points3D": npts,
         "num_images": int(profile.get("num_images", 0)),
         "mean_reprojection_error": round(reproj, 4),
@@ -254,8 +260,10 @@ def build_configs(profile: dict, *, has_masks: bool = False) -> tuple[dict[str, 
         "scene_scale_camera": profile.get("scene_scale_camera"),
         "warnings": warnings,
         "supported_configs": sorted(configs),
+        "recommended_config": "train_config.mrnf.json",
+        "recommended_strategy": "mrnf",
         "usage": (
-            "LichtFeld-Studio --config train_configs/train_config.<strategy>.json "
+            "LichtFeld-Studio --config train_configs/train_config.mrnf.json "
             "--data-path <export_dataset> --output-path <training_output>"
         ),
     }

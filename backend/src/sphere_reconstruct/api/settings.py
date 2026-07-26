@@ -23,6 +23,7 @@ async def read_settings() -> dict[str, Any]:
         "binaries": s.binaries.model_dump(),
         "sam3": s.sam3.model_dump(),
         "aliked": s.aliked.model_dump(),
+        "denoise": s.denoise.model_dump(),
         "log": s.log.model_dump(),
     }
 

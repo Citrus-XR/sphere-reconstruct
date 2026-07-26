@@ -84,11 +84,14 @@ def detect_lens_region(image_path: Path) -> dict:
     if cv2.contourArea(contour) < small.shape[0] * small.shape[1] * 0.2:
         return dict(DEFAULT_LENS)
     (center_x, center_y), radius = cv2.minEnclosingCircle(contour)
-    radius *= 0.97
+    radius_normalized = radius / small.shape[1]
+    # 円が画像端で切れている camera は min-enclosing circle が色収差・反射を含む外周まで拾う。
+    # 完全に見える円は 3%、切れた円は 10% 内側へ寄せ、UI で必要なら広げられる初期値にする。
+    safety = 0.90 if radius_normalized > 0.5 else 0.97
     return {
         "cx": _clamp01(center_x / small.shape[1]),
         "cy": _clamp01(center_y / small.shape[0]),
-        "r": max(0.3, min(0.52, radius / small.shape[1])),
+        "r": max(0.3, min(0.52, radius_normalized * safety)),
     }
 
 

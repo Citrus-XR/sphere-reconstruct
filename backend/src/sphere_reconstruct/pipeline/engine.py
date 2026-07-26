@@ -27,9 +27,14 @@ from pathlib import Path
 from typing import Any
 
 from ..domain.artifacts import StageManifest, manifest_path
-from ..domain.pipeline_state import STAGE_ORDER, STAGE_TO_STATE, StageName
+from ..domain.pipeline_state import STAGE_ORDER, StageName
 from ..infrastructure.filesystem import atomic_replace_dir
-from .invalidation import clear_stale, invalidate_from
+from .invalidation import (
+    clear_stale,
+    derive_pipeline_state,
+    invalidate_from,
+    preserve_export_outputs,
+)
 from .manifest import get as get_stage_cls
 from .stage import ProgressReporter, StageContext
 
@@ -148,7 +153,7 @@ class Engine:
                 args={"stage": stage_name.value},
             )
             shutil.rmtree(tmp_dir, ignore_errors=True)
-            self._mark_state_up_to(stage_name)
+            self._refresh_project_state()
             return
 
         # stage_run 挿入 (running).
@@ -185,6 +190,16 @@ class Engine:
             shutil.rmtree(tmp_dir, ignore_errors=True)
             raise
 
+        # LFStudio の既定 output は export_dataset 内に作られる。stage の原子置換前に
+        # unmanaged training result を永続領域へ移し、再生成可能な export だけを置換する。
+        if stage_name == StageName.EXPORT_DATASET:
+            for preserved in preserve_export_outputs(project_dir):
+                reporter.warn(
+                    f"LFStudio 学習結果を保護しました: {preserved}",
+                    key="log.export_preserved_output",
+                    args={"path": str(preserved)},
+                )
+
         # tmp -> final を原子置換.
         atomic_replace_dir(tmp_dir, final_dir)
         clear_stale(project_dir, stage_name)
@@ -210,7 +225,7 @@ class Engine:
             ),
         )
         self._invalidate_downstream(stage_name)
-        self._mark_state_up_to(stage_name)
+        self._refresh_project_state()
 
     def _cached_matches(self, stage, ctx: StageContext) -> StageManifest | None:
         """既存 manifest が現在の入力/パラメータ/実装バージョンと一致するならそれを返す."""
@@ -243,8 +258,8 @@ class Engine:
     def _invalidate_downstream(self, stage: StageName) -> None:
         invalidate_from(self.project_dir(), stage, include_self=False)
 
-    def _mark_state_up_to(self, stage: StageName) -> None:
-        state = STAGE_TO_STATE[stage]
+    def _refresh_project_state(self) -> None:
+        state = derive_pipeline_state(self.project_dir())
         self._execute(
             "UPDATE project SET state=?, updated_at=? WHERE id=?",
             (state.value, _iso_now(), self._project_id),

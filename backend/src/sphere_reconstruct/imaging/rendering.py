@@ -50,22 +50,19 @@ def build_remap(
     """
     # (H, W, 3) の pinhole 射線 (view カメラ座標).
     rays = pinhole_backproject(view)
-    H, W, _ = rays.shape
+    height, width, _ = rays.shape
     # rig 座標系 = view 座標系を yaw/pitch で戻したもの.
-    R_view = yaw_pitch_rotation(view.yaw_deg, view.pitch_deg)
+    view_rotation = yaw_pitch_rotation(view.yaw_deg, view.pitch_deg)
     # view 座標 -> rig 座標 = R_view^T @ ray (ここでは backprojection なので view で作った射線を
     # 「view -> rig -> lens」に持っていく).
-    rays_rig = rays.reshape(-1, 3) @ R_view
+    rays_rig = rays.reshape(-1, 3) @ view_rotation
 
-    if extra_rotation is not None:
-        rays_lens = rays_rig @ extra_rotation.T
-    else:
-        rays_lens = rays_rig
+    rays_lens = rays_rig @ extra_rotation.T if extra_rotation is not None else rays_rig
 
     uv, valid = project_mei(rays_lens, src_intr)
-    map_x = uv[:, 0].reshape(H, W).astype(np.float32)
-    map_y = uv[:, 1].reshape(H, W).astype(np.float32)
-    valid_mask = valid.reshape(H, W)
+    map_x = uv[:, 0].reshape(height, width).astype(np.float32)
+    map_y = uv[:, 1].reshape(height, width).astype(np.float32)
+    valid_mask = valid.reshape(height, width)
     # invalid 画素は remap で外に飛ばして BORDER_CONSTANT で 0 になるようにする.
     map_x = np.where(valid_mask, map_x, -1.0)
     map_y = np.where(valid_mask, map_y, -1.0)
@@ -124,8 +121,8 @@ def render_perspective_from_equirect(
 
     rays = pinhole_backproject(view)  # (H, W, 3), +X 右 +Y 下 +Z 前
     h, w, _ = rays.shape
-    R_view = yaw_pitch_rotation(view.yaw_deg, view.pitch_deg)
-    d = rays.reshape(-1, 3) @ R_view  # view -> rig(world) 方向.
+    view_rotation = yaw_pitch_rotation(view.yaw_deg, view.pitch_deg)
+    d = rays.reshape(-1, 3) @ view_rotation  # view -> rig(world) 方向.
     dx, dy, dz = d[:, 0], d[:, 1], d[:, 2]
     r = np.sqrt(dx * dx + dy * dy + dz * dz)
     lon = np.arctan2(dx, dz)  # +Z 前で 0, +X 右で +pi/2.
@@ -159,25 +156,25 @@ def lens_local_rotation(lens) -> np.ndarray:
     p = math.radians(lens.pitch)
     r = math.radians(lens.roll)
     # ZYX 順で組む (yaw -> pitch -> roll).
-    Rz = np.array(
+    yaw_rotation = np.array(
         [
             [math.cos(y), -math.sin(y), 0.0],
             [math.sin(y), math.cos(y), 0.0],
             [0.0, 0.0, 1.0],
         ]
     )
-    Ry = np.array(
+    pitch_rotation = np.array(
         [
             [math.cos(p), 0.0, math.sin(p)],
             [0.0, 1.0, 0.0],
             [-math.sin(p), 0.0, math.cos(p)],
         ]
     )
-    Rx = np.array(
+    roll_rotation = np.array(
         [
             [1.0, 0.0, 0.0],
             [0.0, math.cos(r), -math.sin(r)],
             [0.0, math.sin(r), math.cos(r)],
         ]
     )
-    return Rx @ Ry @ Rz
+    return roll_rotation @ pitch_rotation @ yaw_rotation

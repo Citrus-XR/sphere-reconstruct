@@ -2,6 +2,7 @@
 
 export type ReconMode = 'native_fisheye' | 'pinhole_rig' | 'equirectangular'
 export type QualityPreset = 'draft' | 'standard' | 'high' | 'custom'
+export type DenoiseMethod = 'off' | 'fastdvdnet' | 'ffmpeg_adaptive'
 
 export interface StageParams {
   fps: number
@@ -51,6 +52,12 @@ export interface StageParams {
   minRegisteredRatio: number
   minPoints3D: number
   alignmentMethod: 'auto' | 'imu' | 'none'
+  denoiseMethod: DenoiseMethod
+  denoiseSigma: number
+  denoiseTileSize: number
+  denoiseTileOverlap: number
+  denoiseTemporalWindow: number
+  denoiseLumaOnly: boolean
   size: number
   emitTrainConfigs: boolean
 }
@@ -133,6 +140,12 @@ export const DEFAULT_PARAMS: StageParams = {
   minRegisteredRatio: 0.8,
   minPoints3D: 100,
   alignmentMethod: 'auto',
+  denoiseMethod: 'off',
+  denoiseSigma: 10,
+  denoiseTileSize: 512,
+  denoiseTileOverlap: 80,
+  denoiseTemporalWindow: 5,
+  denoiseLumaOnly: true,
   size: 1024,
   emitTrainConfigs: true,
 }
@@ -220,8 +233,30 @@ export const paramsForStage = (
       }
     case 'align_reconstruction':
       return { method: params.alignmentMethod, normalize_scale: true }
+    case 'denoise_frames':
+      if (params.denoiseMethod === 'fastdvdnet') {
+        return {
+          method: params.denoiseMethod,
+          sigma: params.denoiseSigma,
+          tile_size: params.denoiseTileSize,
+          tile_overlap: params.denoiseTileOverlap,
+          jpeg_quality: 98,
+        }
+      }
+      if (params.denoiseMethod === 'ffmpeg_adaptive') {
+        return {
+          method: params.denoiseMethod,
+          temporal_window: params.denoiseTemporalWindow,
+          luma_only: params.denoiseLumaOnly,
+          jpeg_quality: 98,
+        }
+      }
+      return { method: 'off' }
     case 'export_dataset':
-      return { emit_train_configs: params.emitTrainConfigs }
+      return {
+        emit_train_configs: params.emitTrainConfigs,
+        image_source: params.denoiseMethod === 'off' || mode === 'pinhole_rig' ? 'original' : 'denoised',
+      }
     default:
       return {}
   }
@@ -239,6 +274,7 @@ export const allParams = (
     'match_features',
     'reconstruct',
     'align_reconstruction',
+    'denoise_frames',
     'export_dataset',
   ]
   return Object.fromEntries(stages.map(stage => [stage, paramsForStage(stage, params, mode)]))

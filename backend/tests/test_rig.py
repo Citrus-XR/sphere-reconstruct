@@ -29,8 +29,8 @@ def test_rotmat_to_quat_identity():
 
 def test_rotmat_to_quat_roundtrip():
     # 90° about Y.
-    R = rig.yaw_pitch_rotation(90.0, 0.0)
-    q = rig.rotmat_to_quat_wxyz(R)
+    rotation = rig.yaw_pitch_rotation(90.0, 0.0)
+    q = rig.rotmat_to_quat_wxyz(rotation)
     # ノルム 1.
     n = sum(c * c for c in q)
     assert abs(n - 1.0) < 1e-9

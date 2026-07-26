@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import itertools
 import re
+from collections import Counter
 
 import numpy as np
 
@@ -109,9 +110,9 @@ def compute_align_rotation(
     *,
     mounting: np.ndarray | None = None,
 ) -> tuple[np.ndarray | None, dict]:
-    """重力対齐の大域回転 R_align (3x3) と診断情報を返す.
+    """重力整列の大域回転 R_align (3x3) と診断情報を返す.
 
-    front 画像が無い / 一致度が悪い場合は (None, info) を返し, 対齐を見送る.
+    front 画像が無い、または一致度が悪い場合は (None, info) を返して整列を見送る。
     """
     if gravity_imu is None:
         return None, {"reason": "no_gravity"}
@@ -146,7 +147,7 @@ def compute_align_rotation(
         "front_images": len(ups),
     }
     if spread > 20.0:
-        # ばらつきが大きい: 対齐すると却って歪む恐れ. 見送り.
+        # ばらつきが大きい場合は整列によって歪む恐れがあるため見送る。
         return None, {**info, "reason": "up_spread_too_large"}
     return R_align, info
 
@@ -237,17 +238,35 @@ def compute_timed_align_rotation(
 
 
 def reference_trajectory_diameter(recon: Reconstruction) -> float:
+    centers = reference_camera_centers(recon)
+    if len(centers) < 2:
+        return 0.0
+    points = np.asarray(centers, dtype=float)
+    return float(np.linalg.norm(np.ptp(points, axis=0)))
+
+
+def reference_camera_centers(recon: Reconstruction) -> list[tuple[float, float, float]]:
+    """Rig の reference sensor だけの camera center を返す。
+
+    Native / pinhole rig は ``front`` / ``front_lens0`` を reference として生成する。未知の naming
+    では登録数が最大の単一 camera ID を選び、複数 sensor の baseline を軌跡移動と誤認しない。
+    """
     centers = [
         image.camera_center
         for image in recon.images.values()
         if _FRONT_FRAME.search(image.name.replace("\\", "/"))
     ]
-    if len(centers) < 2:
-        centers = [image.camera_center for image in recon.images.values()]
-    if len(centers) < 2:
-        return 0.0
-    points = np.asarray(centers, dtype=float)
-    return float(np.linalg.norm(np.ptp(points, axis=0)))
+    if centers:
+        return centers
+    if not recon.images:
+        return []
+    counts = Counter(image.camera_id for image in recon.images.values())
+    reference_camera_id = min(counts, key=lambda camera_id: (-counts[camera_id], camera_id))
+    return [
+        image.camera_center
+        for image in recon.images.values()
+        if image.camera_id == reference_camera_id
+    ]
 
 
 def _estimate_at_offset(

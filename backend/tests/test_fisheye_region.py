@@ -51,3 +51,12 @@ def test_detect_lens_region_from_black_border(tmp_path):
     assert abs(region["cx"] - 205 / 400) < 0.02
     assert abs(region["cy"] - 195 / 400) < 0.02
     assert 0.43 < region["r"] < 0.47
+
+
+def test_detect_clipped_circle_uses_conservative_inner_radius(tmp_path):
+    image = np.zeros((400, 400), dtype=np.uint8)
+    cv2.circle(image, (200, 200), 210, 180, thickness=-1)
+    path = tmp_path / "clipped.jpg"
+    assert cv2.imwrite(str(path), image)
+    region = fr.detect_lens_region(path)
+    assert 0.45 < region["r"] < 0.49

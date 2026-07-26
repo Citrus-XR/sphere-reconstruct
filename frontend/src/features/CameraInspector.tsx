@@ -1,38 +1,87 @@
 import { useState } from 'react'
-import { frameImageUrl, fisheyeMaskUrl, parseImageName, type ReconstructionImage } from '../api/client'
+import { useQuery } from '@tanstack/react-query'
+import {
+  api,
+  denoisedImageUrl,
+  fisheyeMaskUrl,
+  frameImageUrl,
+  parseImageName,
+  pinholeImageUrl,
+  type ReconstructionImage,
+} from '../api/client'
 import { useSettings } from '../ui/settings'
+import {
+  CapturePreview,
+  CaptureSummary,
+  InspectorField,
+  InspectorFields,
+  InspectorHeader,
+  type CaptureView,
+} from './CaptureInspectorParts'
 
 // カメラ選択時に Inspector に表示: 対応フレーム画像 + 適用マスクの重ね表示トグル.
-export const CameraInspector = ({ projectId, image }: { projectId: string; image: ReconstructionImage }) => {
+export const CameraInspector = ({ projectId, image, denoiseEnabled }: {
+  projectId: string
+  image: ReconstructionImage
+  denoiseEnabled: boolean
+}) => {
   const { t } = useSettings()
-  const [showMask, setShowMask] = useState(false)
+  const [view, setView] = useState<CaptureView>('orig')
   const parsed = parseImageName(image.name)
+  const frameMatch = image.name.match(/frame_(\d+)/)
+  const frameIndex = parsed?.index ?? (frameMatch ? Number(frameMatch[1]) : null)
+  const namedLens = image.name.match(/lens(\d+)/)
+  const lens = parsed?.lens ?? (namedLens ? Number(namedLens[1]) : null)
+  const { data: masks } = useQuery({
+    queryKey: ['masks', projectId], queryFn: () => api.getMasks(projectId), retry: false,
+  })
+  const { data: denoise } = useQuery({
+    queryKey: ['denoise', projectId], queryFn: () => api.getDenoise(projectId), enabled: denoiseEnabled, retry: false,
+  })
+  const maskFrame = parsed ? masks?.frames.find(frame => frame.index === parsed.index) : undefined
+  const maskRec = parsed?.kind === 'native' && masks?.kind === 'sam3_fisheye_masks'
+    ? maskFrame?.lenses?.find(item => item.lens === parsed.lens)
+    : parsed?.kind === 'pinhole' && masks?.kind === 'sam3_pinhole_masks'
+    ? maskFrame?.views?.find(item => item.lens === parsed.lens && item.view === parsed.view)
+    : undefined
+  const denoisedAvailable = denoiseEnabled && !!parsed && !!denoise?.frames.some(frame => (
+    frame.index === parsed.index && (parsed.kind === 'erp'
+      ? frame.erp
+      : parsed.kind === 'native' ? (parsed.lens === 0 ? frame.lens0 : frame.lens1) : false)
+  ))
+  const originalUrl = parsed?.kind === 'pinhole'
+    ? pinholeImageUrl(projectId, parsed.index, parsed.view, parsed.lens)
+    : parsed ? frameImageUrl(projectId, parsed.index, parsed.lens) : null
+  const maskUrl = parsed?.kind === 'pinhole' && maskRec
+    ? pinholeImageUrl(projectId, parsed.index, parsed.view, parsed.lens, true)
+    : parsed?.kind === 'native' && maskRec ? fisheyeMaskUrl(projectId, parsed.index, parsed.lens) : null
 
   return (
     <div>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
-        <strong style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis' }}>{image.name}</strong>
-        {parsed && (
-          <button className={`btn ${showMask ? '' : 'btn-secondary'}`} onClick={() => setShowMask(v => !v)}>
-            {t('maskOverlay')}
-          </button>
-        )}
-      </div>
-      <div className="mono" style={{ marginBottom: 8, fontSize: 11 }}>
-        pos [{image.position.map(v => v.toFixed(2)).join(', ')}] · pts {image.num_points}
-      </div>
-      {parsed ? (
-        <div style={{ position: 'relative', background: '#111', borderRadius: 6, overflow: 'hidden' }}>
-          <img src={frameImageUrl(projectId, parsed.index, parsed.lens)} style={{ width: '100%', display: 'block' }} alt={image.name} />
-          {showMask && (
-            <img src={fisheyeMaskUrl(projectId, parsed.index, parsed.lens)}
-              style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', opacity: 0.5, mixBlendMode: 'screen' }}
-              alt="mask" onError={e => { (e.target as HTMLImageElement).style.display = 'none' }} />
-          )}
-        </div>
+      <InspectorHeader title={image.name} />
+      {parsed && originalUrl ? (
+        <CapturePreview originalUrl={originalUrl} maskUrl={maskUrl}
+          denoisedUrl={denoisedAvailable ? denoisedImageUrl(projectId, parsed.index, parsed.lens) : null}
+          view={view} onViewChange={setView} alt={image.name} />
       ) : (
         <div className="hint">{t('noCamImage')}</div>
       )}
+      {frameIndex !== null && (
+        <CaptureSummary frameIndex={frameIndex} lens={lens}
+          pointsLabel={t('imagePoints')}
+          registration={{ registered: true, points: image.num_points }} />
+      )}
+      <InspectorFields>
+        <InspectorField label={t('datasetImage')}>{image.name}</InspectorField>
+        <InspectorField label={t('cameraPosition')}>
+          [{image.position.map(value => value.toFixed(3)).join(', ')}]
+        </InspectorField>
+        {maskRec && (
+          <InspectorField label={t('maskCoverage')} tone={maskRec.coverage_warning ? 'error' : 'muted'}>
+            {(maskRec.coverage * 100).toFixed(1)}%{maskRec.coverage_warning ? ' ⚠' : ''}
+          </InspectorField>
+        )}
+      </InspectorFields>
     </div>
   )
 }

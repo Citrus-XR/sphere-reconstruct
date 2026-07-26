@@ -13,17 +13,17 @@ from __future__ import annotations
 import json
 
 from fastapi import APIRouter, HTTPException
+from fastapi.concurrency import run_in_threadpool
 
 from ..domain import project as project_domain
 from ..domain.artifacts import manifest_path
 from ..domain.pipeline_state import (
     STAGE_ORDER,
-    STAGE_TO_STATE,
     PipelineState,
     StageName,
 )
 from ..infrastructure.database import get_db
-from ..pipeline.invalidation import clear_pipeline, invalidate_from, is_stale
+from ..pipeline.invalidation import clear_pipeline, derive_pipeline_state, invalidate_from, is_stale
 from ..settings import workspace_root
 
 router = APIRouter(tags=["stages"])
@@ -102,13 +102,11 @@ async def clear_stage(project_id: str, stage: str) -> dict:
         raise HTTPException(status_code=404, detail="project not found")
 
     proj_dir = _project_dir(project_id)
-    invalidated = invalidate_from(proj_dir, StageName(stage), include_self=True)
+    invalidated = await run_in_threadpool(
+        invalidate_from, proj_dir, StageName(stage), include_self=True
+    )
 
-    # state を「先頭から連続して manifest が残っている最後のステージ」に戻す.
-    new_state = PipelineState.CREATED
-    for st in STAGE_ORDER:
-        if manifest_path(proj_dir, st.value).exists():
-            new_state = STAGE_TO_STATE[st]
+    new_state = derive_pipeline_state(proj_dir)
     await db.conn.execute(
         "UPDATE project SET state=?, updated_at=datetime('now') WHERE id=?",
         (new_state.value, project_id),
@@ -129,7 +127,7 @@ async def clear_all_outputs(project_id: str) -> dict:
     if p is None:
         raise HTTPException(status_code=404, detail="project not found")
     proj_dir = _project_dir(project_id)
-    clear_pipeline(proj_dir)
+    await run_in_threadpool(clear_pipeline, proj_dir)
     await db.conn.execute(
         "UPDATE project SET state=?, updated_at=datetime('now') WHERE id=?",
         (PipelineState.CREATED.value, project_id),

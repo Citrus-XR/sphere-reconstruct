@@ -21,9 +21,11 @@ from __future__ import annotations
 import json
 import os
 import shutil
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
-from ..colmap import lichtfeld_config, train_profile
+from PIL import Image as PilImage
+
+from ..colmap import gravity_align, lichtfeld_config, train_profile
 from ..colmap import model as colmap_model
 from ..domain.artifacts import FileRef, StageManifest
 from ..domain.pipeline_state import StageName
@@ -35,7 +37,7 @@ from ..pipeline.stage import Stage, StageContext, new_manifest
 @register
 class ExportDataset(Stage):
     name = StageName.EXPORT_DATASET
-    impl_version = "0.5"
+    impl_version = "0.6"
 
     def collect_inputs(self, ctx: StageContext) -> list[FileRef]:
         candidates = [
@@ -48,6 +50,8 @@ class ExportDataset(Stage):
             ctx.project_dir / "align_reconstruction" / "sparse" / "0" / "images.bin",
             ctx.project_dir / "align_reconstruction" / "sparse" / "0" / "points3D.bin",
         ]
+        if ctx.params["image_source"] == "denoised":
+            candidates.append(ctx.project_dir / "manifests" / "denoise_frames.json")
         return [
             FileRef(
                 path=str(path.relative_to(ctx.project_dir)),
@@ -59,10 +63,14 @@ class ExportDataset(Stage):
         ]
 
     def normalize_params(self, raw: dict) -> dict:
+        image_source = str(raw.get("image_source", "original")).lower()
+        if image_source not in {"original", "denoised"}:
+            raise ValueError(f"未対応の export 画像 source: {image_source}")
         return {
             "max_preview_points": int(raw.get("max_preview_points", 500_000)),
             "include_dataset": bool(raw.get("include_dataset", True)),
             "emit_train_configs": bool(raw.get("emit_train_configs", True)),
+            "image_source": image_source,
         }
 
     def execute(self, ctx: StageContext) -> StageManifest:
@@ -77,6 +85,8 @@ class ExportDataset(Stage):
         recon = colmap_model.read_model(model_dir)
         out = ctx.stage_out_dir
         outputs: list[FileRef] = []
+        training_output_dir = ctx.project_dir / "training_outputs"
+        training_output_dir.mkdir(parents=True, exist_ok=True)
 
         train_profile_data = train_profile.compute_profile(recon)
 
@@ -113,7 +123,7 @@ class ExportDataset(Stage):
                 if source.is_file() and source.suffix.lower() in {".bin", ".txt", ".ini"}:
                     shutil.copy2(source, ds_sparse / source.name)
             # 画像名は images.bin の相対 path をそのまま保つ.
-            recon_images = ctx.project_dir / "extract_features" / "images"
+            recon_images = self._training_images(ctx)
             if recon_images.exists():
                 image_extensions = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
                 for img_file in recon_images.rglob("*"):
@@ -123,8 +133,12 @@ class ExportDataset(Stage):
                     dst = ds_images / rel
                     dst.parent.mkdir(parents=True, exist_ok=True)
                     _link_or_copy(img_file, dst)
-            masks_written = _copy_masks(ctx.project_dir / "extract_features" / "masks", ds / "masks")
+            mask_files_copied = _copy_masks(ctx.project_dir / "extract_features" / "masks", ds / "masks")
             validation = _validate_lf_dataset(ds, recon)
+            if not validation["loadable"]:
+                raise RuntimeError(
+                    "LFStudio export 検証に失敗しました: " + ", ".join(validation["errors"])
+                )
             export_manifest = {
                 "format": "sphere-reconstruct-export",
                 "version": 1,
@@ -132,7 +146,10 @@ class ExportDataset(Stage):
                 "camera_models": sorted({camera.model for camera in recon.cameras.values()}),
                 "images": len(recon.images),
                 "points3D": len(recon.points3D),
-                "masks": masks_written,
+                "masks": validation["matched_mask_count"],
+                "mask_files_copied": mask_files_copied,
+                "image_source": ctx.params["image_source"],
+                "training_output_dir": str(training_output_dir),
                 "validation": validation,
             }
             export_manifest_path = ds / "export_manifest.json"
@@ -156,13 +173,49 @@ class ExportDataset(Stage):
                         if path.is_file()
                     )
         else:
-            masks_written = 0
+            validation = None
 
         # 3) LichtFeld-Studio 推奨 config (任意).
         if ctx.params["emit_train_configs"]:
             configs, cfg_info = lichtfeld_config.build_configs(
-                train_profile_data, has_masks=masks_written > 0
+                train_profile_data,
+                has_masks=bool(validation and validation["matched_mask_count"] > 0),
             )
+            final_dataset_dir = ctx.project_dir / StageName.EXPORT_DATASET.value
+            run_output_template = training_output_dir / "<run-name>"
+            config_path = final_dataset_dir / "train_configs" / "train_config.mrnf.json"
+            cfg_info["training_output_dir"] = str(training_output_dir)
+            cfg_info["training_output_template"] = str(run_output_template)
+            cfg_info["usage"] = (
+                f'LichtFeld-Studio --config "{config_path}" '
+                f'--data-path "{final_dataset_dir}" --output-path "{run_output_template}"'
+            )
+            cfg_info["command_template"] = {
+                "executable": "LichtFeld-Studio",
+                "arguments": [
+                    "--config",
+                    str(config_path),
+                    "--data-path",
+                    str(final_dataset_dir),
+                    "--output-path",
+                    str(run_output_template),
+                ],
+                "run_name_placeholder": "<run-name>",
+                "requires_unique_run_name": True,
+            }
+            cfg_info["gui_integration"] = {
+                "train_configs_auto_applied": False,
+                "warnings": [
+                    "lfstudio_gui_does_not_auto_apply_train_configs",
+                    "select_mrnf_enable_gut_and_segment_masks_manually",
+                ],
+                "required_settings": {
+                    "strategy": cfg_info["recommended_strategy"],
+                    "gut": configs["mrnf"]["gut"],
+                    "undistort": configs["mrnf"]["undistort"],
+                    "mask_mode": configs["mrnf"]["mask_mode"],
+                },
+            }
             tc_dir = out / "train_configs"
             tc_dir.mkdir(parents=True, exist_ok=True)
             for cname, cfg in configs.items():
@@ -203,6 +256,21 @@ class ExportDataset(Stage):
         ctx.progress.info("export_dataset done", progress=1.0, key="log.export_done")
         return manifest
 
+    @staticmethod
+    def _training_images(ctx: StageContext) -> Path:
+        if ctx.params["image_source"] == "original":
+            return ctx.project_dir / "extract_features" / "images"
+        denoise_manifest = ctx.project_dir / "denoise_frames" / "manifest_denoise.json"
+        if not denoise_manifest.is_file():
+            raise RuntimeError("ノイズ除去画像の export より先に denoise_frames を実行してください")
+        data = json.loads(denoise_manifest.read_text(encoding="utf-8"))
+        if data.get("method") == "off":
+            raise RuntimeError("denoise_frames が off のためノイズ除去画像を export できません")
+        images = ctx.project_dir / "denoise_frames" / "images"
+        if not images.is_dir():
+            raise RuntimeError("denoise_frames の出力画像がありません")
+        return images
+
 
 def _link_or_copy(src: Path, dst: Path) -> None:
     if dst.exists():
@@ -226,23 +294,148 @@ def _copy_masks(source_dir: Path, destination_dir: Path) -> int:
 
 
 def _validate_lf_dataset(dataset_dir: Path, recon: colmap_model.Reconstruction) -> dict:
-    missing_images = [
-        image.name for image in recon.images.values() if not (dataset_dir / "images" / image.name).is_file()
+    images_root = dataset_dir / "images"
+    masks_root = dataset_dir / "masks"
+    missing_images: list[str] = []
+    invalid_image_paths: list[str] = []
+    corrupt_images: list[str] = []
+    image_size_mismatches: list[dict] = []
+    missing_camera_references: list[dict] = []
+    valid_images: list[tuple[colmap_model.Image, Path, tuple[int, int]]] = []
+
+    for image in recon.images.values():
+        relative = _safe_relative_path(image.name)
+        if relative is None:
+            invalid_image_paths.append(image.name)
+            continue
+        image_path = images_root / relative
+        if not image_path.is_file():
+            missing_images.append(image.name)
+            continue
+        camera = recon.cameras.get(image.camera_id)
+        if camera is None:
+            missing_camera_references.append({"image": image.name, "camera_id": image.camera_id})
+            continue
+        try:
+            with PilImage.open(image_path) as decoded:
+                decoded.load()
+                size = decoded.size
+        except (OSError, ValueError):
+            corrupt_images.append(image.name)
+            continue
+        expected = (camera.width, camera.height)
+        if size != expected:
+            image_size_mismatches.append(
+                {"image": image.name, "actual": list(size), "expected": list(expected)}
+            )
+            continue
+        valid_images.append((image, relative, size))
+
+    unsupported_cameras = [
+        {"camera_id": camera.camera_id, "model_id": camera.model_id, "model": camera.model}
+        for camera in recon.cameras.values()
+        if camera.model_id not in colmap_model.LFSTUDIO_SUPPORTED_CAMERA_MODEL_IDS
     ]
+
+    matched_masks = 0
+    missing_masks: list[str] = []
+    corrupt_masks: list[str] = []
+    mask_size_mismatches: list[dict] = []
+    for image, relative, expected_size in valid_images:
+        mask_path = _find_mask_path(masks_root, relative)
+        if mask_path is None:
+            missing_masks.append(image.name)
+            continue
+        try:
+            with PilImage.open(mask_path) as decoded:
+                decoded.load()
+                size = decoded.size
+        except (OSError, ValueError):
+            corrupt_masks.append(image.name)
+            continue
+        if size != expected_size:
+            mask_size_mismatches.append(
+                {"image": image.name, "actual": list(size), "expected": list(expected_size)}
+            )
+            continue
+        matched_masks += 1
+
+    mask_file_count = (
+        sum(1 for path in masks_root.rglob("*.png") if path.is_file()) if masks_root.exists() else 0
+    )
     summary = recon.summary()
+    reference_centers = gravity_align.reference_camera_centers(recon)
+    reference_diameter = gravity_align.reference_trajectory_diameter(recon)
+    reference_unique = len(
+        {tuple(round(value, 6) for value in center) for center in reference_centers}
+    )
+    errors: list[str] = []
+    for code, values in (
+        ("unsupported_camera_models", unsupported_cameras),
+        ("invalid_image_paths", invalid_image_paths),
+        ("missing_camera_references", missing_camera_references),
+        ("missing_images", missing_images),
+        ("corrupt_images", corrupt_images),
+        ("image_size_mismatches", image_size_mismatches),
+        ("corrupt_masks", corrupt_masks),
+        ("mask_size_mismatches", mask_size_mismatches),
+    ):
+        if values:
+            errors.append(code)
     warnings: list[str] = []
-    if summary.get("camera_trajectory_diameter", 0.0) < 1e-4 and len(recon.images) > 1:
-        warnings.append("collapsed_camera_trajectory")
-    if missing_images:
-        warnings.append("missing_images")
+    if reference_diameter < 1e-4 and len(reference_centers) > 1:
+        warnings.append("collapsed_reference_camera_trajectory")
+    if 0 < matched_masks < len(recon.images):
+        warnings.append("partial_registered_masks")
+    if mask_file_count > matched_masks:
+        warnings.append("unmatched_mask_files")
     return {
-        "loadable": not missing_images,
+        "loadable": not errors,
+        "training_ready": not errors and "collapsed_reference_camera_trajectory" not in warnings,
+        "errors": errors,
         "missing_image_count": len(missing_images),
         "missing_image_examples": missing_images[:10],
+        "invalid_image_path_count": len(invalid_image_paths),
+        "corrupt_image_count": len(corrupt_images),
+        "image_size_mismatch_count": len(image_size_mismatches),
+        "unsupported_cameras": unsupported_cameras,
+        "matched_mask_count": matched_masks,
+        "missing_mask_count": len(missing_masks),
+        "corrupt_mask_count": len(corrupt_masks),
+        "mask_size_mismatch_count": len(mask_size_mismatches),
+        "mask_files_copied": mask_file_count,
+        "reference_camera_trajectory_diameter": reference_diameter,
+        "reference_unique_camera_centers": reference_unique,
         "camera_trajectory_diameter": summary.get("camera_trajectory_diameter", 0.0),
         "unique_camera_centers": summary.get("unique_camera_centers", 0),
         "warnings": warnings,
     }
+
+
+def _safe_relative_path(name: str) -> Path | None:
+    normalized = name.replace("\\", "/")
+    posix = PurePosixPath(normalized)
+    windows = PureWindowsPath(name)
+    if not posix.parts or posix.is_absolute() or windows.is_absolute() or ".." in posix.parts:
+        return None
+    if any(part in {"", "."} for part in posix.parts):
+        return None
+    return Path(*posix.parts)
+
+
+def _find_mask_path(root: Path, image_relative: Path) -> Path | None:
+    candidates = [root / image_relative]
+    candidates.append(root / image_relative.with_suffix(".png"))
+    candidates.append(root / image_relative.with_suffix(".mask.png"))
+    candidates.append(root / f"{image_relative}.png")
+    seen: set[Path] = set()
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        if candidate.is_file():
+            return candidate
+    return None
 
 
 def _relpath(p: Path, ctx: StageContext) -> str:

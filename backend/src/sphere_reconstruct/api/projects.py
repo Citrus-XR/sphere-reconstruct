@@ -11,6 +11,7 @@ from datetime import datetime
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
+from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel
 
 from ..domain import project as project_domain
@@ -94,7 +95,7 @@ async def set_source(project_id: str, body: SetSourceBody) -> ProjectRead:
         raise HTTPException(status_code=404, detail=f"source not found: {resolved}")
 
     p = await project_domain.set_source(db, project_id, kind=body.kind, path=str(resolved))
-    clear_pipeline(p.workspace_dir)
+    await run_in_threadpool(clear_pipeline, p.workspace_dir)
     region = p.workspace_dir / "fisheye_region.json"
     if region.exists():
         region.unlink()
@@ -130,7 +131,7 @@ async def delete_project(project_id: str) -> dict:
     if p is None:
         raise HTTPException(status_code=404, detail="project not found")
     if p.workspace_dir.exists():
-        shutil.rmtree(p.workspace_dir, ignore_errors=True)
+        await run_in_threadpool(shutil.rmtree, p.workspace_dir)
     await db.conn.execute("DELETE FROM project WHERE id=?", (project_id,))
     await db.conn.commit()
     return {"deleted": project_id}

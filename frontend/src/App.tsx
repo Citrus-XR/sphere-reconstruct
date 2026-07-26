@@ -1,6 +1,6 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Layout, Model, type TabNode, type IJsonModel } from 'flexlayout-react'
+import { Actions, Layout, Model, TabNode, type IJsonModel } from 'flexlayout-react'
 import { api, openEventStream, type EventEnvelope } from './api/client'
 import { SystemStatsBar } from './components/SystemStatsBar'
 import { SettingsMenu } from './components/SettingsMenu'
@@ -9,6 +9,7 @@ import { ProjectManager } from './components/ProjectManager'
 import { ErrorBoundary } from './components/ErrorBoundary'
 import { StageHierarchy, type HierItem } from './components/StageHierarchy'
 import { SceneHierarchy } from './components/SceneHierarchy'
+import { PathText } from './components/PathText'
 import { StageSettings } from './features/StageSettings'
 import { CameraInspector } from './features/CameraInspector'
 import { FrameInspector } from './features/FrameInspector'
@@ -90,7 +91,7 @@ export const App = () => {
     if (!projectId) return
     api.clearStage(projectId, 'generate_masks').then(() => {
       qc.invalidateQueries({ queryKey: ['stages', projectId] })
-      for (const key of ['reconstruction', 'masks', 'export-info']) {
+      for (const key of ['reconstruction', 'masks', 'denoise', 'export-info']) {
         qc.removeQueries({ queryKey: [key, projectId] })
       }
     }).catch(error => console.warn('mode invalidation failed', error))
@@ -114,14 +115,28 @@ export const App = () => {
     } catch { return Model.fromJson(DEFAULT_LAYOUT) }
   }, [])
 
-  const promptInit = useRef(false)
   useEffect(() => {
-    if (promptInit.current || !settingsData) return
+    const titles: Record<string, string> = {
+      sceneHier: t('tabHierarchy'),
+      scene: t('tabSceneView'),
+      console: t('tabConsole'),
+      steps: t('tabSteps'),
+      inspector: t('tabInspector'),
+    }
+    model.visitNodes(node => {
+      if (!(node instanceof TabNode)) return
+      const component = node.getComponent()
+      const title = component ? titles[component] : undefined
+      if (title && node.getName() !== title) model.doAction(Actions.renameTab(node.getId(), title))
+    })
+  }, [lang, model]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!settingsData) return
     const dp = (settingsData as { sam3?: { default_prompt?: string } })?.sam3?.default_prompt
-    // 保存済み prompt があればそれを尊重し, 空のときだけ既定を入れる.
+    // 保存済み prompt があればそれを尊重し, 空のときだけ runtime 既定を入れる.
     if (dp) setParamsState(prev => prev.prompt ? prev : { ...prev, prompt: dp })
-    promptInit.current = true
-  }, [settingsData]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [settingsData, projectId])
 
   useEffect(() => { if (!projectId && projects?.length) setProjectId(projects[0].id) }, [projects, projectId])
   const project = projects?.find(p => p.id === projectId) ?? null
@@ -132,7 +147,8 @@ export const App = () => {
     if (!k) return
     if (k !== 'insv' && reconMode === 'native_fisheye') setReconMode('equirectangular')
     if (k === 'insv' && reconMode === 'equirectangular') setReconMode('native_fisheye')
-  }, [project?.source_kind]) // eslint-disable-line react-hooks/exhaustive-deps
+    if (k === 'erp_images' && params.denoiseMethod !== 'off') setParams({ denoiseMethod: 'off' })
+  }, [project?.source_kind, params.denoiseMethod]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // 工程に保存された UI 設定を復元 (工程ごと 1 回). 復元後の変更は debounce して保存する.
   const hydratedRef = useRef<string | null>(null)
@@ -140,10 +156,23 @@ export const App = () => {
     if (!project || hydratedRef.current === project.id) return
     hydratedRef.current = project.id
     const ui = project.ui_state
-    if (ui?.params) setParamsState(prev => ({ ...prev, ...(ui.params as Partial<StageParams>) }))
-    if (ui?.reconMode) setReconMode(ui.reconMode as ReconMode)
-    if (Array.isArray(ui?.disabled)) setDisabled(new Set(ui.disabled))
-  }, [project])
+    const defaultPrompt = (settingsData as { sam3?: { default_prompt?: string } } | undefined)
+      ?.sam3?.default_prompt ?? ''
+    setParamsState({
+      ...DEFAULT_PARAMS,
+      ...(defaultPrompt ? { prompt: defaultPrompt } : {}),
+      ...((ui?.params ?? {}) as Partial<StageParams>),
+    })
+    setReconMode((ui?.reconMode as ReconMode | undefined)
+      ?? (project.source_kind === 'insv' || !project.source_kind ? 'native_fisheye' : 'equirectangular'))
+    setDisabled(new Set(Array.isArray(ui?.disabled) ? ui.disabled : []))
+    setSelectedStage('extract_frames')
+    setSelectedCameraId(null)
+    setSelectedFrameIndex(null)
+    setActiveJobId(null)
+    setEvents([])
+    setProgressByStage({})
+  }, [project, settingsData])
 
   const saveTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   useEffect(() => {
@@ -177,6 +206,9 @@ export const App = () => {
     enabled: !!projectId && isFisheye, retry: false,
   })
   const firstFrame = framesData?.frames?.[0]?.index ?? null
+  const denoiseApplicable = params.denoiseMethod !== 'off'
+    && reconMode !== 'pinhole_rig'
+    && project?.source_kind !== 'erp_images'
   const route = [
     'inspect_source',
     'extract_frames',
@@ -187,14 +219,16 @@ export const App = () => {
     'match_features',
     'reconstruct',
     'align_reconstruction',
+    ...(denoiseApplicable ? ['denoise_frames'] : []),
     'export_dataset',
   ]
   const stageIsFresh = (stage: NonNullable<typeof stagesData>['stages'][number]): boolean => {
-    if (!stage.has_output || !stage.params) return false
+    if (!stage.has_output || !stage.params || stage.status === 'stale') return false
     const expected = paramsForStage(stage.stage, params, reconMode)
     return Object.entries(expected).every(([key, value]) => sameValue(stage.params?.[key], value))
   }
   const outputs = new Map((stagesData?.stages ?? []).map(stage => [stage.stage, stageIsFresh(stage)]))
+  const denoiseReady = !denoiseApplicable || outputs.get('denoise_frames') === true
   const nextStep = route.find(stage => stage === 'fisheye_region' ? !regionData?.saved : !outputs.get(stage)) ?? null
   // 次工程を開始できない構成を検出し, 理由をボタン tooltip に出す.
   // 魚眼有効領域は既定円で動くため必須ではない (未保存でも run-all は通る).
@@ -213,7 +247,7 @@ export const App = () => {
     if (jobData && ['succeeded', 'failed', 'cancelled'].includes(jobData.status)) {
       setActiveJobId(null)
       // ジョブ完了で成果物が変わるため, 依存クエリを更新 (写真リスト/再構成/魚眼領域).
-      for (const key of ['frames', 'reconstruction', 'fisheye-region', 'masks', 'export-info', 'stages']) {
+      for (const key of ['frames', 'reconstruction', 'fisheye-region', 'masks', 'denoise', 'export-info', 'stages']) {
         qc.invalidateQueries({ queryKey: [key, projectId] })
       }
     }
@@ -255,7 +289,7 @@ export const App = () => {
       qc.invalidateQueries({ queryKey: ['projects'] })
       qc.invalidateQueries({ queryKey: ['source-info', projectId] })
       qc.invalidateQueries({ queryKey: ['stages', projectId] })
-      for (const key of ['reconstruction', 'frames', 'fisheye-region', 'masks', 'export-info']) {
+      for (const key of ['reconstruction', 'frames', 'fisheye-region', 'masks', 'denoise', 'export-info']) {
         qc.removeQueries({ queryKey: [key, projectId] })
       }
       setSelectedFrameIndex(null)
@@ -284,7 +318,7 @@ export const App = () => {
       qc.invalidateQueries({ queryKey: ['stages', projectId] })
       // frames/reconstruction/fisheye-region は成果物が消えると 404 になり, react-query は
       // エラー時に前回 data を保持する (= 残像). invalidate では消えないため remove で破棄する.
-      for (const key of ['reconstruction', 'frames', 'fisheye-region', 'masks', 'export-info']) {
+      for (const key of ['reconstruction', 'frames', 'fisheye-region', 'masks', 'denoise', 'export-info']) {
         qc.removeQueries({ queryKey: [key, projectId] })
       }
       setSelectedFrameIndex(null); setSelectedCameraId(null)
@@ -310,15 +344,16 @@ export const App = () => {
   for (const s of stagesData?.stages ?? []) {
     // pinhole 再投影 (reproject_views) は pinhole_rig モードだけ必要. 他は「生成」不要で隠す.
     if (s.stage === 'reproject_views' && reconMode !== 'pinhole_rig') continue
-    const en = !disabled.has(s.stage)
+    const applicable = s.stage !== 'denoise_frames' || denoiseApplicable
+    const en = !disabled.has(s.stage) && applicable
     const done = stageIsFresh(s)
     const stale = s.status === 'stale' || (s.has_output && !done)
     items.push({
       key: s.stage, label: t(`st_${s.stage}`),
       badgeColor: s.status === 'failed' ? 'var(--error)' : stale ? '#d69a2a' : done ? '#4caf50' : 'var(--border)',
-      statusLabel: s.status === 'running' ? t('running') : s.status === 'failed' ? t('failed')
+      statusLabel: !applicable ? t('skip') : s.status === 'running' ? t('running') : s.status === 'failed' ? t('failed')
         : stale ? t('stale') : done ? t('done') : t('notrun'),
-      toggleable: OPTIONAL.has(s.stage), enabled: en, dim: !en, running: s.status === 'running',
+      toggleable: OPTIONAL.has(s.stage), enabled: en, dim: !en, running: applicable && s.status === 'running',
       progress: progressByStage[s.stage]?.progress ?? 0,
     })
     // 魚眼有効領域は魚眼ソース (native 魚眼 + INSV) を選んだ時点で pipeline に出す.
@@ -363,16 +398,16 @@ export const App = () => {
         return (
           <div style={{ position: 'relative', width: '100%', height: '100%', background: 'var(--bg)' }}>
             {recon
-              ? <Suspense fallback={<div className="hint">Loading 3D viewer…</div>}>
+              ? <Suspense fallback={<div className="hint">{t('loadingViewer')}</div>}>
                   <PointCloudViewer projectId={projectId as string} recon={recon}
                     showPoints={showPoints} showCams={showCams} selectedCameraId={selectedCameraId} onPickCamera={selectCamera} />
                 </Suspense>
               : null}
             {recon && (
               <div className="scene-info">
-                images {recon.stats.num_images} · points {recon.stats.num_points3D.toLocaleString()}
-                {recon.stats.registered_ratio != null && ` · reg ${(recon.stats.registered_ratio * 100).toFixed(0)}%`}
-                {recon.stats.camera_trajectory_diameter != null && ` · path span ${recon.stats.camera_trajectory_diameter.toFixed(3)} units`}
+                {t('sceneImages')} {recon.stats.num_images} · {t('scenePoints')} {recon.stats.num_points3D.toLocaleString()}
+                {recon.stats.registered_ratio != null && ` · ${t('sceneRegistered')} ${(recon.stats.registered_ratio * 100).toFixed(0)}%`}
+                {recon.stats.camera_trajectory_diameter != null && ` · ${t('scenePathSpan')} ${recon.stats.camera_trajectory_diameter.toFixed(3)} ${t('sceneUnits')}`}
               </div>
             )}
           </div>
@@ -387,10 +422,12 @@ export const App = () => {
         return (
           <div className="dock-content">
             {selectedCamImage
-              ? <CameraInspector projectId={projectId as string} image={selectedCamImage} />
+              ? <CameraInspector projectId={projectId as string} image={selectedCamImage}
+                  denoiseEnabled={denoiseApplicable} />
               : selectedFrameIndex != null
               ? <FrameInspector projectId={projectId as string} frameIndex={selectedFrameIndex}
-                  frames={framesData?.frames} recon={recon} sourceKind={project?.source_kind ?? null} />
+                  frames={framesData?.frames} recon={recon} sourceKind={project?.source_kind ?? null}
+                  denoiseEnabled={denoiseApplicable} />
               : selectedStage === 'fisheye_region'
               ? (firstFrame !== null
                   ? <FisheyeRegionEditor projectId={projectId as string} frameIndex={firstFrame}
@@ -402,10 +439,12 @@ export const App = () => {
                   onJob={onJob} hasSource={!!project?.source_path} sourcePath={project?.source_path ?? null} resultMode={resultMode}
                   sourceKind={project?.source_kind ?? null} processing={processing} stageIsRunning={stageStatus?.status === 'running'} onStop={stopJob}
                   stageDisabled={disabled.has(selectedStage)} onToggleStage={() => toggleStage(selectedStage)}
-                  onSelectSource={() => setBrowsing(true)} frameSelection={framesData?.selection}
+                  onSelectSource={() => { setSource.reset(); setBrowsing(true) }} frameSelection={framesData?.selection}
                   stageProgress={progressByStage[selectedStage]?.progress ?? 0}
                   stageStartedAt={stageStatus?.started_at ?? null}
-                  stageProgressMsg={progressByStage[selectedStage] ? renderMsg(progressByStage[selectedStage]) : ''} />
+                  stageProgressMsg={progressByStage[selectedStage] ? renderMsg(progressByStage[selectedStage]) : ''}
+                  blockedReason={selectedStage === 'export_dataset' && !denoiseReady
+                    ? t('denoiseRequiredForExport') : null} />
               : <div className="hint">—</div>}
           </div>
         )
@@ -444,9 +483,9 @@ export const App = () => {
       <div className="ide-top">
         <button className="btn" onClick={() => setManagerOpen(true)}>☰ {t('projects')}</button>
         <h1 style={{ margin: '0 4px' }}>{project?.name ?? 'sphere-reconstruct'}</h1>
-        <span className="mono" style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-          {project?.source_path ?? t('noSource')}
-        </span>
+        {project?.source_path
+          ? <PathText path={project.source_path} compact className="ide-source-path" />
+          : <span className="mono ide-source-path">{t('noSource')}</span>}
         <button className="btn btn-secondary" disabled={!projectId || clearOutputs.isPending || processing}
           onClick={() => { if (window.confirm(t('clearOutputsConfirm'))) clearOutputs.mutate() }}>{t('clearOutputs')}</button>
         {processing
@@ -470,7 +509,8 @@ export const App = () => {
       </div>
 
       {browsing && projectId && (
-        <FileBrowser onClose={() => setBrowsing(false)} onPick={(path) => { setSource.mutate(path); setBrowsing(false) }} />
+        <FileBrowser selectionError={setSource.error} onClose={() => setBrowsing(false)}
+          onPick={path => setSource.mutate(path, { onSuccess: () => setBrowsing(false) })} />
       )}
       {managerOpen && (
         <ProjectManager projects={projects} currentId={projectId} onSelect={setProjectId} onClose={() => setManagerOpen(false)} />

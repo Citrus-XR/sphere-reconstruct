@@ -84,7 +84,7 @@ class MeiLensCalibration:
     lens_flags: int = 0  # X5 では 113 が観測される. 意味は要調査.
 
     def to_dict(self) -> dict[str, Any]:
-        return {k: getattr(self, k) for k in self.__dataclass_fields__.keys()}
+        return {key: getattr(self, key) for key in self.__dataclass_fields__}
 
 
 @dataclass
@@ -94,7 +94,7 @@ class DualLensCalibration:
     raw: dict[str, Any] = field(default_factory=dict)  # 出所依存の生データ
 
     def is_valid(self) -> bool:
-        return len(self.lenses) >= 2 and all(l.fx > 0 and l.fy > 0 for l in self.lenses)
+        return len(self.lenses) >= 2 and all(lens.fx > 0 and lens.fy > 0 for lens in self.lenses)
 
 
 # ---------- offset_v3 (ASCII underscore-separated) --------------------------------

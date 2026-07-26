@@ -13,7 +13,7 @@ from __future__ import annotations
 import tomllib
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 from pydantic_settings import (
@@ -87,6 +87,13 @@ class AlikedConfig(BaseModel):
         return bool(self.extractor_path and self.matcher_path)
 
 
+class DenoiseConfig(BaseModel):
+    # 空なら immutable URL + SHA-256 で workspace cache へ自動取得する.
+    model_path: str = ""
+    device: str = "auto"
+    hardware_decode: Literal["auto", "cuda", "none"] = "auto"
+
+
 def _resolve_config_path() -> Path:
     # 明示指定 (SPHERE_CONFIG=/path/to.toml) を最優先, なければ repo ルート/runtime/config.toml.
     import os
@@ -141,6 +148,7 @@ class AppSettings(BaseSettings):
     binaries: BinariesConfig = Field(default_factory=BinariesConfig)
     sam3: Sam3Config = Field(default_factory=Sam3Config)
     aliked: AlikedConfig = Field(default_factory=AlikedConfig)
+    denoise: DenoiseConfig = Field(default_factory=DenoiseConfig)
     log: LogConfig = Field(default_factory=LogConfig)
 
     @classmethod

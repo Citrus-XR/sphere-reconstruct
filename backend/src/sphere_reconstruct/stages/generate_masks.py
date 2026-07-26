@@ -174,11 +174,10 @@ class GenerateMasks(Stage):
         if ctx.params["max_frames"] > 0:
             frames = frames[: ctx.params["max_frames"]]
         total = len(frames) * 2
-        done = 0
         outputs: list[FileRef] = []
         recs = []
 
-        for fr in frames:
+        for done, fr in enumerate(frames, 1):
             frec = {"index": fr["index"], "lenses": []}
             for lens in (0, 1):
                 src = ctx.project_dir / fr[f"lens{lens}"]
@@ -425,7 +424,6 @@ class GenerateMasks(Stage):
                     mime="image/png",
                 )
             )
-            done += 1
             ctx.progress.tick(
                 progress=0.08 + 0.9 * (done / max(1, total)),
                 message=f"mask {done}/{total} (frame {fr['index']}, cov={cov:.2f})",

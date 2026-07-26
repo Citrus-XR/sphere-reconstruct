@@ -210,7 +210,7 @@ export const PointCloudViewer = ({
         <label><input type="checkbox" checked={showCenter} onChange={e => setShowCenter(e.target.checked)} /> {t('sc_center')}</label>
         <label>{t('sc_points')} <input type="range" min={1} max={8} step={0.5} value={pointSize}
           onChange={e => setPointSize(Number(e.target.value))} /></label>
-        <span style={{ marginLeft: 'auto', opacity: 0.6 }}>右=視点 / WASD·矢印=移動 / Z X=傾き / F=フォーカス</span>
+        <span style={{ marginLeft: 'auto', opacity: 0.6 }}>{t('sceneControlsHelp')}</span>
       </div>
 
       <Canvas camera={{ position: [0, 0, 10], near: 0.01, far: 100000, fov: 55 }}>

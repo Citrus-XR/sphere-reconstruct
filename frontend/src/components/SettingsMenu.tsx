@@ -4,6 +4,7 @@ import { api } from '../api/client'
 import { useSettings } from '../ui/settings'
 import type { Lang } from '../ui/i18n'
 import type { Theme } from '../ui/settings'
+import { PathText } from './PathText'
 
 // 右上の設定メニュー: テーマ (自動/ライト/ダーク) + 言語. ブラウザに保存.
 export const SettingsMenu = () => {
@@ -36,10 +37,13 @@ export const SettingsMenu = () => {
               </select>
             </div>
             {doctor && <div className="ctl" style={{ marginTop: 10, marginBottom: 0, minWidth: 280 }}>
-              <label>Environment {doctor.ready ? '✓' : '⚠'}</label>
+              <label>{t('environment')} {doctor.ready ? '✓' : '⚠'}</label>
               {Object.entries(doctor.checks).map(([name, check]) => (
-                <div key={name} className="mono" style={{ fontSize: 10, color: check.ok ? '#4caf50' : check.optional ? '#d69a2a' : 'var(--error)' }}>
-                  {check.ok ? '✓' : check.optional ? '○' : '✗'} {name}: {check.message}
+                <div key={name} style={{ marginBottom: 4, color: check.ok ? '#4caf50' : check.optional ? '#d69a2a' : 'var(--error)' }}>
+                  <div className="mono" style={{ fontSize: 10, color: 'inherit' }}>
+                    {check.ok ? '✓' : check.optional ? '○' : '✗'} {name}: {check.message}
+                  </div>
+                  {check.path && <PathText path={check.path} compact />}
                 </div>
               ))}
             </div>}

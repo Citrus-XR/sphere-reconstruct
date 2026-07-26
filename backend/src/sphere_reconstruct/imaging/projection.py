@@ -111,15 +111,15 @@ def project_mei(rays: np.ndarray, intr: LensIntrinsics) -> tuple[np.ndarray, np.
     # 単位球面上へ正規化.
     norm = np.linalg.norm(rays, axis=1, keepdims=True)
     norm = np.where(norm == 0, 1.0, norm)
-    P = rays / norm
+    normalized = rays / norm
 
-    denom = P[:, 2] + intr.xi
+    denom = normalized[:, 2] + intr.xi
     # 分母 <= 0 (球の裏側) は不可視.
     valid_front = denom > 1e-9
     denom_safe = np.where(valid_front, denom, 1.0)
 
-    x = P[:, 0] / denom_safe
-    y = P[:, 1] / denom_safe
+    x = normalized[:, 0] / denom_safe
+    y = normalized[:, 1] / denom_safe
 
     # 拡張畜れみ (radial + tangential).
     xd, yd = _apply_distortion(x, y, intr)
@@ -205,18 +205,18 @@ def yaw_pitch_rotation(yaw_deg: float, pitch_deg: float) -> np.ndarray:
     """
     y = math.radians(yaw_deg)
     p = math.radians(pitch_deg)
-    Ry = np.array(
+    yaw_rotation = np.array(
         [
             [math.cos(y), 0.0, math.sin(y)],
             [0.0, 1.0, 0.0],
             [-math.sin(y), 0.0, math.cos(y)],
         ]
     )
-    Rp = np.array(
+    pitch_rotation = np.array(
         [
             [1.0, 0.0, 0.0],
             [0.0, math.cos(p), -math.sin(p)],
             [0.0, math.sin(p), math.cos(p)],
         ]
     )
-    return Rp @ Ry
+    return pitch_rotation @ yaw_rotation

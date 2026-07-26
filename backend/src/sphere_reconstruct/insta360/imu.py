@@ -192,7 +192,7 @@ def extract_gravity(footer) -> GravityResult | None:
 
     静止 or 平均的に無加速な区間では accel の平均 ≈ 重力の反力 = 上向き. 動きが激しい
     素材では並進加速度が混じるが, 長時間平均で概ね重力に収束する. record が見つからない /
-    形式が想定外なら None (呼び出し側で「重力対齐なし」に降級).
+    形式が想定外なら None（呼び出し側で重力整列を無効化する）。
     """
     samples = extract_imu_samples(footer)
     if samples:

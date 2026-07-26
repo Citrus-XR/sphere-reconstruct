@@ -1,8 +1,9 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useId, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, type FrameSelection, type SourceInfo, type StageStatus } from '../api/client'
 import { paramsForStage, QUALITY_PRESETS, type ReconMode, type StageParams } from './stageParams'
 import { ProgressRing } from '../components/ProgressRing'
+import { PathText } from '../components/PathText'
 import { useSettings } from '../ui/settings'
 
 // 経過秒を mm:ss (1h 以上は h:mm:ss) に整形.
@@ -17,7 +18,7 @@ const fmtDur = (sec: number): string => {
 export const StageSettings = ({
   projectId, stage, status, sourceInfo, reconMode, setReconMode, params, setParams, onJob, hasSource,
   sourcePath, resultMode, sourceKind, processing, stageIsRunning, onStop, stageDisabled, onToggleStage, onSelectSource, frameSelection,
-  stageProgress, stageStartedAt, stageProgressMsg,
+  stageProgress, stageStartedAt, stageProgressMsg, blockedReason,
 }: {
   projectId: string
   stage: string
@@ -42,6 +43,7 @@ export const StageSettings = ({
   stageProgress: number
   stageStartedAt: string | null
   stageProgressMsg: string
+  blockedReason: string | null
 }) => {
   const { t } = useSettings()
   const qc = useQueryClient()
@@ -65,7 +67,7 @@ export const StageSettings = ({
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['stages', projectId] })
       // 成果物が消えると 404 になるクエリは remove で破棄 (invalidate だと前回 data が残る).
-      for (const key of ['reconstruction', 'frames', 'fisheye-region', 'masks', 'export-info']) {
+      for (const key of ['reconstruction', 'frames', 'fisheye-region', 'masks', 'denoise', 'export-info']) {
         qc.removeQueries({ queryKey: [key, projectId] })
       }
     },
@@ -78,14 +80,19 @@ export const StageSettings = ({
 
   const predBase = sourceInfo?.duration_sec ? Math.floor(sourceInfo.duration_sec * params.fps) : null
   const predCapped = predBase != null && params.maxFrames > 0 ? Math.min(predBase, params.maxFrames) : predBase
+  const stageConfigDisabled = stage === 'denoise_frames'
+    && (params.denoiseMethod === 'off' || reconMode === 'pinhole_rig' || sourceKind === 'erp_images')
   return (
     <div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
         <strong style={{ flex: 1 }}>{t(`st_${stage}`)}</strong>
         {processing && stageIsRunning
           ? <button className="btn stop" onClick={onStop}>■ {t('stop')}</button>
-          : <button className="btn" disabled={run.isPending || !hasSource || processing}
-              title={!hasSource ? t('noSource') : processing ? t('otherRunning') : ''}
+          : <button className="btn" disabled={run.isPending || !hasSource || processing || stageConfigDisabled || !!blockedReason}
+              title={!hasSource ? t('noSource') : processing ? t('otherRunning')
+                : stageConfigDisabled ? (reconMode === 'pinhole_rig' ? t('denoisePinholeUnsupported')
+                  : sourceKind === 'erp_images' ? t('denoiseVideoOnly') : t('denoiseEnableFirst'))
+                : blockedReason ?? ''}
               onClick={() => run.mutate()}>
               {status?.has_output ? t('regenerate') : t('generate')}
             </button>}
@@ -114,6 +121,7 @@ export const StageSettings = ({
         )
       })()}
       {!hasSource && stage !== 'inspect_source' && <div className="hint" style={{ color: '#d69a2a', marginBottom: 8 }}>{t('needSource')}</div>}
+      {blockedReason && <div className="hint" style={{ color: '#d69a2a', marginBottom: 8 }}>{blockedReason}</div>}
       {run.error && <div className="error">{String(run.error)}</div>}
       {clear.error && <div className="error">{String(clear.error)}</div>}
       {status?.has_output && status.extra && <StageResult stage={stage} extra={status.extra} />}
@@ -343,8 +351,8 @@ export const StageSettings = ({
             </select>
           </div>
           {params.mapper === 'global' && <label style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
-            <input type="checkbox" checked={params.viewGraphCalibration}
-              onChange={() => setParams({ viewGraphCalibration: !params.viewGraphCalibration })} /> View graph calibration
+              <input type="checkbox" checked={params.viewGraphCalibration}
+              onChange={() => setParams({ viewGraphCalibration: !params.viewGraphCalibration })} /> {t('viewGraphCalibration')}
           </label>}
           <label style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
             <input type="checkbox" checked={params.baUseGpu}
@@ -353,7 +361,7 @@ export const StageSettings = ({
           </label>
           {!doctor?.checks.colmap.capabilities?.gpu_bundle_adjustment && (
             <div className="hint" style={{ color: '#d69a2a' }}>
-              Ceres CUDA/cuDSS unavailable; BA uses CPU.
+              {t('ceresCpuUnavailable')}
             </div>
           )}
           <div className="ctl">
@@ -384,16 +392,72 @@ export const StageSettings = ({
           <label>{t('lbl_alignment')}</label>
           <select className="input" value={params.alignmentMethod}
             onChange={e => setParams({ alignmentMethod: e.target.value as StageParams['alignmentMethod'] })}>
-            <option value="auto">IMU auto</option>
-            <option value="imu">IMU required</option>
-            <option value="none">Disabled</option>
+            <option value="auto">{t('alignmentAuto')}</option>
+            <option value="imu">{t('alignmentRequired')}</option>
+            <option value="none">{t('disabledOption')}</option>
           </select>
           <div className="hint">{t('hint_alignment')}</div>
         </div>
       )}
 
+      {stage === 'denoise_frames' && (
+        <>
+          <div className="ctl">
+            <label htmlFor="denoise-method">{t('lbl_denoiseMethod')}</label>
+            <select id="denoise-method" className="input" value={params.denoiseMethod}
+              onChange={e => setParams({ denoiseMethod: e.target.value as StageParams['denoiseMethod'] })}>
+              <option value="off">{t('denoiseOff')}</option>
+              <option value="fastdvdnet">{t('denoiseFastDvdnet')}</option>
+              <option value="ffmpeg_adaptive">{t('denoiseFfmpeg')}</option>
+            </select>
+            <div className="hint">{t('hint_denoiseMethod')}</div>
+          </div>
+          {sourceKind === 'erp_images' && params.denoiseMethod !== 'off' && (
+            <div className="hint" style={{ color: '#d69a2a' }}>{t('denoiseVideoOnly')}</div>
+          )}
+          {reconMode === 'pinhole_rig' && params.denoiseMethod !== 'off' && (
+            <div className="hint" style={{ color: '#d69a2a' }}>{t('denoisePinholeUnsupported')}</div>
+          )}
+          {params.denoiseMethod === 'fastdvdnet' && (
+            <>
+              <Slider label={t('lbl_denoiseSigma')} hint={t('hint_denoiseSigma')}
+                min={5} max={20} step={1} value={params.denoiseSigma}
+                onChange={value => setParams({ denoiseSigma: Math.round(value) })} fmt={value => `${value}`} />
+              <div className="ctl">
+                <label htmlFor="denoise-tile">{t('lbl_denoiseTile')}</label>
+                <select id="denoise-tile" className="input" value={params.denoiseTileSize}
+                  onChange={e => setParams({ denoiseTileSize: Number(e.target.value) })}>
+                  <option value={256}>256 px</option>
+                  <option value={512}>512 px</option>
+                  <option value={768}>768 px</option>
+                </select>
+                <div className="hint">{t('hint_denoiseTile')}</div>
+              </div>
+            </>
+          )}
+          {params.denoiseMethod === 'ffmpeg_adaptive' && (
+            <>
+              <div className="ctl">
+                <label htmlFor="denoise-window">{t('lbl_denoiseWindow')}</label>
+                <select id="denoise-window" className="input" value={params.denoiseTemporalWindow}
+                  onChange={e => setParams({ denoiseTemporalWindow: Number(e.target.value) })}>
+                  <option value={5}>5</option><option value={9}>9</option><option value={13}>13</option>
+                </select>
+                <div className="hint">{t('hint_denoiseWindow')}</div>
+              </div>
+              <label style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
+                <input type="checkbox" checked={params.denoiseLumaOnly}
+                  onChange={() => setParams({ denoiseLumaOnly: !params.denoiseLumaOnly })} /> {t('lbl_denoiseLuma')}
+              </label>
+            </>
+          )}
+          <div className="predict">{params.denoiseMethod === 'off' || reconMode === 'pinhole_rig'
+            ? t('denoiseExportOriginal') : t('denoiseExportProcessed')}</div>
+        </>
+      )}
+
       {stage === 'reproject_views' && (
-        <Slider label="Pinhole size" hint="" min={512} max={2048} step={128}
+        <Slider label={t('lblPinholeSize')} hint="" min={512} max={2048} step={128}
           value={params.size} onChange={v => setParams({ size: Math.round(v) })} fmt={v => `${v}px`} />
       )}
 
@@ -403,9 +467,9 @@ export const StageSettings = ({
           <div className="hint">{t('hint_selectsource')}</div>
           <div style={{ marginTop: 8 }}>
             <div className="hint">{t('source')}</div>
-            <div className="mono" style={{ wordBreak: 'break-all', fontSize: 11, color: sourcePath ? 'var(--fg)' : 'var(--fg-mute)' }}>
-              {sourcePath ?? t('noSource')}
-            </div>
+            {sourcePath
+              ? <PathText path={sourcePath} />
+              : <div className="mono">{t('noSource')}</div>}
             {sourceInfo?.duration_sec != null && (
               <div className="mono" style={{ fontSize: 11 }}>
                 {sourceInfo.width}×{sourceInfo.height} · {sourceInfo.duration_sec.toFixed(0)}s
@@ -445,27 +509,43 @@ export const StageSettings = ({
                 onChange={() => setParams({ emitTrainConfigs: !params.emitTrainConfigs })} /> {t('lbl_emitTrainConfigs')}
             </label>
             <div className="hint">{t('hint_emitTrainConfigs')}</div>
+            <div className="hint">{params.denoiseMethod === 'off' || reconMode === 'pinhole_rig'
+              ? t('denoiseExportOriginal') : t('denoiseExportProcessed')}</div>
           </div>
           {exportInfo
             ? <div className="ctl">
                 <label>{t('exportDir')}</label>
-                <div className="mono" style={{ wordBreak: 'break-all', fontSize: 11 }}>{exportInfo.dir}</div>
+                <PathText path={exportInfo.dir} />
                 {exportInfo.dataset_dir && (
                   <div style={{ marginTop: 6 }}>
                     <div className="hint">{t('exportDataset')}</div>
-                    <div className="mono" style={{ wordBreak: 'break-all', fontSize: 11 }}>{exportInfo.dataset_dir}</div>
+                    <PathText path={exportInfo.dataset_dir} />
                   </div>
                 )}
                 {exportInfo.preview_dir && (
                   <div style={{ marginTop: 6 }}>
                     <div className="hint">{t('exportPreview')}</div>
-                    <div className="mono" style={{ wordBreak: 'break-all', fontSize: 11 }}>{exportInfo.preview_dir}</div>
+                    <PathText path={exportInfo.preview_dir} />
                   </div>
                 )}
                 {exportInfo.train_configs_dir && (
                   <div style={{ marginTop: 6 }}>
                     <div className="hint">{t('exportTrainConfigs')}</div>
-                    <div className="mono" style={{ wordBreak: 'break-all', fontSize: 11 }}>{exportInfo.train_configs_dir}</div>
+                    <PathText path={exportInfo.train_configs_dir} />
+                  </div>
+                )}
+                <div style={{ marginTop: 6 }}>
+                  <div className="hint">{t('exportTrainingOutput')}</div>
+                  <PathText path={exportInfo.training_output_dir} />
+                </div>
+                {exportInfo.gui_integration && !exportInfo.gui_integration.train_configs_auto_applied && (
+                  <div className="hint" style={{ marginTop: 10, color: '#d69a2a' }}>
+                    {t('lfGuiConfigWarning')}
+                    <div className="mono" style={{ marginTop: 4 }}>
+                      {t('lfRequiredSettings')}: {exportInfo.gui_integration.required_settings.strategy.toUpperCase()}
+                      {' · '}GUT={String(exportInfo.gui_integration.required_settings.gut)}
+                      {' · '}mask={exportInfo.gui_integration.required_settings.mask_mode}
+                    </div>
                   </div>
                 )}
               </div>
@@ -479,23 +559,31 @@ export const StageSettings = ({
 // COLMAP 詳細用の数値入力 (0 = COLMAP 既定). placeholder で「既定」を示す.
 const NumField = ({ label, value, step = 1, onChange }: {
   label: string; value: number; step?: number; onChange: (v: number) => void
-}) => (
-  <div className="ctl" style={{ marginBottom: 6 }}>
-    <label style={{ fontSize: 11 }}>{label}</label>
-    <input className="input" type="number" min={0} step={step} value={value || ''}
-      placeholder="default (0)" onChange={e => onChange(Number(e.target.value) || 0)} />
-  </div>
-)
+}) => {
+  const { t } = useSettings()
+  const inputId = useId()
+  return (
+    <div className="ctl" style={{ marginBottom: 6 }}>
+      <label htmlFor={inputId} style={{ fontSize: 11 }}>{label}</label>
+      <input id={inputId} className="input" type="number" min={0} step={step} value={value || ''}
+        placeholder={t('defaultZero')} onChange={e => onChange(Number(e.target.value) || 0)} />
+    </div>
+  )
+}
 
 const StageResult = ({ stage, extra }: { stage: string; extra: Record<string, unknown> }) => {
+  const { t } = useSettings()
   const rows: Array<[string, unknown]> = stage === 'extract_features'
-    ? [['images', extra.images], ['avg keypoints', Math.round(Number(extra.average_keypoints ?? 0))]]
+    ? [[t('resultImages'), extra.images], [t('resultAvgKeypoints'), Math.round(Number(extra.average_keypoints ?? 0))]]
     : stage === 'match_features'
-    ? [['verified pairs', extra.verified_pairs], ['avg inliers', Number(extra.average_inliers ?? 0).toFixed(1)]]
+    ? [[t('resultVerifiedPairs'), extra.verified_pairs], [t('resultAvgInliers'), Number(extra.average_inliers ?? 0).toFixed(1)]]
     : stage === 'reconstruct'
-    ? [['registered', `${extra.num_images ?? 0}`], ['points', extra.num_points3D], ['error', `${Number(extra.mean_reprojection_error ?? 0).toFixed(3)} px`]]
+    ? [[t('resultRegistered'), `${extra.num_images ?? 0}`], [t('resultPoints'), extra.num_points3D], [t('resultError'), `${Number(extra.mean_reprojection_error ?? 0).toFixed(3)} px`]]
     : stage === 'align_reconstruction'
-    ? [['applied', String(extra.applied)], ['spread', `${Number(extra.spread_deg ?? 0).toFixed(2)}°`], ['inliers', extra.inlier_count], ['time offset', `${Number(extra.time_offset_sec ?? 0).toFixed(3)} s`]]
+    ? [[t('resultApplied'), String(extra.applied)], [t('resultSpread'), `${Number(extra.spread_deg ?? 0).toFixed(2)}°`], [t('resultInliers'), extra.inlier_count], [t('resultTimeOffset'), `${Number(extra.time_offset_sec ?? 0).toFixed(3)} s`]]
+    : stage === 'denoise_frames'
+    ? [[t('resultMethod'), extra.method], [t('resultImages'), extra.images], [t('resultDevice'), extra.device ?? '—'],
+      [t('resultSigma'), extra.sigma ?? '—'], [t('resultMeanDelta'), extra.mean_abs_delta ?? '—']]
     : []
   if (!rows.length) return null
   return <div className="predict" style={{ marginBottom: 10 }}>
@@ -508,13 +596,17 @@ const Slider = ({
 }: {
   label: string; hint?: string; min: number; max: number; step: number; value: number
   onChange: (v: number) => void; fmt: (v: number) => string
-}) => (
-  <div className="ctl">
-    <label>{label}</label>
-    <div className="row">
-      <input type="range" min={min} max={max} step={step} value={value} onChange={e => onChange(Number(e.target.value))} />
-      <span className="val">{fmt(value)}</span>
+}) => {
+  const inputId = useId()
+  return (
+    <div className="ctl">
+      <label htmlFor={inputId}>{label}</label>
+      <div className="row">
+        <input id={inputId} type="range" min={min} max={max} step={step} value={value}
+          onChange={e => onChange(Number(e.target.value))} />
+        <span className="val">{fmt(value)}</span>
+      </div>
+      {hint && <div className="hint">{hint}</div>}
     </div>
-    {hint && <div className="hint">{hint}</div>}
-  </div>
-)
+  )
+}

@@ -103,7 +103,7 @@ class ReprojectViews(Stage):
         views = projection.cubemap_views(size=ctx.params["size"], fov_deg=ctx.params["fov_deg"])
 
         # 各 view について, 「rig -> lens A/B」の回転を lens_local_rotation で作る.
-        lens_rotations = [rendering.lens_local_rotation(l) for l in lenses]
+        lens_rotations = [rendering.lens_local_rotation(lens) for lens in lenses]
 
         # frame ごとに rig を書き出す. 大きなデータになるので max_frames で絞れる.
         frames = frames_mf["frames"]
@@ -131,11 +131,13 @@ class ReprojectViews(Stage):
             }
 
             for view in views:
-                for li, (intr, R_lens) in enumerate(zip(intrs, lens_rotations, strict=True)):
+                for li, (intr, lens_rotation) in enumerate(zip(intrs, lens_rotations, strict=True)):
                     src_path = ctx.project_dir / fr[f"lens{li}"]
                     if not src_path.exists():
                         raise RuntimeError(f"missing extract frame: {src_path}")
-                    img, stats = rendering.render_pinhole(src_path, view, intr, extra_rotation=R_lens)
+                    img, stats = rendering.render_pinhole(
+                        src_path, view, intr, extra_rotation=lens_rotation
+                    )
                     out_path = frame_dir / f"{view.name}_lens{li}.jpg"
                     rendering.write_jpeg(img, out_path, quality=92)
                     outputs.append(
@@ -179,7 +181,10 @@ class ReprojectViews(Stage):
             "lens_count": len(lenses),
             # 各レンズの光学中心オフセット (offset_v3 の tx/ty/tz, 単位 m). rig 拘束の
             # cam_from_rig 計算に使う. lens0 は原点, lens1 は物理ベースライン分ずれる.
-            "lenses": [{"index": i, "tx": l.tx, "ty": l.ty, "tz": l.tz} for i, l in enumerate(lenses)],
+            "lenses": [
+                {"index": index, "tx": lens.tx, "ty": lens.ty, "tz": lens.tz}
+                for index, lens in enumerate(lenses)
+            ],
             "frames": rig_records,
         }
         rig_path = ctx.stage_out_dir / "manifest_rig.json"

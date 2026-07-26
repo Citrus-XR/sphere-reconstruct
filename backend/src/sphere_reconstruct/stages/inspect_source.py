@@ -151,7 +151,7 @@ class InspectSource(Stage):
                         "chosen_items": len(chosen.values),
                         "valid": parsed.is_valid(),
                         "calibration_id": parsed.raw.get("calibration_id"),
-                        "lenses": [l.to_dict() for l in parsed.lenses] if parsed.is_valid() else [],
+                        "lenses": [lens.to_dict() for lens in parsed.lenses] if parsed.is_valid() else [],
                         "text": chosen.text,
                     }
                     if parsed.is_valid():
@@ -159,7 +159,7 @@ class InspectSource(Stage):
                 else:
                     summary["offset_v3"] = {"found": False}
 
-                # IMU (Gyro record) から重力方向 (IMU 座標) を抽出. 再構成の重力対齐に使う.
+                # IMU（Gyro record）から重力方向（IMU 座標）を抽出し、再構成の重力整列に使う。
                 grav = insv_imu.extract_gravity(view)
                 if grav is not None:
                     summary["gravity"] = {

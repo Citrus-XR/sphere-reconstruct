@@ -8,6 +8,7 @@
   --border: #dcdcdc;
   --accent: #3a6df0;
   --error: #d9534f;
+  --mono-font: 'Cascadia Mono', 'Consolas', 'Liberation Mono', 'DejaVu Sans Mono', ui-monospace, monospace;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -54,7 +55,25 @@ body { margin: 0; background: var(--bg); color: var(--fg); }
   width: 100%;
 }
 
-.mono { font-family: ui-monospace, 'Menlo', monospace; font-size: 12px; color: var(--fg-mute); }
+.mono { font-family: var(--mono-font);
+  font-size: 12px; color: var(--fg-mute); }
+
+/* Windows path は表示だけ / 区切りに統一し, コピーボタンでは元の native path を保持する. */
+.path-text { display: inline-flex; align-items: center; gap: 5px; min-width: 0; max-width: 100%;
+  color: var(--fg-mute); font-family: var(--mono-font);
+  font-size: 11px; direction: ltr; }
+.path-text.compact { flex: 1 1 0; overflow: hidden; }
+.path-value { min-width: 0; overflow-wrap: anywhere; word-break: break-all; unicode-bidi: plaintext; }
+.path-text.compact .path-value { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.path-copy { flex: none; border: 0; border-radius: 3px; padding: 1px 4px; background: transparent;
+  color: var(--fg-mute); cursor: pointer; font: inherit; line-height: 1.2; }
+.path-copy:hover { background: rgba(128,128,128,.14); color: var(--fg); }
+.path-copy.copied { color: #3ad07a; }
+.path-copy.failed { color: var(--error); }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+.ide-source-path { flex: 1 1 0; min-width: 0; }
+.file-browser-path { flex: 1 1 0; min-width: 0; }
 
 .error { color: var(--error); }
 
@@ -77,14 +96,21 @@ body { margin: 0; background: var(--bg); color: var(--fg); }
 .ide-center { grid-area: center; overflow: hidden; position: relative; background: var(--bg); }
 .ide-status { grid-area: status; display: flex; align-items: center; gap: 16px;
   padding: 0 12px; border-top: 1px solid var(--border); background: var(--bg-elev);
-  font-family: ui-monospace, monospace; font-size: 11px; color: var(--fg-mute);
+  font-family: var(--mono-font); font-size: 11px; color: var(--fg-mute);
   overflow: hidden; min-width: 0; }
 
 /* hierarchy (左) */
 .hier-item { display: flex; align-items: center; gap: 8px; padding: 7px 12px;
   cursor: pointer; border-left: 3px solid transparent; user-select: none; }
+.hier-row-button { width: 100%; border-top: 0; border-right: 0; border-bottom: 0;
+  background: transparent; color: inherit; font: inherit; text-align: left; }
+.hier-inline-button { flex: 1; min-width: 0; border: 0; padding: 0; background: transparent;
+  color: inherit; font: inherit; text-align: left; cursor: pointer; }
 .hier-item:hover { background: rgba(128,128,128,.08); }
 .hier-item.sel { background: rgba(108,157,255,.14); border-left-color: var(--accent); }
+.hier-item:focus-visible, .hier-inline-button:focus-visible, .fs-row-button:focus-visible,
+.fs-main:focus-visible, .project-main:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: -2px; }
 .hier-badge { width: 8px; height: 8px; border-radius: 50%; flex: none; }
 
 /* 環形ゲージ (下部バー): CPU / RAM / GPU util / VRAM を省スペースで. GPU 名はホバー時のみ. */
@@ -100,7 +126,7 @@ body { margin: 0; background: var(--bg); color: var(--fg); }
 .ctl label { display: block; font-size: 11px; color: var(--fg-mute); margin-bottom: 4px; }
 .ctl .row { display: flex; align-items: center; gap: 8px; }
 .ctl input[type=range] { flex: 1; }
-.ctl .val { font-family: ui-monospace, monospace; min-width: 60px; text-align: right; }
+.ctl .val { font-family: var(--mono-font); min-width: 60px; text-align: right; }
 .predict { font-size: 11px; color: var(--accent); margin-top: 2px; }
 
 /* file browser modal */
@@ -112,6 +138,11 @@ body { margin: 0; background: var(--bg); color: var(--fg); }
   display: flex; align-items: center; gap: 8px; }
 .modal-list { overflow: auto; padding: 6px; }
 .fs-row { display: flex; align-items: center; gap: 8px; padding: 6px 10px; cursor: pointer; border-radius: 4px; }
+.fs-row-button { width: 100%; border: 0; background: transparent; color: inherit; font: inherit; text-align: left; }
+.fs-main { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; border: 0;
+  padding: 0; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.project-main { flex: 1; min-width: 0; border: 0; padding: 0; background: transparent;
+  color: inherit; font: inherit; text-align: left; cursor: pointer; }
 .fs-row:hover { background: rgba(128,128,128,.1); }
 
 /* シーン上部ツールバー (固定, 背景あり) */
@@ -119,13 +150,13 @@ body { margin: 0; background: var(--bg); color: var(--fg); }
   display: flex; align-items: center; gap: 14px; z-index: 5;
   background: rgba(20,20,20,.9); color: #ddd; padding: 6px 12px;
   border-bottom: 1px solid rgba(255,255,255,.1);
-  font-size: 11px; font-family: ui-monospace, monospace; }
+  font-size: 11px; font-family: var(--mono-font); }
 .scene-toolbar label { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; }
 .scene-toolbar input[type=range] { width: 70px; }
 /* 視図左下の info オーバレイ */
 .scene-info { position: absolute; bottom: 8px; left: 8px; z-index: 6; color: #bbb;
   background: rgba(0,0,0,.5); padding: 4px 8px; border-radius: 4px; font-size: 11px;
-  font-family: ui-monospace, monospace; }
+  font-family: var(--mono-font); }
 
 /* ===== テーマ手動切替 (data-theme が prefers-color-scheme を上書き) ===== */
 :root[data-theme="light"] {
@@ -200,6 +231,26 @@ body { margin: 0; background: var(--bg); color: var(--fg); }
 .seg { display: inline-flex; border: 1px solid var(--border); border-radius: 4px; overflow: hidden; }
 .seg button { border: none; background: transparent; color: var(--fg-mute); font-size: 11px; padding: 2px 8px; cursor: pointer; }
 .seg button.on { background: var(--accent); color: #fff; }
+
+/* Photos と Dataset Camera が共有する Inspector の視覚契約. */
+.inspector-header { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.inspector-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.inspector-preview-tabs { margin-bottom: 8px; }
+.inspector-preview { position: relative; line-height: 0; overflow: hidden; border-radius: 6px; background: #111; }
+.inspector-preview-image { width: 100%; display: block; border-radius: 6px; background: #111; }
+.inspector-preview-mask { position: absolute; inset: 0; width: 100%; height: 100%; border-radius: 6px;
+  mix-blend-mode: multiply; }
+.inspector-fields { display: grid; grid-template-columns: minmax(92px, auto) minmax(0, 1fr);
+  gap: 5px 10px; margin: 10px 0 12px; font-size: 11px; }
+.inspector-field { display: contents; }
+.inspector-field dt { color: var(--fg-mute); }
+.inspector-field dd { min-width: 0; margin: 0; overflow-wrap: anywhere;
+  font-family: var(--mono-font); }
+.inspector-field.success dd { color: #3ad07a; }
+.inspector-field.error dd { color: var(--error); }
+.inspector-field.muted dd { color: var(--fg-mute); }
+.inspector-section { margin: 12px 0; }
+.inspector-section-title { margin-bottom: 4px; color: var(--fg-mute); font-size: 11px; }
 
 /* タブの視認性: alpha テーマだと選択タブが背景に溶けて見えない. accent 下線 + 明暗差を付ける. */
 .flexlayout__tab_button { border-bottom: 2px solid transparent; }

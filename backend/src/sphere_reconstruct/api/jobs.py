@@ -94,7 +94,7 @@ async def get_job(job_id: str) -> JobRead:
 @router.post("/api/jobs/{job_id}/cancel")
 async def cancel_job(job_id: str) -> dict[str, Any]:
     sup = get_supervisor()
-    ok = sup.cancel_job(job_id)
+    ok = await sup.cancel_job(job_id)
     return {"cancelled": ok}
 
 

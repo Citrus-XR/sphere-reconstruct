@@ -12,7 +12,9 @@ import shutil
 import subprocess
 from pathlib import Path
 
+import numpy as np
 import pytest
+from PIL import Image
 
 from sphere_reconstruct.imaging import ffmpeg, ffprobe
 
@@ -91,3 +93,162 @@ def test_selection_expression_compresses_arithmetic_runs():
     expression = ffmpeg._selection_expression([0, 6, 12, 18, 25, 31, 37])
     assert "between(n\\,0\\,18)*not(mod(n-0\\,6))" in expression
     assert "between(n\\,25\\,37)*not(mod(n-25\\,6))" in expression
+
+
+def test_large_temporal_context_is_split_into_bounded_filter_expressions():
+    indices = sorted({center + offset for center in range(0, 900, 8) for offset in range(5)})
+    chunks = ffmpeg._selection_chunks(indices, max_expression_chars=1000)
+    assert len(chunks) > 1
+    assert [index for chunk in chunks for index in chunk] == indices
+    assert all(len(ffmpeg._selection_expression(chunk)) <= 1000 for chunk in chunks)
+
+
+def test_cuda_decode_selection_is_explicit_and_lossless(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(ffmpeg, "_cuda_decode_check", lambda *_args: (True, ""))
+    args, suffix = ffmpeg._decode_input_args(
+        "ffmpeg", tmp_path / "video.mp4", 0, "auto", "yuv420p"
+    )
+    assert args == ["-hwaccel", "cuda"]
+    assert suffix == ",format=yuv420p"
+
+    monkeypatch.setattr(ffmpeg, "_cuda_decode_check", lambda *_args: (False, "not supported"))
+    assert ffmpeg._decode_input_args(
+        "ffmpeg", tmp_path / "video.mp4", 0, "auto", "yuv420p10le"
+    ) == ([], "")
+    assert ffmpeg._decode_input_args(
+        "ffmpeg", tmp_path / "video.mp4", 0, "auto", "yuv420p"
+    ) == ([], "")
+    with pytest.raises(RuntimeError, match="not supported"):
+        ffmpeg._decode_input_args("ffmpeg", tmp_path / "video.mp4", 0, "cuda", "yuv420p")
+
+
+def test_selected_raw_frames_keep_source_indices(tmp_path: Path):
+    mp4 = tmp_path / "dual.mp4"
+    _make_dual_stream_mp4(mp4, duration=2.0, fps=10, size="64x64")
+    frames = list(
+        ffmpeg.iter_selected_rgb_frames(
+            mp4,
+            stream_index=0,
+            frame_indices=[0, 5, 10],
+            width=64,
+            height=64,
+            scratch_dir=tmp_path / "scratch",
+        )
+    )
+    assert [index for index, _image in frames] == [0, 5, 10]
+    assert all(image.shape == (64, 64, 3) for _index, image in frames)
+    assert all(image.dtype.name == "uint8" for _index, image in frames)
+
+
+def test_dense_raw_frame_request_decodes_once_and_discards_unselected(tmp_path: Path):
+    mp4 = tmp_path / "dual.mp4"
+    _make_dual_stream_mp4(mp4, duration=2.0, fps=10, size="64x64")
+    indices = [0, 2, 3, 4, 6, 8]
+    frames = list(
+        ffmpeg.iter_selected_rgb_frames(
+            mp4,
+            stream_index=0,
+            frame_indices=indices,
+            width=64,
+            height=64,
+            scratch_dir=tmp_path / "scratch",
+        )
+    )
+    assert [index for index, _image in frames] == indices
+
+
+def test_chunked_filter_graph_decodes_once_and_preserves_exact_frames(tmp_path: Path):
+    mp4 = tmp_path / "dual.mp4"
+    _make_dual_stream_mp4(mp4, duration=2.0, fps=10, size="64x64")
+    indices = [0, 2, 3, 4, 6, 8, 11, 13, 14, 15, 18]
+    direct = dict(
+        ffmpeg.iter_selected_rgb_frames(
+            mp4,
+            stream_index=0,
+            frame_indices=indices,
+            width=64,
+            height=64,
+            scratch_dir=tmp_path / "direct",
+        )
+    )
+    progress: list[tuple[int, int]] = []
+    chunked = dict(
+        ffmpeg.iter_selected_rgb_frames(
+            mp4,
+            stream_index=0,
+            frame_indices=indices,
+            width=64,
+            height=64,
+            scratch_dir=tmp_path / "chunked",
+            max_filter_expression_chars=24,
+            progress=lambda current, total: progress.append((current, total)),
+        )
+    )
+    assert list(chunked) == indices
+    assert all(np.array_equal(chunked[index], direct[index]) for index in indices)
+    assert progress[-1] == (len(indices), len(indices))
+
+
+def test_chunked_jpeg_selection_preserves_exact_frames(tmp_path: Path):
+    mp4 = tmp_path / "dual.mp4"
+    _make_dual_stream_mp4(mp4, duration=2.0, fps=10, size="64x64")
+    indices = [0, 2, 3, 4, 6, 8, 11, 13, 14, 15, 18]
+    direct = ffmpeg.extract_frames_sequential(
+        mp4,
+        stream_index=0,
+        frame_indices=indices,
+        out_dir=tmp_path / "direct-jpeg",
+    )
+    chunked = ffmpeg.extract_frames_sequential(
+        mp4,
+        stream_index=0,
+        frame_indices=indices,
+        out_dir=tmp_path / "chunked-jpeg",
+        max_filter_expression_chars=24,
+    )
+    assert all(
+        np.array_equal(np.asarray(Image.open(left)), np.asarray(Image.open(right)))
+        for left, right in zip(direct, chunked, strict=True)
+    )
+
+
+def test_atadenoise_runs_before_sparse_selection(tmp_path: Path):
+    mp4 = tmp_path / "dual.mp4"
+    _make_dual_stream_mp4(mp4, duration=2.0, fps=10, size="64x64")
+    outputs = ffmpeg.extract_adaptive_denoised_frames(
+        mp4,
+        stream_index=0,
+        frame_indices=[2, 7, 12],
+        out_dir=tmp_path / "denoised",
+        out_prefix="frame",
+        temporal_window=5,
+    )
+    assert len(outputs) == 3
+    assert all(path.stat().st_size > 100 for path in outputs)
+
+
+def test_atadenoise_chunked_filter_preserves_exact_frames(tmp_path: Path):
+    mp4 = tmp_path / "dual.mp4"
+    _make_dual_stream_mp4(mp4, duration=2.0, fps=10, size="64x64")
+    indices = [2, 4, 6, 8, 10, 12, 14, 16]
+    direct = ffmpeg.extract_adaptive_denoised_frames(
+        mp4,
+        stream_index=0,
+        frame_indices=indices,
+        out_dir=tmp_path / "direct-denoise",
+        out_prefix="frame",
+        temporal_window=5,
+    )
+    chunked = ffmpeg.extract_adaptive_denoised_frames(
+        mp4,
+        stream_index=0,
+        frame_indices=indices,
+        out_dir=tmp_path / "chunked-denoise",
+        out_prefix="frame",
+        temporal_window=5,
+        max_filter_expression_chars=20,
+    )
+    assert all(
+        np.array_equal(np.asarray(Image.open(left)), np.asarray(Image.open(right)))
+        for left, right in zip(direct, chunked, strict=True)
+    )

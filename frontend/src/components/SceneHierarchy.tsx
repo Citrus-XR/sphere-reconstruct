@@ -24,21 +24,24 @@ export const SceneHierarchy = ({
     <div>
       {!!frames?.length && (
         <>
-          <div className="hier-item" style={{ fontWeight: 600 }} onClick={() => setExpandPhotos(v => !v)}>
+          <button type="button" className="hier-item hier-row-button" style={{ fontWeight: 600 }}
+            onClick={() => setExpandPhotos(v => !v)} aria-expanded={expandPhotos}>
             <span style={{ flex: 1 }}>{expandPhotos ? '▾' : '▸'} {t('photos')}</span>
             <span className="mono" style={{ fontSize: 10, color: 'var(--fg-mute)' }}>{frames.length}</span>
-          </div>
+          </button>
           {expandPhotos && frames.map(f => {
             // 状態: 再構成前=灰, 登録済=緑, 未登録(失敗)=赤.
             const r = reg.get(f.index)
             const color = !recon ? 'var(--border)' : r ? '#3ad07a' : 'var(--error)'
             return (
-              <div key={f.index} className={`hier-item${selectedFrameIndex === f.index ? ' sel' : ''}`}
-                style={{ paddingLeft: 28, fontSize: 12 }} onClick={() => onSelectFrame(f.index)}>
+              <button type="button" key={f.index}
+                className={`hier-item hier-row-button${selectedFrameIndex === f.index ? ' sel' : ''}`}
+                style={{ paddingLeft: 28, fontSize: 12 }} onClick={() => onSelectFrame(f.index)}
+                aria-current={selectedFrameIndex === f.index ? 'true' : undefined}>
                 <span className="hier-badge" style={{ background: color }} />
-                <span style={{ flex: 1 }}>frame {f.index}</span>
+                <span style={{ flex: 1 }}>{t('frameLabel')} {f.index}</span>
                 {f.score && <span className="mono" style={{ fontSize: 10, color: 'var(--fg-mute)' }}>{f.score.sharpness.toFixed(0)}</span>}
-              </div>
+              </button>
             )
           })}
         </>
@@ -46,25 +49,30 @@ export const SceneHierarchy = ({
 
       {recon && (
         <>
-          <div className="hier-item" style={{ fontWeight: 600 }}>▾ Scene</div>
-          <div className="hier-item" style={{ paddingLeft: 22 }}>
+          <div className="hier-item" style={{ fontWeight: 600 }}>▾ {t('sceneRoot')}</div>
+          <label className="hier-item" style={{ paddingLeft: 22 }}>
             <input type="checkbox" checked={showPoints} onChange={e => setShowPoints(e.target.checked)}
-              onClick={e => e.stopPropagation()} />
-            <span style={{ flex: 1 }}>Point Cloud</span>
+              aria-label={t('togglePointCloud')} />
+            <span style={{ flex: 1 }}>{t('pointCloud')}</span>
             <span className="mono" style={{ fontSize: 10, color: 'var(--fg-mute)' }}>{recon.stats.num_points3D.toLocaleString()}</span>
-          </div>
-          <div className="hier-item" style={{ paddingLeft: 22 }} onClick={() => setExpandCams(v => !v)}>
+          </label>
+          <div className="hier-item" style={{ paddingLeft: 22 }}>
             <input type="checkbox" checked={showCams} onChange={e => setShowCams(e.target.checked)}
-              onClick={e => e.stopPropagation()} />
-            <span style={{ flex: 1 }}>{expandCams ? '▾' : '▸'} Dataset · Cameras</span>
+              aria-label={t('toggleCameras')} />
+            <button type="button" className="hier-inline-button" onClick={() => setExpandCams(v => !v)}
+              aria-expanded={expandCams}>
+              {expandCams ? '▾' : '▸'} {t('datasetCameras')}
+            </button>
             <span className="mono" style={{ fontSize: 10, color: 'var(--fg-mute)' }}>{recon.images.length}</span>
           </div>
           {expandCams && recon.images.map(img => (
-            <div key={img.id} className={`hier-item${selectedCameraId === img.id ? ' sel' : ''}`}
-              style={{ paddingLeft: 44, fontSize: 12 }} onClick={() => onSelectCamera(img.id)}>
+            <button type="button" key={img.id}
+              className={`hier-item hier-row-button${selectedCameraId === img.id ? ' sel' : ''}`}
+              style={{ paddingLeft: 44, fontSize: 12 }} onClick={() => onSelectCamera(img.id)}
+              aria-current={selectedCameraId === img.id ? 'true' : undefined}>
               <span className="hier-badge" style={{ background: '#3ad07a' }} />
               <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{img.name}</span>
-            </div>
+            </button>
           ))}
         </>
       )}

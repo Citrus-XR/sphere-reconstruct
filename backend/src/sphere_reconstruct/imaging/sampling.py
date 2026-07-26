@@ -8,6 +8,9 @@ cv2 / numpy のみ. torch 不要なので単体テスト可能.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from dataclasses import dataclass, field
+
 import numpy as np
 
 
@@ -74,11 +77,6 @@ def pick_sharpest(scores: list[float]) -> int:
 
 # -----------------------------------------------------------------------------
 # 空間抽出 (2 層多基準選択)
-# -----------------------------------------------------------------------------
-from collections.abc import Callable
-from dataclasses import dataclass, field
-
-
 @dataclass
 class Candidate:
     """候補フレーム 1 枚の計測結果.

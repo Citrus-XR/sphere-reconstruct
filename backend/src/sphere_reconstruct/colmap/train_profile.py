@@ -1,5 +1,5 @@
 """再構成統計から「学習プロファイル」を作る. LichtFeld-Studio 等の 3DGS トレーナ向けに,
-場面スケール / 点数 / 密度 / 相机モデル / 品質信号をまとめ, 推奨ハイパラ導出の材料にする.
+場面スケール / 点数 / 密度 / camera model / 品質信号をまとめ, 推奨ハイパラ導出の材料にする.
 
 方法非依存の量だけを計算する (strategy 固有の preset 合成は別レイヤ). scene_scale は 2 系統:
 - camera: 1.1 * max‖cam_center - centroid‖  (原版 3DGS / MCMC の spatial_lr_scale)

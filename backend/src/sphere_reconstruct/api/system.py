@@ -5,7 +5,7 @@
 - GET /api/fs/browse?path=    : allowed_roots 内のディレクトリ列挙 (INSV/動画/画像を選ぶ).
 
 FastAPI プロセスで動くため CUDA/torch は触らない. GPU 情報は nvidia-smi サブプロセスを
-呼んで得る (無ければ空). CPU は psutil (無ければ None).
+呼んで得る（無ければ空）。CPU/RAM は必須 dependency の psutil から取得する。
 """
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+import psutil
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.concurrency import run_in_threadpool
 
@@ -38,12 +39,8 @@ async def system_doctor() -> dict:
     return await run_in_threadpool(diagnose)
 
 
-def _ram_stats() -> dict | None:
-    """システム RAM 使用率 (psutil). 取得できなければ None."""
-    try:
-        import psutil  # noqa: PLC0415
-    except Exception:
-        return None
+def _ram_stats() -> dict:
+    """システム RAM 使用率を返す。"""
     vm = psutil.virtual_memory()
     return {
         "percent": float(vm.percent),
@@ -118,14 +115,9 @@ def _within_any(roots, path: Path) -> bool:
         return False
 
 
-def _cpu_percent() -> float | None:
-    try:
-        import psutil  # noqa: PLC0415
-
-        # interval=None は前回呼び出しからの平均 (非ブロッキング). 定期ポーリング前提.
-        return float(psutil.cpu_percent(interval=None))
-    except Exception:
-        return None
+def _cpu_percent() -> float:
+    # interval=None は前回呼び出しからの平均 (非ブロッキング). 定期ポーリング前提.
+    return float(psutil.cpu_percent(interval=None))
 
 
 async def _gpu_stats() -> list[dict]:

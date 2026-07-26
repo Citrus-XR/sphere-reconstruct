@@ -37,6 +37,10 @@ _CAMERA_MODELS: dict[int, tuple[str, int]] = {
     17: ("EQUIRECTANGULAR", 2),
 }
 
+# LFStudio v0.5.3 の COLMAP loader が実際に生成可能な camera model。FOV (ID 7) は
+# metadata parser には存在するが image assembly で明示的に拒否される。
+LFSTUDIO_SUPPORTED_CAMERA_MODEL_IDS = frozenset({0, 1, 2, 3, 4, 5, 6, 8, 9, 10, 17})
+
 
 @dataclass
 class Camera:
@@ -45,6 +49,7 @@ class Camera:
     width: int
     height: int
     params: list[float]
+    model_id: int | None = None
 
 
 @dataclass
@@ -182,7 +187,7 @@ def read_cameras_bin(path: Path) -> dict[int, Camera]:
             except KeyError as error:
                 raise ValueError(f"unsupported COLMAP camera model id: {model_id}") from error
             params = list(_read(f"<{nparams}d", f)) if nparams else []
-            cameras[camera_id] = Camera(camera_id, name, width, height, params)
+            cameras[camera_id] = Camera(camera_id, name, width, height, params, model_id)
     return cameras
 
 

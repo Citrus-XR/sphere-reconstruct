@@ -1,7 +1,7 @@
 [project]
 name = "sphere-reconstruct"
 version = "0.0.1"
-description = "Insta360 X5 INSV / ERP から COLMAP pinhole rig データセットを生成するローカル Web パイプライン"
+description = "INSV / ERP から COLMAP 再構成と LFStudio 学習データを生成するローカル Web パイプライン"
 requires-python = ">=3.12,<3.14"
 readme = "../README.md"
 dependencies = [
@@ -14,6 +14,7 @@ dependencies = [
     "typing-extensions>=4.12",
     "tomli>=2.0; python_version < '3.11'",
     "numpy>=2.0",
+    "psutil>=6.1",
     "structlog>=24.4",
 ]
 
@@ -27,8 +28,11 @@ imaging = [
     "opencv-python-headless>=4.10",
     "Pillow>=11.0",
 ]
-# SAM3 推論. torch は cu128 index から. sam3 パッケージ本体は sys.path 経由で
-# import するので, ここではその実行時依存だけを入れる.
+denoise = [
+    "torch>=2.5",
+    "opencv-python-headless>=4.10",
+    "Pillow>=11.0",
+]
 # SAM3 推論. torch は cu128 index から. sam3 パッケージ本体は sys.path 経由で
 # import するので, ここではその実行時依存を入れる. sam3 の pyproject が宣言する
 # 依存は不完全で, model_builder が tracker / train パスを無条件 import するため
@@ -53,7 +57,6 @@ sam3 = [
     "torchmetrics",
     "submitit",
     "matplotlib",
-    "psutil",
     "omegaconf",
     "hydra-core",
     "open-clip-torch",
@@ -87,11 +90,10 @@ packages = ["src/sphere_reconstruct"]
 [tool.uv]
 package = true
 
-# torch は CUDA 12.8 ビルドを明示 index から取る (Windows/Linux + NVIDIA).
-# CUDA の無い機では --extra sam3 を付けなければ torch は入らない.
+# Windows/Linux は CUDA 12.8 build、macOS は PyPI の native build を使う.
 [tool.uv.sources]
-torch = [{ index = "pytorch-cu128" }]
-torchvision = [{ index = "pytorch-cu128" }]
+torch = [{ index = "pytorch-cu128", marker = "sys_platform == 'win32' or sys_platform == 'linux'" }]
+torchvision = [{ index = "pytorch-cu128", marker = "sys_platform == 'win32' or sys_platform == 'linux'" }]
 
 [[tool.uv.index]]
 name = "pytorch-cu128"
@@ -106,6 +108,12 @@ extend-exclude = ["dist", "build"]
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "N"]
 ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+# 数式の R/K と COLMAP binary schema の point3D/points2D は仕様名を保つ。
+"src/sphere_reconstruct/colmap/gravity_align.py" = ["N802", "N803", "N806"]
+"src/sphere_reconstruct/colmap/model.py" = ["N802", "N815"]
+"tests/test_gravity_align.py" = ["N802", "N803", "N806"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -29,32 +29,32 @@ import numpy as np
 from ..imaging.projection import yaw_pitch_rotation
 
 
-def rotmat_to_quat_wxyz(R: np.ndarray) -> tuple[float, float, float, float]:
+def rotmat_to_quat_wxyz(rotation: np.ndarray) -> tuple[float, float, float, float]:
     """回転行列 -> クォータニオン (qw, qx, qy, qz). COLMAP と同じ w-first 順."""
-    tr = R[0, 0] + R[1, 1] + R[2, 2]
+    tr = rotation[0, 0] + rotation[1, 1] + rotation[2, 2]
     if tr > 0:
         s = math.sqrt(tr + 1.0) * 2
         w = 0.25 * s
-        x = (R[2, 1] - R[1, 2]) / s
-        y = (R[0, 2] - R[2, 0]) / s
-        z = (R[1, 0] - R[0, 1]) / s
-    elif R[0, 0] > R[1, 1] and R[0, 0] > R[2, 2]:
-        s = math.sqrt(1.0 + R[0, 0] - R[1, 1] - R[2, 2]) * 2
-        w = (R[2, 1] - R[1, 2]) / s
+        x = (rotation[2, 1] - rotation[1, 2]) / s
+        y = (rotation[0, 2] - rotation[2, 0]) / s
+        z = (rotation[1, 0] - rotation[0, 1]) / s
+    elif rotation[0, 0] > rotation[1, 1] and rotation[0, 0] > rotation[2, 2]:
+        s = math.sqrt(1.0 + rotation[0, 0] - rotation[1, 1] - rotation[2, 2]) * 2
+        w = (rotation[2, 1] - rotation[1, 2]) / s
         x = 0.25 * s
-        y = (R[0, 1] + R[1, 0]) / s
-        z = (R[0, 2] + R[2, 0]) / s
-    elif R[1, 1] > R[2, 2]:
-        s = math.sqrt(1.0 + R[1, 1] - R[0, 0] - R[2, 2]) * 2
-        w = (R[0, 2] - R[2, 0]) / s
-        x = (R[0, 1] + R[1, 0]) / s
+        y = (rotation[0, 1] + rotation[1, 0]) / s
+        z = (rotation[0, 2] + rotation[2, 0]) / s
+    elif rotation[1, 1] > rotation[2, 2]:
+        s = math.sqrt(1.0 + rotation[1, 1] - rotation[0, 0] - rotation[2, 2]) * 2
+        w = (rotation[0, 2] - rotation[2, 0]) / s
+        x = (rotation[0, 1] + rotation[1, 0]) / s
         y = 0.25 * s
-        z = (R[1, 2] + R[2, 1]) / s
+        z = (rotation[1, 2] + rotation[2, 1]) / s
     else:
-        s = math.sqrt(1.0 + R[2, 2] - R[0, 0] - R[1, 1]) * 2
-        w = (R[1, 0] - R[0, 1]) / s
-        x = (R[0, 2] + R[2, 0]) / s
-        y = (R[1, 2] + R[2, 1]) / s
+        s = math.sqrt(1.0 + rotation[2, 2] - rotation[0, 0] - rotation[1, 1]) * 2
+        w = (rotation[1, 0] - rotation[0, 1]) / s
+        x = (rotation[0, 2] + rotation[2, 0]) / s
+        y = (rotation[1, 2] + rotation[2, 1]) / s
         z = 0.25 * s
     # 正規化.
     n = math.sqrt(w * w + x * x + y * y + z * z)
@@ -83,15 +83,15 @@ def compute_rig_cameras(
     """
     cams: list[RigCamera] = []
     for v in views:
-        R_view = yaw_pitch_rotation(v["yaw_deg"], v["pitch_deg"])
-        q = rotmat_to_quat_wxyz(R_view)
-        for l in lenses:
-            C = np.array([l["tx"], l["ty"], l["tz"]])
-            t = -R_view @ C
-            is_ref = v["name"] == ref_view and l["index"] == ref_lens
+        view_rotation = yaw_pitch_rotation(v["yaw_deg"], v["pitch_deg"])
+        q = rotmat_to_quat_wxyz(view_rotation)
+        for lens in lenses:
+            center = np.array([lens["tx"], lens["ty"], lens["tz"]])
+            t = -view_rotation @ center
+            is_ref = v["name"] == ref_view and lens["index"] == ref_lens
             cams.append(
                 RigCamera(
-                    image_prefix=f"{v['name']}_lens{l['index']}/",
+                    image_prefix=f"{v['name']}_lens{lens['index']}/",
                     is_ref=is_ref,
                     quat_wxyz=q,
                     translation=(float(t[0]), float(t[1]), float(t[2])),

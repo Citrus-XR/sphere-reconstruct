@@ -161,8 +161,8 @@ def test_cubemap_views_returns_six():
 
 
 def test_yaw_pitch_rotation_is_orthonormal():
-    R = proj.yaw_pitch_rotation(30.0, 15.0)
+    rotation = proj.yaw_pitch_rotation(30.0, 15.0)
     # 直交かつ det=1.
-    should_be_I = R @ R.T
-    assert np.allclose(should_be_I, np.eye(3), atol=1e-9)
-    assert abs(np.linalg.det(R) - 1.0) < 1e-9
+    should_be_identity = rotation @ rotation.T
+    assert np.allclose(should_be_identity, np.eye(3), atol=1e-9)
+    assert abs(np.linalg.det(rotation) - 1.0) < 1e-9

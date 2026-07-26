@@ -51,6 +51,7 @@ def test_read_model_roundtrip(tmp_path: Path):
     assert len(recon.cameras) == 1
     cam = recon.cameras[1]
     assert cam.model == "PINHOLE"
+    assert cam.model_id == 1
     assert cam.width == 512 and cam.height == 512
     assert cam.params == [256.0, 256.0, 256.0, 256.0]
 
@@ -95,6 +96,7 @@ def test_equirectangular_camera_model(tmp_path: Path):
         f.write(struct.pack("<2d", 4096.0, 2048.0))
     camera = model.read_cameras_bin(tmp_path / "cameras.bin")[1]
     assert camera.model == "EQUIRECTANGULAR"
+    assert camera.model_id == 17
     assert camera.params == [4096.0, 2048.0]
 
 

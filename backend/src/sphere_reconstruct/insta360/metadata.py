@@ -225,7 +225,7 @@ def iter_trailer_records(footer: InsvFooter):
                     entries[eid] = (eoff, esize, efmt)
             if entries:
                 for rid, (eoff, esize, efmt) in entries.items():
-                    if 0 <= eoff and eoff + esize <= n:
+                    if eoff >= 0 and eoff + esize <= n:
                         yield rid, efmt, tail[eoff : eoff + esize]
                 return
 

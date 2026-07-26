@@ -13,12 +13,15 @@ FastAPI プロセスは CUDA も Torch も pycolmap も触らない. これら�
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import multiprocessing as mp
 import os
 import signal
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
+
+import psutil
 
 # フォーク由来のライブラリ (CUDA など) の問題を避けるため, 常に spawn.
 _CTX: mp.context.BaseContext = mp.get_context("spawn")
@@ -95,18 +98,12 @@ def _signal_tree(pid: int | None, *, kill: bool) -> None:
     if pid is None:
         return
     try:
-        import psutil  # noqa: PLC0415
-    except Exception:
-        return  # psutil が無ければ子は諦める (親の terminate に委ねる).
-    try:
         parent = psutil.Process(pid)
     except psutil.Error:
         return
     for child in parent.children(recursive=True):
-        try:
+        with contextlib.suppress(psutil.Error):
             child.kill() if kill else child.terminate()
-        except psutil.Error:
-            pass
 
 
 def is_windows() -> bool:
@@ -121,7 +118,5 @@ def send_soft_signal(pid: int) -> None:
     """
     if is_windows():
         return
-    try:
+    with contextlib.suppress(ProcessLookupError):
         os.kill(pid, signal.SIGINT)
-    except ProcessLookupError:
-        pass

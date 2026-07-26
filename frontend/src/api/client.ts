@@ -10,6 +10,7 @@ export type PipelineState =
   | 'matched'
   | 'reconstructed'
   | 'aligned'
+  | 'denoised'
   | 'exported'
 
 export type SourceKind = 'insv' | 'erp_video' | 'erp_images'
@@ -146,6 +147,7 @@ export const api = {
     req<ReconstructionData>(`/api/projects/${id}/reconstruction`),
   getFrames: (id: string) => req<FramesManifest>(`/api/projects/${id}/frames`),
   getMasks: (id: string) => req<MasksManifest>(`/api/projects/${id}/masks`),
+  getDenoise: (id: string) => req<DenoiseManifest>(`/api/projects/${id}/denoise`),
   getExportInfo: (id: string) => req<ExportInfo>(`/api/projects/${id}/export-info`),
   putUiState: (id: string, ui: Record<string, unknown>) =>
     req<Project>(`/api/projects/${id}/ui-state`, {
@@ -286,11 +288,24 @@ export interface MaskLensRecord {
 export interface MaskFrameRecord {
   index: number
   lenses?: MaskLensRecord[]
+  views?: Array<{ view: string; lens: number; path: string; coverage: number; coverage_warning?: boolean }>
 }
 export interface MasksManifest {
   kind: string
   prompt?: string[]
   frames: MaskFrameRecord[]
+}
+
+export interface DenoiseFrameRecord {
+  index: number
+  lens0?: string
+  lens1?: string
+  erp?: string
+}
+export interface DenoiseManifest {
+  method: 'off' | 'fastdvdnet' | 'ffmpeg_adaptive'
+  device: string | null
+  frames: DenoiseFrameRecord[]
 }
 
 // export_dataset の出力ディレクトリ (絶対パス).
@@ -299,6 +314,23 @@ export interface ExportInfo {
   dataset_dir: string | null
   preview_dir: string | null
   train_configs_dir: string | null
+  training_output_dir: string
+  gui_integration: {
+    train_configs_auto_applied: boolean
+    warnings: string[]
+    required_settings: {
+      strategy: string
+      gut: boolean
+      undistort: boolean
+      mask_mode: string
+    }
+  } | null
+  command_template: {
+    executable: string
+    arguments: string[]
+    run_name_placeholder: string
+    requires_unique_run_name: boolean
+  } | null
 }
 
 // 抽出フレーム (fisheye) の URL.
@@ -307,12 +339,31 @@ export const frameImageUrl = (id: string, index: number, lens: number) =>
 // native fisheye の生成マスク PNG の URL.
 export const fisheyeMaskUrl = (id: string, index: number, lens: number) =>
   `/api/projects/${id}/fisheye-mask/${index}?lens=${lens}`
+export const denoisedImageUrl = (id: string, index: number, lens: number) =>
+  `/api/projects/${id}/denoise/${index}/image?lens=${lens}`
+export const pinholeImageUrl = (id: string, index: number, view: string, lens: number, mask = false) =>
+  `/api/projects/${id}/pinhole/${index}/${encodeURIComponent(view)}?lens=${lens}${mask ? '&mask=true' : ''}`
 
-// COLMAP 画像名 "front/frame_000123.jpg" を {view, lens, index} に分解する.
-export const parseImageName = (name: string): { view: string; lens: number; index: number } | null => {
-  const m = name.match(/^(front|back)\/frame_(\d+)\.jpg$/)
-  if (!m) return null
-  return { view: m[1], lens: m[1] === 'front' ? 0 : 1, index: Number(m[2]) }
+export type ParsedImageName = {
+  kind: 'native' | 'pinhole' | 'erp'
+  view: string
+  lens: number
+  index: number
+}
+
+// COLMAP image name を入力 workspace の 3 layout に分解する.
+export const parseImageName = (name: string): ParsedImageName | null => {
+  const native = name.match(/^(front|back)\/frame_(\d+)\.(?:jpg|jpeg|png)$/i)
+  if (native) {
+    return { kind: 'native', view: native[1], lens: native[1] === 'front' ? 0 : 1, index: Number(native[2]) }
+  }
+  const pinhole = name.match(/^(.+)_lens(\d+)\/frame_(\d+)\.(?:jpg|jpeg|png)$/i)
+  if (pinhole) {
+    return { kind: 'pinhole', view: pinhole[1], lens: Number(pinhole[2]), index: Number(pinhole[3]) }
+  }
+  const erp = name.match(/^frame_(\d+)\.(?:jpg|jpeg|png)$/i)
+  if (erp) return { kind: 'erp', view: 'erp', lens: 0, index: Number(erp[1]) }
+  return null
 }
 
 // 再構成の画像名から frame index を抽出し, frame ごとの登録情報 (使われた画像数 / 3D 点数) を集計する.

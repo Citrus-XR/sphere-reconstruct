@@ -10,6 +10,7 @@ FastAPI プロセス側で Job のライフサイクルを管理する.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import shutil
 import uuid
@@ -29,6 +30,7 @@ class JobSupervisor:
         self._db_path = db_path
         self._handles: dict[str, WorkerHandle] = {}
         self._tasks: dict[str, asyncio.Task[int]] = {}
+        self._cancelling: set[str] = set()
 
     async def enqueue_run_pipeline(
         self,
@@ -88,10 +90,9 @@ class JobSupervisor:
             self._tasks.pop(job_id, None)
             # worker がネイティブクラッシュ (CUDA/ONNX の VRAM 不足など) や kill で異常終了すると
             # worker 内の except を通らず job/stage_run が 'running' のまま残る. ここで回収する.
-            try:
+            with contextlib.suppress(Exception):  # 回収失敗でも監視タスク自体は落とさない.
                 await self._finalize_if_orphaned(job_id, code)
-            except Exception:  # 回収失敗でも監視タスク自体は落とさない.
-                pass
+            self._cancelling.discard(job_id)
             await self._cleanup_scratch(job_id)
 
     async def _cleanup_scratch(self, job_id: str) -> None:
@@ -117,7 +118,20 @@ class JobSupervisor:
         async with self._db.transaction() as conn:
             cur = await conn.execute("SELECT status, project_id FROM job WHERE id=?", (job_id,))
             row = await cur.fetchone()
-            if row is None or row["status"] not in ("running", "queued"):
+            if row is None:
+                return
+            if job_id in self._cancelling:
+                await conn.execute(
+                    "UPDATE job SET status='cancelled', finished_at=?, error_text=NULL WHERE id=?",
+                    (now, job_id),
+                )
+                await conn.execute(
+                    "UPDATE stage_run SET status='cancelled', finished_at=?, error_text=NULL "
+                    "WHERE job_id=? AND status IN ('running', 'failed')",
+                    (now, job_id),
+                )
+                return
+            if row["status"] not in ("running", "queued"):
                 return  # 正常に終了済み (worker が status を書けた).
             msg = (
                 f"worker が異常終了しました (exit code {exit_code}). "
@@ -129,7 +143,8 @@ class JobSupervisor:
                 (now, msg, job_id),
             )
             await conn.execute(
-                "UPDATE stage_run SET status='failed', finished_at=?, error_text=? WHERE job_id=? AND status='running'",
+                "UPDATE stage_run SET status='failed', finished_at=?, error_text=? "
+                "WHERE job_id=? AND status='running'",
                 (now, msg, job_id),
             )
             await conn.execute(
@@ -146,23 +161,38 @@ class JobSupervisor:
                 ),
             )
 
-    def cancel_job(self, job_id: str) -> bool:
+    async def cancel_job(self, job_id: str) -> bool:
         handle = self._handles.get(job_id)
         if handle is None:
             return False
-        cancel(handle, grace_seconds=3.0)
+        now = datetime.now(UTC).isoformat()
+        async with self._db.transaction() as conn:
+            cur = await conn.execute("SELECT status FROM job WHERE id=?", (job_id,))
+            row = await cur.fetchone()
+            if row is None or row["status"] not in ("queued", "running"):
+                return False
+            self._cancelling.add(job_id)
+            await conn.execute(
+                "UPDATE job SET status='cancelled', finished_at=?, error_text=NULL WHERE id=?",
+                (now, job_id),
+            )
+            await conn.execute(
+                "UPDATE stage_run SET status='cancelled', finished_at=?, error_text=NULL "
+                "WHERE job_id=? AND status='running'",
+                (now, job_id),
+            )
+        await asyncio.to_thread(cancel, handle, grace_seconds=3.0)
         return True
 
     async def shutdown(self) -> None:
         # プロセス終了時に走る. 未完了 Worker は kill.
-        for h in list(self._handles.values()):
-            cancel(h, grace_seconds=1.0)
+        await asyncio.gather(
+            *(asyncio.to_thread(cancel, handle, grace_seconds=1.0) for handle in self._handles.values())
+        )
         for t in list(self._tasks.values()):
             t.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
                 await t
-            except (asyncio.CancelledError, Exception):
-                pass
 
 
 _supervisor: JobSupervisor | None = None

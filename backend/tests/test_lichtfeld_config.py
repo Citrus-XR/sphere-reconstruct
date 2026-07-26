@@ -1,4 +1,4 @@
-"""lichtfeld_config: 相机モデル × strategy × GUT 互換と cap 導出を検証する.
+"""lichtfeld_config: camera model × strategy × GUT 互換と cap 導出を検証する.
 
 最重要: igs+ に gut=true を絶対に付けない (LichtFeld が起動時にハードエラーにするため).
 """
@@ -50,16 +50,26 @@ def test_equirect_trains_via_gut_except_igsplus():
 
 
 def test_cap_derivation_clamped():
-    # 少点 → floor.
+    # 少点でも有効な SfM point は保持し、cap だけ floor にする。
     _, info = lc.build_configs(_profile(["PINHOLE"], npts=1000))
     assert info["max_cap"] == lc._CAP_FLOOR
-    assert info["sparse_init"] is True  # 薄い SfM は random init.
+    assert info["random_init"] is False
+    assert "sparse_point_cloud" in info["warnings"]
+    configs, _ = lc.build_configs(_profile(["PINHOLE"], npts=1000))
+    assert all(config["random"] is False for config in configs.values())
     # 多点 → ceiling.
     _, info2 = lc.build_configs(_profile(["PINHOLE"], npts=10_000_000))
     assert info2["max_cap"] == lc._CAP_CEIL
     # 中間 → k*npts.
     _, info3 = lc.build_configs(_profile(["PINHOLE"], npts=200_000))
     assert info3["max_cap"] == lc._CAP_K * 200_000
+    assert info3["recommended_config"] == "train_config.mrnf.json"
+
+
+def test_zero_point_model_uses_random_initialization():
+    configs, info = lc.build_configs(_profile(["PINHOLE"], npts=0))
+    assert info["random_init"] is True
+    assert all(config["random"] is True for config in configs.values())
 
 
 def test_high_reproj_warns():

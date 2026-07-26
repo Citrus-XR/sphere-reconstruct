@@ -29,9 +29,21 @@ def resolve_colmap_bin(explicit: str | None) -> str:
             raise FileNotFoundError(f"colmap binary not found: {explicit}")
         return str(p)
     found = shutil.which("colmap")
-    if not found:
-        raise FileNotFoundError("colmap not found in PATH; set binaries.colmap in config.toml")
-    return found
+    if found:
+        return found
+    record = _auto_installed_colmap_record()
+    if record.is_file():
+        installed = Path(record.read_text(encoding="utf-8").strip())
+        if installed.is_file():
+            return str(installed)
+    raise FileNotFoundError(
+        "colmap not found in PATH or .runtime installer record; "
+        "set binaries.colmap in config.toml or use the start script"
+    )
+
+
+def _auto_installed_colmap_record() -> Path:
+    return Path(__file__).resolve().parents[4] / ".runtime" / "colmap-path.txt"
 
 
 @dataclass

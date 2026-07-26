@@ -341,7 +341,7 @@ class ExtractFrames(Stage):
         candidates: list[sampling.Candidate] = []
         max_clip = ctx.params["max_clip"]
         n_score = len(cand_indices)
-        for si, (idx, p) in enumerate(zip(cand_indices, paths, strict=False)):
+        for si, (idx, p) in enumerate(zip(cand_indices, paths, strict=True)):
             gray = cv2.imread(str(p), cv2.IMREAD_GRAYSCALE)
             if gray is None:
                 continue

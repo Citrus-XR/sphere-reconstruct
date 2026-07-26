@@ -87,7 +87,9 @@ def test_select_spatial_greedy_spacing_by_motion():
     # 0 を seed, motion>=3 で 3, 6, 9 ... 実際は窓の quality 最大 (全部同じなので最初).
     assert res.selected_indices[0] == 0
     # 選ばれた間隔が概ね target*min_spacing_frac 以上.
-    diffs = [b - a for a, b in zip(res.selected_indices[:-1], res.selected_indices[1:])]
+    diffs = [
+        b - a for a, b in zip(res.selected_indices[:-1], res.selected_indices[1:], strict=True)
+    ]
     assert all(d >= 2 for d in diffs)
 
 

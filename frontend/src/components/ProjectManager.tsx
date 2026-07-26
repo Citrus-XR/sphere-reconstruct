@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { api, type Project } from '../api/client'
 import { useSettings } from '../ui/settings'
@@ -10,13 +10,20 @@ export const ProjectManager = ({
 }: {
   projects: Project[] | undefined
   currentId: string | null
-  onSelect: (id: string) => void
+  onSelect: (id: string | null) => void
   onClose: () => void
 }) => {
   const { t } = useSettings()
   const qc = useQueryClient()
   const [name, setName] = useState('')
   const [confirmDel, setConfirmDel] = useState<string | null>(null)
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [onClose])
 
   const sorted = useMemo(
     () => [...(projects ?? [])].sort((a, b) => (b.updated_at || '').localeCompare(a.updated_at || '')),
@@ -29,15 +36,23 @@ export const ProjectManager = ({
   })
   const del = useMutation({
     mutationFn: (id: string) => api.deleteProject(id),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['projects'] }); setConfirmDel(null) },
+    onSuccess: (_result, deletedId) => {
+      if (deletedId === currentId) {
+        onSelect(sorted.find(project => project.id !== deletedId)?.id ?? null)
+      }
+      qc.invalidateQueries({ queryKey: ['projects'] })
+      setConfirmDel(null)
+    },
   })
 
   return (
     <div className="modal-back" onClick={onClose}>
-      <div className="modal" style={{ height: 560, width: 680 }} onClick={e => e.stopPropagation()}>
+      <div className="modal" style={{ height: 560, width: 680 }} onClick={e => e.stopPropagation()}
+        role="dialog" aria-modal="true" aria-labelledby="project-manager-title">
         <div className="modal-head">
-          <strong style={{ flex: 1 }}>{t('projects')}</strong>
-          <button className="btn btn-secondary" onClick={onClose}>×</button>
+          <strong id="project-manager-title" style={{ flex: 1 }}>{t('projects')}</strong>
+          <button type="button" className="btn btn-secondary" onClick={onClose}
+            aria-label={t('close')} autoFocus>×</button>
         </div>
         <div style={{ display: 'flex', gap: 8, padding: '8px 12px', borderBottom: '1px solid var(--border)' }}>
           <input className="input" style={{ flex: 1, minWidth: 0, width: 'auto' }} placeholder={t('projectName')} value={name}
@@ -49,10 +64,10 @@ export const ProjectManager = ({
           {sorted.map(p => (
             <div key={p.id} className={`fs-row${p.id === currentId ? ' sel-row' : ''}`}
               style={{ justifyContent: 'space-between', cursor: 'default' }}>
-              <div style={{ flex: 1, minWidth: 0 }} onClick={() => { onSelect(p.id); onClose() }} role="button">
+              <button type="button" className="project-main" onClick={() => { onSelect(p.id); onClose() }}>
                 <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.name}</div>
                 <div className="mono" style={{ fontSize: 10 }}>{p.state} · {fmtTime(p.updated_at)}</div>
-              </div>
+              </button>
               {confirmDel === p.id ? (
                 <span style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
                   <span className="mono" style={{ color: 'var(--error)', fontSize: 11 }}>{t('deleteConfirm')}</span>

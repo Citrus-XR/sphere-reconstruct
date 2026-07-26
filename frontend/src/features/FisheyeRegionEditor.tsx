@@ -72,7 +72,7 @@ export const FisheyeRegionEditor = ({
         </select>
         <button className="btn" disabled={save.isPending} onClick={() => save.mutate()}>{t('save')}</button>
         {savedMsg && <span className="mono" style={{ color: 'var(--accent)' }}>{t('saved')}</span>}
-        {data && !data.saved && <span className="mono" style={{ color: '#d69a2a' }}>未保存</span>}
+        {data && !data.saved && <span className="mono" style={{ color: '#d69a2a' }}>{t('regionUnsaved')}</span>}
       </div>
       <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 6 }}>
         <span className="mono">{t('zoom')}</span>

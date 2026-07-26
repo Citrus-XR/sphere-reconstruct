@@ -7,7 +7,7 @@ project / job / stage_run / event の 4 テーブル. WAL モードで運用.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 
 import aiosqlite
@@ -92,10 +92,8 @@ class Database:
         # 既存 DB (ALTER 前に作られたファイル) にも追加カラムを足す. マイグレーション層が
         # 無いので冪等な ADD COLUMN で吸収する (存在すれば OperationalError を握りつぶす).
         for col, decl in (("msg_key", "TEXT"), ("msg_args", "TEXT"), ("kind", "TEXT NOT NULL DEFAULT 'log'")):
-            try:
+            with suppress(aiosqlite.OperationalError):
                 await self._conn.execute(f"ALTER TABLE event ADD COLUMN {col} {decl}")
-            except aiosqlite.OperationalError:
-                pass
         await self._conn.commit()
 
     async def close(self) -> None:
