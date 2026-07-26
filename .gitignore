@@ -14,12 +14,15 @@ __pycache__/
 node_modules/
 dist/
 .vite/
+test-results/
+playwright-report/
 *.local
 *.tsbuildinfo
 
 # ワークスペース (プロジェクト成果物)
 workspace/
 runtime/local.toml
+.runtime/
 
 # エディタ
 .vscode/

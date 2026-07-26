@@ -17,6 +17,9 @@ dependencies = [
     "structlog>=24.4",
 ]
 
+[project.scripts]
+sphere-doctor = "sphere_reconstruct.cli:main"
+
 [project.optional-dependencies]
 # 重い依存は Worker 側だけで使うため extra に分離する.
 # base の `uv sync` では入らない. CUDA が要る機だけ `--extra sam3` を付ける.

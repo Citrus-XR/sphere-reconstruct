@@ -1,200 +1,321 @@
 # sphere-reconstruct
 
-Insta360 X5 の INSV から, COLMAP ベースの 3DGS 向けデータセットを生成するローカル Web
-アプリケーション. 既定は生の前後魚眼をそのまま解く **Native 魚眼 (前後強制 rig)**,
-fallback として pinhole rig cubemap も選べる. Equirectangular (ERP) 動画/画像入力も
-受け付ける.
+Insta360 の dual-fisheye INSV、equirectangular 動画、equirectangular 画像列から、
+COLMAP sparse reconstruction と LichtFeld Studio 用 3D Gaussian Splatting dataset を
+生成するローカル Web アプリケーション。
 
-旧 [lichtfeld-360-plugin](https://github.com/alexmgee/lichtfeld-360-plugin) (GPL-3.0-or-later) は行動参考のみで, 実装コードは流用していない. 独立に再実装.
+処理は独立 stage に分割されている。特徴抽出、matching、Mapper、重力整列、export を
+個別に再生成・クリアできるため、Matcher を変えるだけで画像 decode や特徴抽出から
+やり直す必要はない。
 
-## パイプライン (V1 主線)
+## 主な機能
 
-再構成は 2 モード. reconstruct ステージの `reconstruction_mode` で切替える.
+- 生の前後魚眼を `OPENCV_FISHEYE` 2-camera rig として直接 reconstruction
+- cubemap pinhole rig fallback
+- COLMAP 4.1 の `EQUIRECTANGULAR` camera model による ERP direct reconstruction
+- COLMAP native SIFT / ALIKED N16ROT / ALIKED N32
+- Brute-force / LightGlue と Sequential / Exhaustive / Vocab-tree の独立選択
+- Incremental Mapper / COLMAP 内蔵 Global Mapper
+- SAM3 dynamic-object mask と camera 非依存の fisheye valid-circle 推定
+- exposure timestamp と同期した IMU gravity alignment
+- LFStudio で `export_dataset/` をそのまま選べる export layout
+- stage cache、transitive invalidation、atomic output replace、WebSocket progress
+- 日本語・中国語・英語 UI、dockable IDE layout、point-cloud/camera viewer
+- 起動時 dependency diagnostics と Windows COLMAP auto installer
 
-**Native 魚眼 (既定, native_fisheye)** — 前後魚眼を全 FoV / 原画素のまま解く:
+## 推奨 workflow
 
-```
-INSV
-  -> ソース検査 (INSPECTED)
-  -> 前後同期フレーム抽出 (EXTRACTED)
-  -> SAM3 魚眼マスク: 円形有効領域 + 動体除外 (MASKED)
-  -> COLMAP: 前後 2 レンズ OPENCV_FISHEYE + 強制物理 rig (RECONSTRUCTED)
-  -> データセット書き出し (EXPORTED)
-```
+上部の「次の工程」ボタンは、未生成の最初の工程を 1 つだけ実行する。Fisheye region の
+ような手動確認が必要な箇所では自動的に停止する。
 
-front を参照, back を「Y 軸 180deg + 物理 baseline」で強制固定するため, 前後半球に
-視覚的重なりが無くても必ず 1 モデルへ合流する. pinhole 再投影が不要で特徴損失が無い.
-魚眼の有効領域 (円) は UI で手動調整でき (レンズ端の反射/汚れを外周から除外), 動体
-(人 / 自撮り棒 / 三脚 / 影) は SAM3 で検出し膨張させて除外する.
-
-**Pinhole rig (fallback, pinhole_rig)** — 6-view cubemap pinhole に再投影して解く:
-
-```
-INSV -> 検査 -> 抽出 -> pinhole rig 再投影 -> SAM3 マスク -> COLMAP (12 仮想カメラ rig) -> 書き出し
-```
-
-各ステージは冪等. 入力ハッシュ・パラメータハッシュ・実装バージョンで再計算判定. 中間
-結果は tmp に書いてから原子リプレース. native_fisheye では reproject_views を自動
-スキップし, generate_masks は生魚眼用 (fisheye レイアウト) の SAM3 マスクを作る.
-
-## アーキテクチャ
-
-```
-React Web UI (Vite + TypeScript)
-        |
-        v
-FastAPI (127.0.0.1 のみ, uvicorn)
-        |
-        +-- SQLite (aiosqlite): project / job / stage state
-        |
-        +-- Worker サブプロセス (multiprocessing.spawn)
-                  |
-                  +-- CUDA / Torch / COLMAP / ffmpeg
+```text
+Source inspection
+  -> Frame extraction
+  -> Fisheye region confirmation       (Native fisheye のみ)
+  -> Pinhole reprojection              (Pinhole rig のみ)
+  -> SAM3 masks                        (任意)
+  -> Feature extraction
+  -> Feature matching
+  -> Sparse reconstruction
+  -> Gravity alignment
+  -> LFStudio export
 ```
 
-FastAPI プロセスは CUDA を絶対に触らない. Worker が独立プロセスで, キャンセルと VRAM 解放を確実にする.
+各 stage の「クリア」は、その stage と真に依存する後続成果物を invalidate する。例えば
+`match_features` のクリアは `extract_features` を残し、`reconstruct` 以降だけを無効化する。
 
-## ディレクトリ
+## 既定値
 
+実写 X5 dataset の wall-clock と reconstruction quality の Pareto 比較から、現在の既定は
+次の通り。
+
+| 項目 | 既定 |
+|---|---|
+| Frame extraction | Sharpness-first、1 fps、候補 5 枚 |
+| SAM3 | 長辺 1024 px、mask dilation 8 px |
+| Feature | `SIFT`、長辺 2048 px、最大 8192 features |
+| Matcher | `SIFT_BRUTEFORCE` |
+| Pairing | Sequential、overlap 4 |
+| Mapper | Global Mapper + view-graph calibration |
+| Alignment | exposure-synchronized IMU auto |
+| Export config | MRNF / MCMC / IGS+（camera model に不適合な config は生成しない） |
+
+ALIKED + LightGlue は暗所・弱テクスチャで track を救う High preset として残す。
+Global Mapper は規模が小さい素材でも initial-pair search を避けられるため、動画入力の既定に
+適している。
+
+## 実写 benchmark
+
+入力: Insta360 X5、38.17 秒、dual 3840×3840 HEVC。旧 Spatial 設定で 104 rig frames
+（208 images）を選択し、同じ画像・mask・camera rig で比較した。
+
+| Feature / Matcher / Mapper | Feature | Match | Mapper | Registered | Points | Mean reproj. |
+|---|---:|---:|---:|---:|---:|---:|
+| 旧 Python ALIKED + LightGlue + Incremental | 89.7 s | 1604.1 s | 428.9 s | 208/208 | 52,505 | 1.242 px |
+| **COLMAP SIFT + Brute-force + Global** | **28.9 s** | 33.1 s | 25.8 s | 208/208 | **27,202** | **0.917 px** |
+| COLMAP ALIKED + Brute-force + Global | 243.0 s¹ | 9.7 s | 17.9 s | 208/208 | 19,060 | 1.041 px |
+| COLMAP ALIKED + LightGlue + Global | 243.0 s¹ | 193.0 s | 24.7 s | 208/208 | 24,665 | 1.273 px |
+| COLMAP ALIKED + Brute-force + Incremental | 243.0 s¹ | 9.7 s | 88.2 s | 208/208 | 25,634 | 1.112 px |
+
+¹ ALIKED 4096-feature benchmark の共有 extraction。通常 workflow は約 1 fps のため
+image 数はこの 104-frame benchmark より少ない。
+
+最終既定 UI test は 37 rig frames / 74 images を全登録し、5,761 points、mean/median/P95
+reprojection error = 0.872 / 0.781 / 1.782 px、gravity residual median/P90 =
+1.599° / 3.537°だった。
+
+Pinhole fallback は 12 時点 × 12 virtual cameras = 144/144 images を登録し、1,667 points、
+mean reprojection 1.085 px、gravity residual 1.910°、全 pipeline 77.5s。6 時点の極端に疎な
+入力は 0 points になったため、現在は quality gate が camera-only reconstruction の export を
+拒否する。
+
+旧処理が約 45 分かかった主因は次の 2 点だった。
+
+1. Python LightGlue が 812 pairs に約 26 分 44 秒を使用。
+2. Frame extraction が 322 回の個別 FFmpeg seek を行い、2 秒 GOP を繰り返し decode。
+
+現在は COLMAP native matcher と stream ごとの single-pass sequential decode を使用する。
+同じ 38.17 秒素材を新規 project 作成から LFStudio export まで Playwright で操作した既定 UI
+workflow は **3.4 分**で完了し、旧約 44.8 分から約 13.2 倍高速化した。内訳は
+frame extraction 90.8s、SAM3 52.6s、SIFT 12.7s、matching 16.0s、Global Mapper 5.7s、
+alignment 1.3s、export 0.3s。
+Point count だけでは default を選ばず、registration、reprojection、track length、trajectory、
+最終 LFStudio validation quality を合わせて評価する。
+
+## Reconstruction mode
+
+### Native fisheye
+
+INSV の前後画像をそのまま `OPENCV_FISHEYE` camera として使う。Front を rig reference、
+Back を 180° rotation + `offset_v3` baseline として固定する。Pinhole reprojection による
+情報損失がなく、2 lens に視覚 overlap がなくても同一 frame rig として 1 model に統合する。
+
+### Pinhole rig
+
+Dual fisheye または ERP を 6-view cubemap に変換する fallback。既知 intrinsics と rig
+extrinsics を固定できる。LFStudio の IGS+ を使いたい場合や、downstream が fisheye camera
+を扱えない場合に選ぶ。
+
+### Equirectangular
+
+COLMAP 4.1 の camera model ID 17 を使い、ERP を球面 camera のまま解く。LFStudio training
+では GUT 対応の MRNF/MCMC を使う。IGS+ は GUT と併用できないため生成候補から除外する。
+
+## Gravity alignment
+
+COLMAP world orientation には gauge freedom があるため、再構成ごとに上下が変わる。INSV の
+約 1 kHz accelerometer を各 exposure timestamp に同期し、各 front camera pose から world
+up を求める。
+
+- 全期間の device-frame acceleration は平均しない
+- Insta360 metadata の `first_frame_timestamp` / `gyro_timestamp` / `is_raw_gyro` を使用
+- encoded image と IMU の signed axis mapping は右手系 24 候補から robust 選択
+- angular residual、inlier count、time offset を `alignment.json` に記録
+- Sparse model 全体を `model_transformer` で変換し、rig/frame/points の整合を維持
+- GPS のない SfM scale は任意なので、reference-camera trajectory span を 1 model unit に正規化
+
+LFStudio/COLMAP dataset は `-Y up`、Web viewer は表示時に `diag(1,-1,-1)` を掛けた `+Y up`
+として扱う。UI の span/position の単位は meter ではなく model unit。
+
+## LFStudio への読み込み
+
+Export 完了後、LFStudio では次の folder をそのまま選ぶ。
+
+```text
+<workspace>/projects/<project-id>/export_dataset/
 ```
-sphere-reconstruct/
-├── backend/
-│   ├── pyproject.toml            # uv 管理, Python 3.12
-│   ├── src/sphere_reconstruct/
-│   │   ├── main.py               # FastAPI エントリ
-│   │   ├── api/                  # projects / jobs / events(WS) / previews / settings
-│   │   ├── domain/               # Project / Artifact / PipelineState
-│   │   ├── pipeline/             # Engine / Stage 抽象 / Manifest
-│   │   ├── stages/               # 各パイプラインステージ実装
-│   │   ├── insta360/             # INSV footer / offset_v3 / MEI キャリブ / IMU
-│   │   ├── imaging/              # sampling / projection / masks / thumbnails
-│   │   ├── sam3/                 # 手動パス方式 (HF Token 不使用)
-│   │   ├── colmap/               # CLI runner / rig / model / web preview
-│   │   └── infrastructure/       # database / processes / filesystem
-│   └── tests/
-├── frontend/
-│   ├── package.json              # pnpm, Vite, React 18, TypeScript
-│   ├── vite.config.ts
-│   └── src/
-│       ├── pages/                # Projects / Source / Frames / Masks / Reconstruction / Settings
-│       ├── features/             # 機能単位のロジック
-│       ├── viewers/              # three.js + R3F ビューア
-│       ├── components/           # 汎用 UI
-│       ├── api/                  # OpenAPI 生成型 + fetch ラッパ
-│       └── hooks/
-├── runtime/
-│   └── config.toml               # ワークスペース / 許可された FS root / SAM3 パス
-└── docs/                         # spec / phase 計画
+
+```text
+export_dataset/
+├── images/
+├── masks/                         # 生成時のみ
+├── sparse/0/
+│   ├── rigs.bin
+│   ├── cameras.bin
+│   ├── frames.bin
+│   ├── images.bin
+│   └── points3D.bin
+├── preview/
+├── train_configs/
+└── export_manifest.json
 ```
 
-## 前提ソフトウェア
+`export_dataset/dataset/` という追加階層は存在しない。`export_manifest.json` には image
+欠落、camera trajectory collapse、camera model、mask 数を含む loadability check が入る。
+Binary mask は white=valid / black=excluded で export され、推奨 config は
+`mask_mode="segment"` を設定する。
 
-外部バイナリはユーザ側で用意. 起動時とヘルスチェックで存在を検証する.
+LFStudio の generic Transform inspector が camera node position を `0,0,0` と表示しても、
+COLMAP pose が消えたことを意味しない。LFStudio は実 pose を camera の `R/T` に保持し、
+`images.bin` の camera center `C=-Rᵀt` を training と frustum 表示に使う。本アプリは
+trajectory diameter と unique camera center 数を別途表示する。
 
-- Python 3.12 (uv が管理)
-- Node.js 18+ / pnpm
-- ffmpeg (INSV デコードとフレーム抽出)
-- COLMAP CLI (`colmap` バイナリ)
-- SAM3 リポジトリ + チェックポイント (手動配置, HuggingFace 経由の自動 DL は行わない)
-- NVIDIA GPU + CUDA (SAM3 / COLMAP GPU 用)
+## インストールと起動
 
-## 使い方 (単体アプリとして起動)
+### Windows
 
-backend が frontend の build を静的配信するので, Electron 不要でブラウザで使える.
+```powershell
+.\scripts\start-windows.ps1
+```
+
+または:
+
+```cmd
+scripts\start-windows.cmd
+```
+
+COLMAP が未設定・未導入なら、公式 Windows CUDA package 4.1.1 を SHA-256 検証付きで
+`.runtime/tools/` に導入する。独立 GLOMAP package は使わない。
+
+### Linux
 
 ```bash
-# Linux/macOS. CUDA 機は SPHERE_WITH_SAM3=1 を付ける.
-SPHERE_WITH_SAM3=1 ./scripts/run.sh
-# -> http://127.0.0.1:8787 をブラウザで開く
+./scripts/start-linux.sh
+```
+
+### macOS
+
+```bash
+brew install colmap
+./scripts/start-macos.sh
+```
+
+互換入口として `scripts/run.sh` と `scripts/run.ps1` も残している。全 platform で
+`uv`、`pnpm 9.15`、FFmpeg/FFprobe、COLMAP 4.1+ を診断してから起動する。
+
+SAM3 を有効にする場合:
+
+```bash
+SPHERE_WITH_SAM3=1 ./scripts/start-linux.sh
 ```
 
 ```powershell
-# Windows
-$env:SPHERE_WITH_SAM3="1"; .\scripts\run.ps1
+$env:SPHERE_WITH_SAM3="1"; .\scripts\start-windows.ps1
 ```
 
-`runtime/config.toml` で workspace / allowed_roots / 外部バイナリ / SAM3 パスを設定する.
-CUDA マシンのセットアップは [docs/setup-gpu.md](docs/setup-gpu.md) を参照.
+起動後は `http://127.0.0.1:8787` を開く。設定メニューにも同じ environment diagnostics が
+表示される。
 
-## 開発の始め方
+## 設定
 
-Backend:
+既定設定は `runtime/config.toml`。別ファイルは `SPHERE_CONFIG` で指定する。
+
+```toml
+[workspace]
+root = "./workspace"
+
+[filesystem]
+allowed_roots = ["D:/"]
+
+[binaries]
+ffmpeg = ""
+ffprobe = ""
+colmap = ""
+vocab_tree = ""
+
+[sam3]
+repo_path = ""
+checkpoint_path = ""
+device = "cuda:0"
+dtype = "bfloat16"
+```
+
+環境変数は Pydantic の nested 形式を使える。例:
+
+```text
+SPHERE_BINARIES__COLMAP=D:/tools/colmap/bin/colmap.exe
+SPHERE_WORKSPACE__ROOT=D:/sphere-workspace
+```
+
+## Camera 拡張
+
+Camera/source 固有ロジックは `colmap/input_workspace.py` の builder に隔離されている。
+新しい camera を追加するときは、共通 `InputSpec` として次を出力する builder を登録する。
+
+- images と optional masks
+- camera model / intrinsics
+- optional rig config
+- refine policy
+- image count と dimensions
+
+Feature、Matcher、Mapper、Alignment、Export stage は source camera を再解釈しない。Fisheye
+valid circle は X5 固定値ではなく画像から初期推定し、UI で確認・保存する。
+
+## 開発とテスト
 
 ```bash
 cd backend
 uv sync --extra dev --extra imaging
-uv run uvicorn sphere_reconstruct.main:app --reload --host 127.0.0.1 --port 8787
+uv run pytest -q
 ```
-
-Frontend (Vite dev server, API は 8787 へ proxy):
 
 ```bash
 cd frontend
-pnpm install   # または npm install
-pnpm dev       # http://127.0.0.1:5173
+pnpm install --frozen-lockfile
+pnpm build
+pnpm test:e2e
 ```
 
-## フェーズ計画
+実 INSV を UI から最後まで検証する場合:
 
-| Phase | 内容 | 状態 |
-|-------|------|------|
-| 1 | FastAPI + React 骨組 / SQLite / Worker / WebSocket / Job ライフサイクル | 完了 |
-| 2 | INSV footer / offset_v3 / IMU / MEI キャリブ | 完了 (実 X5 で検証) |
-| 3 | 前後同期抽出 / **空間抽出 (2層多基準)** / pinhole rig | 完了 |
-| 4 | SAM3 手動パス / 推論 / マスク (縮小->推論->拡大) | 完了 (4070Ti で検証) |
-| 5 | COLMAP CLI / **rig 拘束** / SIFT / ALIKED / エクスポート | 完了 (実機で検証) |
-| 6 | 3D Viewer (three.js + R3F) / Frames / Masks / 点群 + カメラ | 完了 |
-| 7 | 起動スクリプト / 環境チェック / クラッシュ復旧 / 静的配信 | 完了 |
-| 8 | **Native 魚眼再構成 (前後強制 rig) / ALIKED 全解像度 + OOM 自動 CPU** | 完了 (実機で検証) |
+```bash
+PLAYWRIGHT_BASE_URL=http://127.0.0.1:8787 \
+SPHERE_E2E_SOURCE=/absolute/path/to/video.insv \
+pnpm test:e2e
+```
 
-### 再構成モード (native_fisheye / pinhole_rig)
+E2E は project 作成、source 設定、各「次の工程」、manual fisheye region、alignment、export、
+LFStudio folder contract まで browser 経由で確認する。Source file は削除しない。
 
-**Native 魚眼 (既定)**: 前後 2 レンズを OPENCV_FISHEYE の 2 センサー rig として解く.
-front を参照, back を「Y 軸 180deg (quat [0,0,1,0]) + 物理 baseline」で**強制固定**する.
-この相対姿勢は正常素材の合流結果から実測した (front->back 回転 179.87deg, 12 フレーム
-std 0.16deg). front/back は視覚的に重ならないが, 同名フレームを 1 つの rig frame とみなす
-ことで必ず 1 モデルへ合流する. baseline (offset_v3 のレンズ中心間距離 ~32mm) は metric
-スケールのアンカーにもなる. rig 外参は精修せず実測値で固定する.
+## Architecture
 
-実機比較 (暗所低解像 2880^2, 前後各 10 フレーム):
+```text
+React + TypeScript + Vite + Playwright
+                  |
+FastAPI + aiosqlite + WebSocket
+                  |
+multiprocessing spawn worker
+                  |
+FFmpeg / COLMAP / ONNX Runtime / SAM3
+```
 
-| 構成 | モデル数 | 登録 | 点数 | 再投影 |
-|------|---------|------|------|--------|
-| Native 魚眼, rig 無し | 2 (分裂) | 85% | — | — |
-| Native 魚眼, **強制 rig + SIFT** | 1 | **100% (20/20)** | 767 | 0.81px |
-| Native 魚眼, **強制 rig + ALIKED** | 1 | **100% (20/20)** | **3521** | 1.19px |
-
-強制 rig で前後分裂が解消し 100% 合流する. 暗所では ALIKED が点数で圧倒 (4.6x), 精度は
-SIFT が上. Pinhole rig (fallback) は正常素材 6 フレームで 72/72 (100%), 0.81px.
-
-**pinhole rig 拘束の効果 (参考)**: 6-view cubemap = 12 仮想カメラの既知相対姿勢を
-COLMAP に与えることで, 登録率が 16/96 → **96/96 (100%)**, 平均再投影誤差 0.64px.
-offset_v3 を一切精修しない剛性 rig でも 144/144 (100%), 0.94px の亜画素精度が出るため,
-offset_v3 が幾何的に正確であることが裏付けられる.
-
-**空間抽出 (2層多基準)**: 固定時間間隔ではなく,
-- 快速層 (安価): 時間 + Laplacian ブレ + 過曝/欠曝 + IMU 回転差
-- 精確層 (高価): SIFT 特徴数 + 光流中央値 + 前選択フレームからの運動量
-の 2 段で候補を絞り, 「視覚/運動の変化量」で等間隔に高品質フレームを選ぶ.
-`selection_mode = interval | sharpness | spatial` で切替.
-
-**特徴 backend (SIFT vs ALIKED+LightGlue)**: reconstruct の `feature_backend` で選ぶ.
-この COLMAP ビルドは SIFT のみ (deep features 非対応) なので, ALIKED は外部 onnxruntime で
-抽出/マッチして COLMAP DB に書き込む (database_creator -> keypoints -> LightGlue ->
-matches_importer). 魚眼は縮小すると角分解能が落ちるため ALIKED は**全解像度**で抽出し,
-`extraction_device = auto` は空き VRAM から GPU/CPU を選び, 実行時 OOM も CPU へ
-フォールバックする (8K の 3840^2 は GPU では OOM するため CPU 抽出になる). 通常素材では
-SIFT の方が高精度, 弱テクスチャ/暗所では ALIKED が救済する. モデルは SAM3 同様 config
-パス + `scripts/fetch_aliked_models.py` で取得 (git には入れない).
-
-今後: 物理レンズ姿勢からの Derived Pinhole 生成 (訓練出力用, 2 度目の COLMAP を
-回さない), COLMAP loop closure (faiss 形式 vocab tree), PB (`.insv.pb`) 完全パーサ.
+FastAPI process は Torch/CUDA を import しない。重い native runtime は worker subprocess に
+隔離され、停止時は process tree ごと終了する。Stage output は一時 directory に書き、成功後
+にのみ atomic replace する。Windows で native library/Defender が終了直後に directory handle
+を保持する場合に限り、`PermissionError` を最大 6 秒再試行する。
 
 ## ライセンス
 
-未確定. コミット前に決定する.
+ライセンスは未確定。外部公開前に決定する。
 
-## 謝辞
+## 参考・旧プラグイン
 
-- Insta360 X5 INSV 構造の逆解析については [insv-stitch](https://github.com/BenjaminHenriksson/insv-stitch) の PIPELINE.md および FINDINGS.md を参照 (実装は独立に行っている).
-- パイプライン全体像は旧 [lichtfeld-360-plugin](https://github.com/alexmgee/lichtfeld-360-plugin) から学んだが, 実装コードは流用していない.
+この実装は独立実装であり、旧 plugin の GPL code はコピーしていない。調査・UX 比較の参考を
+文書末尾にまとめる。
+
+- [MrNeRF/LichtFeld-Studio](https://github.com/MrNeRF/LichtFeld-Studio): dataset loader、camera model、GUT、mask contract
+- [colmap/colmap](https://github.com/colmap/colmap): COLMAP 4.1、Global Mapper、ALIKED、rig、EQUIRECTANGULAR
+- [AdrianEddy/telemetry-parser](https://github.com/AdrianEddy/telemetry-parser): Insta360 metadata、raw IMU、timestamp normalization
+- [gyroflow/gyroflow](https://github.com/gyroflow/gyroflow): IMU orientation semantics
+- [alexmgee/lichtfeld-360-plugin](https://github.com/alexmgee/lichtfeld-360-plugin): 旧 UI/workflow の比較対象（GPL-3.0-or-later）
+- [BenjaminHenriksson/insv-stitch](https://github.com/BenjaminHenriksson/insv-stitch): INSV container 調査の参考

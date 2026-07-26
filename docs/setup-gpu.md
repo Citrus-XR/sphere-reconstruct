@@ -1,123 +1,166 @@
-# GPU マシンのセットアップ (SAM3 / COLMAP)
+# GPU / native dependency setup
 
-CUDA GPU を持つマシンで SAM3 推論と COLMAP を動かすための手順. 実機 (Windows 10,
-RTX 4070 Ti, CUDA 12.x) で検証した内容をまとめる.
+Windows 11 + RTX 4070 Ti、Linux NVIDIA、macOS CPU/Metal 周辺で必要になる runtime をまとめる。
+通常は platform 別 start script を使い、手作業の前に doctor の結果を確認する。
 
-## 1. uv の導入
+```text
+GET /api/system/doctor
+cd backend && uv run sphere-doctor
+```
+
+## Windows
 
 ```powershell
-powershell -ExecutionPolicy Bypass -Command "irm https://astral.sh/uv/install.ps1 | iex"
+.\scripts\start-windows.ps1
 ```
 
-インストール先は `%USERPROFILE%\.local\bin\uv.exe`.
+この script は次を順に行う。
 
-## 2. リポジトリ取得と依存同期
+1. pnpm frontend install/build
+2. uv backend sync
+3. COLMAP が無ければ公式 4.1.1 CUDA zip を取得
+4. SHA-256 を検証して `.runtime/tools/` へ atomic install
+5. FFmpeg、COLMAP capability、workspace、SAM3、CUDA runtime を診断
+6. FastAPI を起動
 
-```
-cd backend
-uv sync --extra sam3 --extra imaging
-```
+自動 COLMAP install を禁止する場合:
 
-`--extra sam3` で torch (cu128 index) + SAM3 実行時依存が入る. CUDA が無いマシンでは
-このオプションを付けない (base sync では torch は入らない).
-
-## 3. SAM3 モデルの配置 (手動)
-
-HuggingFace token 経由の自動 DL は行わない. 以下を手動配置する:
-
-- `sam3-main/`  … SAM3 の Python パッケージ (`sam3/` サブフォルダを含む)
-- `sam3.pt`     … チェックポイント (約 3.4 GB)
-
-`runtime/config.toml` (または `SPHERE_CONFIG` で差す別ファイル) に絶対パスを書く:
-
-```toml
-[sam3]
-repo_path = "D:/path/to/sam3-main"
-checkpoint_path = "D:/path/to/sam3.pt"
-device = "cuda:0"
-dtype = "bfloat16"
+```powershell
+$env:SPHERE_SKIP_AUTO_INSTALL_COLMAP="1"
+.\scripts\start-windows.ps1
 ```
 
-### SAM3 の依存について
+CPU package を明示導入する場合:
 
-SAM3 の `pyproject.toml` が宣言する依存は不完全で, `model_builder` が tracker /
-train パスを無条件 import するため, 画像推論だけでも以下が追加で必要:
-
-```
-einops, decord, pandas, scipy, scikit-image, scikit-learn, pycocotools,
-torchmetrics, submitit, matplotlib, psutil, omegaconf, hydra-core, open-clip-torch
+```powershell
+backend\.venv\Scripts\python.exe scripts\install_colmap.py --variant cpu
 ```
 
-Windows では triton の代わりに `triton-windows` を使う. これらは `--extra sam3`
-に含めてある.
+独立した `glomap.exe` は導入しない。GLOMAP は COLMAP 4.1 の `global_mapper` に統合済み。
 
-### device の注意
+## COLMAP の CUDA 表示について
 
-`build_sam3_image_model` の内部 (`_setup_device_and_mode`) は `device == "cuda"` の
-完全一致でしか `model.cuda()` を呼ばない. `"cuda:0"` を渡すと重みが CPU に残り,
-入力 (cuda) と型が食い違ってエラーになる. 本実装 (`sam3/engine.py`) は cuda 系
-デバイスを `"cuda"` に正規化してこれを回避している.
+`COLMAP ... with CUDA` は SIFT/ONNX/CUDA support を示すが、Ceres bundle adjustment の
+CUDA/cuDSS support を保証しない。公式 Windows 4.1.1 CUDA package は test machine 上で
+次の警告を出し、BA を CPU へ戻した。
 
-## 4. ffmpeg / ffprobe
-
-INSV デコードとフレーム抽出に必要. static build を配置し, PATH に通すか
-`runtime/config.toml` の `[binaries]` にパスを書く.
-
-```toml
-[binaries]
-ffmpeg = "D:/path/to/ffmpeg.exe"
-ffprobe = "D:/path/to/ffprobe.exe"
+```text
+Requested to use GPU for bundle adjustment, but Ceres was compiled without CUDA support.
+Requested to use GPU for bundle adjustment, but Ceres was compiled without cuDSS support.
 ```
 
-## 5. COLMAP
+Doctor は sibling/system cuDSS を確認し、`gpu_bundle_adjustment=false` を表示する。この場合は
+UI の BA GPU を off にする。ALIKED/SIFT GPU は別機能なので引き続き利用できる。
 
-`colmap` バイナリ (CUDA ビルド推奨) を配置し `[binaries].colmap` に書く.
+## COLMAP native ALIKED
 
-## 6. ALIKED + LightGlue (任意, feature_backend="aliked")
+COLMAP 4.1.1 は次を内蔵する。
 
-SIFT が苦手な弱テクスチャ / 大視差 / 繰り返し模様のシーン向けの学習特徴. この
-COLMAP ビルドが SIFT のみの場合でも, 外部 onnxruntime で抽出/マッチして COLMAP DB に
-書き込む方式で使える.
+- `ALIKED_N16ROT`
+- `ALIKED_N32`
+- `ALIKED_BRUTEFORCE`
+- `ALIKED_LIGHTGLUE`
 
-```
-uv sync --extra aliked            # onnxruntime-gpu
-python scripts/fetch_aliked_models.py --out D:/Models/aliked   # モデル取得
-```
-
-`runtime/config.toml`:
+Model option の既定値には URL、filename、SHA-256 が含まれ、未配置なら COLMAP が download・
+verify する。既存 model を config で指定してもよい。
 
 ```toml
 [aliked]
-extractor_path = "D:/Models/aliked/aliked-n16.onnx"
-matcher_path   = "D:/Models/aliked/aliked_lightglue.onnx"
-device = "cuda"            # LightGlue マッチングの provider
-extraction_device = "auto" # ALIKED 抽出: auto | cuda | cpu
+extractor_path = "D:/models/aliked-n16rot.onnx"
+matcher_path = "D:/models/aliked-lightglue.onnx"
 ```
 
-reconstruct ステージのパラメータ `feature_backend = "aliked"` で有効化する. 空 or
-"sift" なら COLMAP 内蔵 SIFT を使う.
+Windows の COLMAP ONNX CUDA provider は `cudnn64_9.dll` を必要とする。SAM3 用 Torch が
+同じ backend venv にある場合、runner は `site-packages/torch/lib` を subprocess `PATH` に
+追加する。Doctor の `cuda_runtime.cudnn` で確認できる。
 
-### 抽出デバイスと VRAM (魚眼で重要)
+cuDNN が無い環境では feature GPU を off にするか、対応 runtime を導入する。失敗を黙って
+CPU に隠す処理は行わない。
 
-魚眼は 180deg+ を円内へ圧縮するため角分解能が元々低く, 縮小抽出すると暗所/弱テク
-スチャで特徴が消える. よって ALIKED は**全解像度**で抽出する. ただし ALIKED は稠密な
-特徴マップを作るため, 8K 級 (3840^2) を GPU で流すと VRAM を使い切って OOM する
-(4070Ti 12GB で 2880^2 でも OOM を確認).
+## SAM3
 
-`extraction_device`:
-- `auto` (既定): 空き VRAM と画素数から GPU/CPU を選び, 実行時に OOM が出たら CPU へ
-  フォールバックして以降も CPU を使う. LightGlue マッチングは疎な keypoint のみで
-  軽いため `device` (既定 GPU) のまま.
-- `cuda`: 常に GPU. 小さい画像で速度を優先する場合のみ.
-- `cpu`: 常に CPU. 全解像度でも OOM しないが低速.
+SAM3 は任意。利用時だけ extra を同期する。
 
-reconstruct の `extraction_device` パラメータで stage ごとに上書きできる (UI の
-「ALIKED 抽出」セレクタ). UI は GPU 固定 + 大画像で OOM リスクを警告する.
-
-## 動作確認
-
-```
-uv run python -c "from sphere_reconstruct.sam3.settings import quick_check; print(quick_check())"
+```powershell
+$env:SPHERE_WITH_SAM3="1"
+.\scripts\start-windows.ps1
 ```
 
-`ok=True` なら SAM3 パスは正しい. 実際の推論は Worker (または直接 Engine) から行う.
+```bash
+SPHERE_WITH_SAM3=1 ./scripts/start-linux.sh
+```
+
+現状は repository と checkpoint を config で指定する。
+
+```toml
+[sam3]
+repo_path = "D:/models/sam3-main"
+checkpoint_path = "D:/models/sam3.pt"
+device = "cuda:0"
+dtype = "bfloat16"
+max_inference_size = 1024
+```
+
+Runtime は worker process 内でのみ import する。`cuda:0` は SAM3 builder の制約に合わせて
+内部で `cuda` へ正規化する。Inference 前の既定長辺は 1024 px。
+
+## FFmpeg
+
+INSV の 2 本の HEVC stream を decode できる build が必要。
+
+```toml
+[binaries]
+ffmpeg = "D:/tools/ffmpeg/bin/ffmpeg.exe"
+ffprobe = "D:/tools/ffmpeg/bin/ffprobe.exe"
+```
+
+Frame extraction は source frame index を select filter に渡し、stream ごとに 1 回だけ順次
+decode する。以前の 1 frame 1 process / random seek 方式は使わない。
+
+## Linux
+
+Distribution package または source build の COLMAP 4.1+ と FFmpeg を用意する。
+
+```bash
+./scripts/start-linux.sh
+```
+
+ALIKED GPU を使う場合は COLMAP の ONNX Runtime CUDA provider と cuDNN が必要。Doctor が
+capability と runtime path を表示する。
+
+## macOS
+
+```bash
+brew install colmap ffmpeg
+./scripts/start-macos.sh
+```
+
+macOS では NVIDIA CUDA を前提にしない。SIFT/CPU ALIKED と CPU Mapper を利用する。
+
+## Service deployment
+
+Remote machine で service manager を使う場合も、起動 command の前に `SPHERE_CONFIG` を
+設定する。
+
+```text
+SPHERE_CONFIG=D:/path/to/config.remote.toml
+```
+
+Backend code を更新した後は service を再起動する。Frontend dist は static file なので、
+copy 後に browser reload すればよい。Running worker を止めるときは command line が
+`sphere_reconstruct` / `uvicorn` に一致する PID だけを対象にし、machine 上の全 Python を
+一括停止しない。
+
+## 検証
+
+```bash
+cd backend
+uv run pytest -q
+uv run sphere-doctor
+```
+
+```bash
+cd frontend
+pnpm build
+PLAYWRIGHT_BASE_URL=http://127.0.0.1:8787 pnpm test:e2e
+```
