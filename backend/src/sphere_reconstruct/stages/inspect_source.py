@@ -15,7 +15,7 @@ from pathlib import Path
 
 from ..domain.artifacts import FileRef, StageManifest
 from ..domain.pipeline_state import StageName
-from ..infrastructure.filesystem import sha256_file
+from ..infrastructure.filesystem import sha256_bytes, sha256_file
 from ..insta360 import calibration as calib
 from ..insta360 import imu as insv_imu
 from ..insta360 import insv
@@ -36,6 +36,20 @@ class InspectSource(Stage):
         p = ctx.source_path
         if not p.exists():
             raise FileNotFoundError(f"source not found: {p}")
+        if p.is_dir():
+            entries = [
+                (item.name, item.stat().st_size, item.stat().st_mtime_ns)
+                for item in sorted(p.iterdir())
+                if item.is_file() and item.suffix.lower() in {".jpg", ".jpeg", ".png"}
+            ]
+            payload = json.dumps(entries, ensure_ascii=False, separators=(",", ":")).encode()
+            return [
+                FileRef(
+                    path=str(p),
+                    size=sum(entry[1] for entry in entries),
+                    sha256=sha256_bytes(payload),
+                )
+            ]
         return [
             FileRef(
                 path=str(p),

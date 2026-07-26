@@ -89,6 +89,10 @@ mean reprojection 1.085 px、gravity residual 1.910°、全 pipeline 77.5s。6 �
 入力は 0 points になったため、現在は quality gate が camera-only reconstruction の export を
 拒否する。
 
+Equirectangular 分支は平移視差を持つ合成 ERP 12 枚で 12/12 images、7,720 points、
+mean/median/P95 reprojection = 0.386 / 0.304 / 0.989 px。Export は GUT 対応の MRNF/MCMC
+だけを生成した。実写 ERP sequence は未入手のため、実素材の追加検証は別途必要。
+
 旧処理が約 45 分かかった主因は次の 2 点だった。
 
 1. Python LightGlue が 812 pairs に約 26 分 44 秒を使用。
