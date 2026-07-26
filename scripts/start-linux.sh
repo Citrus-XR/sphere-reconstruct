@@ -13,7 +13,7 @@ pnpm --dir frontend install --frozen-lockfile
 pnpm --dir frontend build
 
 echo "[2/4] Backend 依存関係"
-backend_extras=(--extra imaging --extra aliked --extra denoise)
+backend_extras=(--extra imaging --extra aliked)
 if [[ "${SPHERE_WITH_SAM3:-0}" == "1" ]]; then backend_extras+=(--extra sam3); fi
 (cd backend && uv sync "${backend_extras[@]}")
 

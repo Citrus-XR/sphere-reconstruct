@@ -1,19 +1,17 @@
 """export_dataset ステージ.
 
-reconstruct の結果を 2 つの形で書き出す:
+aligned reconstruction を LFStudio が直接選択できる dataset root として書き出す:
 
-1. Web ビューア用プレビュー:
-     <project>/preview/reconstruction.json
-     <project>/preview/points.bin
-
-2. LichtFeld Studio が直接選択できる COLMAP データセット:
-     <project>/export_dataset/images/...
-     <project>/export_dataset/masks/...      (任意)
-     <project>/export_dataset/sparse/0/*
+    <project>/export_dataset/images/...
+    <project>/export_dataset/masks/...      (任意)
+    <project>/export_dataset/sparse/0/*
+    <project>/export_dataset/preview/*
+    <project>/export_dataset/train_configs/* (任意)
 
 パラメータ:
   max_preview_points: int   プレビュー点群の上限 (default 500000)
   include_dataset: bool     標準データセットも書き出す (default True)
+  emit_train_configs: bool  LFStudio 推奨設定を書き出す (default True)
 """
 
 from __future__ import annotations
@@ -37,7 +35,7 @@ from ..pipeline.stage import Stage, StageContext, new_manifest
 @register
 class ExportDataset(Stage):
     name = StageName.EXPORT_DATASET
-    impl_version = "0.6"
+    impl_version = "0.7"
 
     def collect_inputs(self, ctx: StageContext) -> list[FileRef]:
         candidates = [
@@ -50,8 +48,6 @@ class ExportDataset(Stage):
             ctx.project_dir / "align_reconstruction" / "sparse" / "0" / "images.bin",
             ctx.project_dir / "align_reconstruction" / "sparse" / "0" / "points3D.bin",
         ]
-        if ctx.params["image_source"] == "denoised":
-            candidates.append(ctx.project_dir / "manifests" / "denoise_frames.json")
         return [
             FileRef(
                 path=str(path.relative_to(ctx.project_dir)),
@@ -63,14 +59,10 @@ class ExportDataset(Stage):
         ]
 
     def normalize_params(self, raw: dict) -> dict:
-        image_source = str(raw.get("image_source", "original")).lower()
-        if image_source not in {"original", "denoised"}:
-            raise ValueError(f"未対応の export 画像 source: {image_source}")
         return {
             "max_preview_points": int(raw.get("max_preview_points", 500_000)),
             "include_dataset": bool(raw.get("include_dataset", True)),
             "emit_train_configs": bool(raw.get("emit_train_configs", True)),
-            "image_source": image_source,
         }
 
     def execute(self, ctx: StageContext) -> StageManifest:
@@ -85,9 +77,6 @@ class ExportDataset(Stage):
         recon = colmap_model.read_model(model_dir)
         out = ctx.stage_out_dir
         outputs: list[FileRef] = []
-        training_output_dir = ctx.project_dir / "training_outputs"
-        training_output_dir.mkdir(parents=True, exist_ok=True)
-
         train_profile_data = train_profile.compute_profile(recon)
 
         # 1) alignment stage が作った viewer preview を同梱する.
@@ -123,7 +112,7 @@ class ExportDataset(Stage):
                 if source.is_file() and source.suffix.lower() in {".bin", ".txt", ".ini"}:
                     shutil.copy2(source, ds_sparse / source.name)
             # 画像名は images.bin の相対 path をそのまま保つ.
-            recon_images = self._training_images(ctx)
+            recon_images = ctx.project_dir / "extract_features" / "images"
             if recon_images.exists():
                 image_extensions = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
                 for img_file in recon_images.rglob("*"):
@@ -148,8 +137,7 @@ class ExportDataset(Stage):
                 "points3D": len(recon.points3D),
                 "masks": validation["matched_mask_count"],
                 "mask_files_copied": mask_files_copied,
-                "image_source": ctx.params["image_source"],
-                "training_output_dir": str(training_output_dir),
+                "image_source": "original",
                 "validation": validation,
             }
             export_manifest_path = ds / "export_manifest.json"
@@ -176,33 +164,16 @@ class ExportDataset(Stage):
             validation = None
 
         # 3) LichtFeld-Studio 推奨 config (任意).
+        cfg_info: dict | None = None
         if ctx.params["emit_train_configs"]:
             configs, cfg_info = lichtfeld_config.build_configs(
                 train_profile_data,
                 has_masks=bool(validation and validation["matched_mask_count"] > 0),
             )
-            final_dataset_dir = ctx.project_dir / StageName.EXPORT_DATASET.value
-            run_output_template = training_output_dir / "<run-name>"
-            config_path = final_dataset_dir / "train_configs" / "train_config.mrnf.json"
-            cfg_info["training_output_dir"] = str(training_output_dir)
-            cfg_info["training_output_template"] = str(run_output_template)
             cfg_info["usage"] = (
-                f'LichtFeld-Studio --config "{config_path}" '
-                f'--data-path "{final_dataset_dir}" --output-path "{run_output_template}"'
+                "LichtFeld-Studio --config train_configs/train_config.mrnf.json "
+                "--data-path <export_dataset>"
             )
-            cfg_info["command_template"] = {
-                "executable": "LichtFeld-Studio",
-                "arguments": [
-                    "--config",
-                    str(config_path),
-                    "--data-path",
-                    str(final_dataset_dir),
-                    "--output-path",
-                    str(run_output_template),
-                ],
-                "run_name_placeholder": "<run-name>",
-                "requires_unique_run_name": True,
-            }
             cfg_info["gui_integration"] = {
                 "train_configs_auto_applied": False,
                 "warnings": [
@@ -252,25 +223,15 @@ class ExportDataset(Stage):
             "preview_points": preview_points,
             "total_points": len(recon.points3D),
             **recon.summary(),
+            "camera_models": sorted({camera.model for camera in recon.cameras.values()}),
+            "mask_files": validation["matched_mask_count"] if validation else 0,
+            "validation": validation,
+            "training_profile": train_profile_data,
+            "training_recommendation": cfg_info,
+            "lfstudio_training_metrics": "external",
         }
         ctx.progress.info("export_dataset done", progress=1.0, key="log.export_done")
         return manifest
-
-    @staticmethod
-    def _training_images(ctx: StageContext) -> Path:
-        if ctx.params["image_source"] == "original":
-            return ctx.project_dir / "extract_features" / "images"
-        denoise_manifest = ctx.project_dir / "denoise_frames" / "manifest_denoise.json"
-        if not denoise_manifest.is_file():
-            raise RuntimeError("ノイズ除去画像の export より先に denoise_frames を実行してください")
-        data = json.loads(denoise_manifest.read_text(encoding="utf-8"))
-        if data.get("method") == "off":
-            raise RuntimeError("denoise_frames が off のためノイズ除去画像を export できません")
-        images = ctx.project_dir / "denoise_frames" / "images"
-        if not images.is_dir():
-            raise RuntimeError("denoise_frames の出力画像がありません")
-        return images
-
 
 def _link_or_copy(src: Path, dst: Path) -> None:
     if dst.exists():

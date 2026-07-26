@@ -26,7 +26,7 @@ from .colmap_progress import global_mapper_progress, hidden_log, mapper_progress
 @register
 class Reconstruct(Stage):
     name = StageName.RECONSTRUCT
-    impl_version = "1.0"
+    impl_version = "1.1"
 
     def normalize_params(self, raw: dict) -> dict:
         mapper = str(raw.get("mapper", "global")).lower()
@@ -136,6 +136,11 @@ class Reconstruct(Stage):
         model_dir, summary = _select_largest_model(sparse_dir)
         summary["registered_ratio"] = summary["num_images"] / max(1, spec.image_count)
         summary["mapper"] = mapper
+        summary["input_images"] = spec.image_count
+        summary["view_graph_calibration"] = bool(
+            mapper == "global" and ctx.params["view_graph_calibration"]
+        )
+        summary["ba_gpu_enabled"] = ctx.params["ba_use_gpu"]
         _validate_summary(summary, ctx.params)
         summary_path = ctx.stage_out_dir / "model_summary.json"
         summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")

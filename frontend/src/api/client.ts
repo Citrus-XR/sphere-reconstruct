@@ -10,7 +10,6 @@ export type PipelineState =
   | 'matched'
   | 'reconstructed'
   | 'aligned'
-  | 'denoised'
   | 'exported'
 
 export type SourceKind = 'insv' | 'erp_video' | 'erp_images'
@@ -147,7 +146,6 @@ export const api = {
     req<ReconstructionData>(`/api/projects/${id}/reconstruction`),
   getFrames: (id: string) => req<FramesManifest>(`/api/projects/${id}/frames`),
   getMasks: (id: string) => req<MasksManifest>(`/api/projects/${id}/masks`),
-  getDenoise: (id: string) => req<DenoiseManifest>(`/api/projects/${id}/denoise`),
   getExportInfo: (id: string) => req<ExportInfo>(`/api/projects/${id}/export-info`),
   putUiState: (id: string, ui: Record<string, unknown>) =>
     req<Project>(`/api/projects/${id}/ui-state`, {
@@ -296,25 +294,9 @@ export interface MasksManifest {
   frames: MaskFrameRecord[]
 }
 
-export interface DenoiseFrameRecord {
-  index: number
-  lens0?: string
-  lens1?: string
-  erp?: string
-}
-export interface DenoiseManifest {
-  method: 'off' | 'fastdvdnet' | 'ffmpeg_adaptive'
-  device: string | null
-  frames: DenoiseFrameRecord[]
-}
-
 // export_dataset の出力ディレクトリ (絶対パス).
 export interface ExportInfo {
   dir: string
-  dataset_dir: string | null
-  preview_dir: string | null
-  train_configs_dir: string | null
-  training_output_dir: string
   gui_integration: {
     train_configs_auto_applied: boolean
     warnings: string[]
@@ -325,12 +307,6 @@ export interface ExportInfo {
       mask_mode: string
     }
   } | null
-  command_template: {
-    executable: string
-    arguments: string[]
-    run_name_placeholder: string
-    requires_unique_run_name: boolean
-  } | null
 }
 
 // 抽出フレーム (fisheye) の URL.
@@ -339,8 +315,6 @@ export const frameImageUrl = (id: string, index: number, lens: number) =>
 // native fisheye の生成マスク PNG の URL.
 export const fisheyeMaskUrl = (id: string, index: number, lens: number) =>
   `/api/projects/${id}/fisheye-mask/${index}?lens=${lens}`
-export const denoisedImageUrl = (id: string, index: number, lens: number) =>
-  `/api/projects/${id}/denoise/${index}/image?lens=${lens}`
 export const pinholeImageUrl = (id: string, index: number, view: string, lens: number, mask = false) =>
   `/api/projects/${id}/pinhole/${index}/${encodeURIComponent(view)}?lens=${lens}${mask ? '&mask=true' : ''}`
 

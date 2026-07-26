@@ -10,12 +10,9 @@ import subprocess
 import sys
 import tempfile
 from ctypes.util import find_library
-from importlib.util import find_spec
 from pathlib import Path
 
 from .colmap.runner import resolve_colmap_bin
-from .denoise.weights import MODEL_SHA256, default_model_path
-from .infrastructure.filesystem import sha256_file
 from .sam3.settings import quick_check as sam3_quick_check
 from .settings import get_settings, workspace_root
 
@@ -29,7 +26,6 @@ def diagnose() -> dict:
         "ffprobe": _binary_check(settings.binaries.ffprobe, "ffprobe", ["-version"]),
         "colmap": _colmap_check(),
         "sam3": _sam3_check(),
-        "denoise": _denoise_check(),
         "cuda_runtime": _cuda_runtime_check(),
     }
     required = ("workspace", "filesystem_roots", "ffmpeg", "ffprobe", "colmap")
@@ -124,41 +120,6 @@ def _sam3_check() -> dict:
         "optional": True,
         "message": check.message,
         "checkpoint_size": check.checkpoint_size,
-    }
-
-
-def _denoise_check() -> dict:
-    settings = get_settings()
-    configured = settings.denoise.model_path
-    model_path = Path(configured).expanduser().resolve() if configured else default_model_path()
-    model_cached = model_path.is_file()
-    model_verified = model_cached and sha256_file(model_path) == MODEL_SHA256
-    ffmpeg_binary = settings.binaries.ffmpeg or shutil.which("ffmpeg")
-    filters = _run([ffmpeg_binary, "-hide_banner", "-filters"]) if ffmpeg_binary else None
-    hwaccels = _run([ffmpeg_binary, "-hide_banner", "-hwaccels"]) if ffmpeg_binary else None
-    adaptive_available = bool(filters and "atadenoise" in filters["output"])
-    cuda_decode_candidate = bool(hwaccels and "cuda" in hwaccels["output"].lower())
-    torch_available = find_spec("torch") is not None
-    fastdvdnet_ready = torch_available and (not configured or model_verified)
-    if configured and not model_verified:
-        message = "設定された FastDVDnet model が無いか SHA-256 が一致しません"
-    elif fastdvdnet_ready or adaptive_available:
-        message = "ok"
-    else:
-        message = "時系列ノイズ除去 runtime がありません"
-    return {
-        "ok": fastdvdnet_ready or adaptive_available,
-        "optional": True,
-        "torch": torch_available,
-        "fastdvdnet_ready": fastdvdnet_ready,
-        "ffmpeg_adaptive": adaptive_available,
-        "hardware_decode_requested": settings.denoise.hardware_decode,
-        "cuda_decode_candidate": cuda_decode_candidate,
-        "model_path": str(model_path),
-        "model_cached": model_cached,
-        "model_verified": model_verified,
-        "auto_download": not bool(configured),
-        "message": message,
     }
 
 

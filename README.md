@@ -1,27 +1,27 @@
 # sphere-reconstruct
 
-Insta360 dual-fisheye INSV、equirectangular 動画、ERP 画像列から COLMAP sparse model と
-LichtFeld Studio 用 dataset を生成するローカル Web application。
+Insta360 dual-fisheye INSV、equirectangular 動画、ERP 画像列から、COLMAP sparse model と
+LichtFeld Studio が直接読み込める dataset を生成するローカル Web application。
 
-画像抽出、mask、feature、matching、Mapper、gravity alignment、training image denoise、export
-を独立 stage として扱う。各 stage は個別に生成・クリアでき、parameter や入力 fingerprint が
-変わった consumer だけを無効化する。
+Source 検査、frame 抽出、再投影、mask、feature、matching、Mapper、重力整列、export を独立
+stage として扱う。各 stage は個別に生成・消去でき、入力または parameter が変わった consumer
+だけを artifact DAG に従って無効化する。
 
-## 機能
+## 主な機能
 
 - 生の前後魚眼を `OPENCV_FISHEYE` 2-camera rig として解く Native fisheye mode
 - Dual fisheye / ERP を cubemap へ変換する Pinhole rig fallback
 - COLMAP 4.1 `EQUIRECTANGULAR` camera による ERP direct reconstruction
-- Native SIFT / ALIKED N16ROT / ALIKED N32
+- COLMAP native SIFT / ALIKED N16ROT / ALIKED N32
 - Brute-force / LightGlue と Sequential / Exhaustive / Vocab-tree の独立選択
-- COLMAP Global Mapper / Incremental Mapper
+- COLMAP Global Mapper / Incremental Mapper、view-graph calibration、CPU/GPU BA
 - SAM3 dynamic mask と画像から推定する fisheye valid circle
-- Exposure timestamp に同期した per-frame IMU gravity alignment
-- FastDVDnet 5-frame temporal denoise と FFmpeg adaptive fallback
-- LFStudio が直接開ける `export_dataset/` と安全な `training_outputs/`
+- Exposure timestamp と同期した per-frame IMU gravity alignment
+- LFStudio が直接選択できる `export_dataset/`
 - Stage cache、transitive invalidation、atomic publish、worker isolation
-- 日本語・中国語・英語 UI、dockable layout、camera/point viewer
-- Windows/Linux/macOS start script と dependency Doctor
+- 各 stage の実行統計、3D viewer、photo/camera Inspector
+- 日本語・中国語・英語 UI と dockable layout
+- Windows / Linux / macOS start script と dependency Doctor
 
 ## Quick start
 
@@ -50,13 +50,12 @@ brew install colmap ffmpeg
 ./scripts/start-macos.sh
 ```
 
-起動後は `http://127.0.0.1:8787` を開く。全 script は frontend build、uv dependency sync、
-Doctor を実行してから server を開始する。Windows で COLMAP が無ければ公式 4.1.1 package を
-固定 SHA-256 で取得する。独立 GLOMAP package は使わず、COLMAP 内蔵 `global_mapper` を使う。
-File browser の既定 root は Windows では検出した filesystem drive、Linux/macOS では user home。
-`SPHERE_FILESYSTEM__ALLOWED_ROOTS` または config で明示すればこの既定を置き換えられる。
+起動後に `http://127.0.0.1:8787` を開く。Start script は frontend build、uv dependency sync、
+Doctor の順に実行してから server を開始する。Windows で COLMAP が無い場合は公式 4.1.1
+package を固定 SHA-256 で取得する。独立した GLOMAP package は不要で、COLMAP 内蔵
+`global_mapper` を使う。
 
-SAM3 を有効にする場合:
+SAM3 を利用する場合:
 
 ```bash
 SPHERE_WITH_SAM3=1 ./scripts/start-linux.sh
@@ -66,10 +65,12 @@ SPHERE_WITH_SAM3=1 ./scripts/start-linux.sh
 $env:SPHERE_WITH_SAM3="1"; .\scripts\start-windows.ps1
 ```
 
+Platform 別の詳細は [docs/setup-gpu.md](docs/setup-gpu.md) を参照する。
+
 ## Workflow
 
-上部の「次の工程」は未生成または stale の最初の stage を 1 つだけ実行する。Fisheye region
-のような手動確認では停止する。
+上部の「次の工程」は、未生成または stale の最初の stage を 1 つ実行する。魚眼有効領域のような
+手動確認ではそこで停止する。
 
 ```text
 Source inspection
@@ -81,39 +82,49 @@ Source inspection
   -> Feature matching
   -> Sparse reconstruction
   -> Gravity alignment
-  -> Training image denoise            (optional, Native/ERP video)
   -> LFStudio export
 ```
 
-Matching を変えても frame decode や feature extraction は再実行しない。Denoise は camera solve
-後の training image だけを置き換えるため、camera pose、point cloud、gravity alignment は不変。
-Pinhole rig の denoised training views は未対応なので、その mode の export は明示的に原画を使う。
+Feature matching だけを変更しても frame decode と feature extraction は再実行しない。Mapper や
+BA だけを変更した場合は reconstruction 以降だけが stale になる。各 Inspector の「生成」「再生成」
+「クリア」で stage 単位に操作できる。
 
 旧 run が `Failed to parse options - SiftExtration.max_image_size` または
-`SiftExtraction.max_image_size` で停止している場合は「特徴抽出」だけをクリアして再生成する。
-COLMAP 4.1 の正しい option は `FeatureExtraction.max_image_size` で、現在の stage と regression
-test はこの namespace を使用する。Frame 抽出からやり直す必要はない。
+`SiftExtraction.max_image_size` で停止した場合は「特徴抽出」だけをクリアして再生成する。COLMAP
+4.1 の正しい option は `FeatureExtraction.max_image_size` で、実装と regression test はこの
+namespace を使用する。
 
-## 既定値
+## 推奨既定値
 
 | 項目 | 既定 |
 |---|---|
 | Frame selection | Sharpness-first、1 fps、候補 5 枚 |
 | SAM3 | 長辺 1024 px、dilation 8 px |
-| Feature | SIFT、長辺 2048 px、最大 8192 |
+| Feature | SIFT、長辺 2048 px、最大 8192 features |
 | Matcher | Brute-force、Sequential overlap 4 |
+| Pair validation | 最大 16,384 matches、最小 15 inliers、guided matching off |
 | Mapper | Global Mapper + view-graph calibration |
-| Bundle Adjustment | CPU（cuDSS capability がある場合だけ GPU を選択可能） |
-| Alignment | Exposure-synchronized IMU auto |
-| Denoise | **Off**。FastDVDnet `sigma=10` は比較・preview 用の optional stage |
+| Bundle Adjustment | CPU。Doctor が cuDSS capability を確認した場合だけ GPU を選択可能 |
+| Alignment | Exposure-synchronized IMU auto、軌跡径を 1 model unit に正規化 |
 | LFStudio | MRNF + GUT、`max_cap=1,000,000` |
 
-ALIKED + LightGlue は暗所・弱 texture の High preset として残す。通常の X5 実写では SIFT +
-Brute-force + Global Mapper が速度、registration、reprojection の Pareto front だった。
+標準と高品質 preset は、実写比較で最良だった SIFT + Brute-force を共通の基礎にする。高品質 preset
+は長辺 3072 px、最大 16,384 features、最大 32,768 matches とし、時間と memory を多く使う。
+ALIKED + LightGlue は極端に弱い texture の代替として手動選択できるが、暗所だから常に優位とは
+限らない。
 
-Bundle Adjustment（BA）は全 camera pose、intrinsics、3D point を同時に調整して reprojection
-error を最小化する最終最適化である。CPU / GPU solver は主に所要時間と memory が異なり、
-同じ目的関数を解く。Doctor が cuDSS 対応を確認できない環境では CPU が安全な既定となる。
+主な詳細 parameter の意味:
+
+- `max_image_size`: feature 抽出時の長辺上限。0 は COLMAP 既定
+- `max_num_features`: 1 image に保持する feature 上限。増やすと時間と memory も増える
+- `peak_threshold`: SIFT の低 contrast feature を除く閾値。0 は COLMAP 既定
+- `edge_threshold`: 線状 edge feature の保持を制御。0 は COLMAP 既定
+- `affine_shape + DSP`: viewpoint / scale 耐性を上げるが CPU cost が大きい
+- `max_num_matches`: 1 image pair で幾何検証する対応点上限
+- `min_num_inliers`: 幾何検証済み pair を残す最小 inlier 数
+- `guided_matching`: 初回 geometry を使う 2 回目の探索。難しい pair 向けだが低速
+- `view_graph_calibration`: Global Mapper 前に相対回転と intrinsics を調整
+- `ba_use_gpu`: 同じ BA 目的関数を CUDA/cuDSS で解く。SIFT GPU とは別 capability
 
 ## 実写 reconstruction benchmark
 
@@ -130,82 +141,44 @@ camera rig と mask で比較した。
 
 ¹ 4096-feature ALIKED extraction を共有した比較値。
 
-最終 project を同じ 104 rig frame で再実行した SIFT 結果は 208/208 image、27,244 points、
-mean/median/P95 reprojection = 0.913 / 0.846 / 1.732 px、139,839 observations。直前の ALIKED
-結果は 10,733 points、0.945 / 0.813 / 1.866 px、59,974 observations だった。Denoise artifact
-は feature branch から独立しているため、この再構成中も再生成せず保持された。
+最終 SIFT 再実行は 208/208 image、27,244 points、mean / median / P95 reprojection =
+0.913 / 0.846 / 1.732 px、139,839 observations。直前の ALIKED 結果は 10,733 points、
+0.945 / 0.813 / 1.866 px、59,974 observations だった。
 
-既定 UI E2E は 37 rig frame / 74 image を 74/74 登録し、5,761 points、mean/median/P95
-reprojection = 0.872 / 0.781 / 1.782 px、gravity residual median/P90 = 1.599° /
-3.537°。Project 作成から LFStudio export まで 3.4 分で、旧約 44.8 分から約 13.2 倍高速化
-した。主因は native matcher と、322 回の random seek を置き換えた stream 単位の sequential
-decode である。
+UI E2E の 37 rig frame / 74 image は 74/74 登録、5,761 points、mean / median / P95 =
+0.872 / 0.781 / 1.782 px、gravity residual median / P90 = 1.599° / 3.537°。Project 作成から
+export まで 3.4 分で、旧約 44.8 分から約 13.2 倍高速化した。主因は native matcher と、322 回の
+random seek を stream 単位の sequential decode に置き換えたことにある。
 
 Pinhole fallback は 12 時点 × 12 virtual camera = 144/144 image、1,667 points、mean
-reprojection 1.085 px、gravity residual 1.910°。Camera-only model を成功扱いしない quality
-gate を持つ。合成 ERP 12 枚は 12/12 image、7,720 points、mean/median/P95 = 0.386 /
-0.304 / 0.989 px。実写 ERP sequence は未検証。
+reprojection 1.085 px。合成 ERP 12 枚は 12/12 image、7,720 points、mean / median / P95 =
+0.386 / 0.304 / 0.989 px。Camera-only model は quality gate で失敗にする。
 
-## LFStudio training benchmark
+## LFStudio training benchmark とノイズ除去の結論
 
-同じ 208 image を LFStudio v0.5.3、MRNF、GUT、binary segment mask、3840² で確認した。
+同じ 208 image を LFStudio v0.5.3、MRNF、GUT、binary segment mask、3840²、30,000 iteration
+で比較した。
 
-| Training image / eval target | Feature pose | Iteration | Gaussians | Eval PSNR | Eval SSIM |
-|---|---:|---:|---:|---:|---|
-| Raw / raw（旧 config） | ALIKED | 7,000 | 95,165 | 22.197 | 0.7976 |
-| Raw / raw（旧 500k resume） | ALIKED | 30,000 | **500,000** | — | — |
-| FastDVDnet / raw | ALIKED | 30,000 | 870,956 | 24.154 | 0.8043 |
-| Raw / raw | ALIKED | 30,000 | 879,324 | 24.413 | 0.8046 |
-| FastDVDnet / FastDVDnet | SIFT | 30,000 | **1,000,000** | 24.640 | **0.8470** |
-| **Raw / raw** | **SIFT** | **30,000** | **1,000,000** | **24.920** | 0.8056 |
+| Training image / eval target | Feature pose | Gaussians | Eval PSNR | Eval SSIM |
+|---|---:|---:|---:|---:|
+| FastDVDnet / raw | ALIKED | 870,956 | 24.154 | 0.8043 |
+| Raw / raw | ALIKED | 879,324 | 24.413 | 0.8046 |
+| FastDVDnet / FastDVDnet | SIFT | 1,000,000 | 24.640 | **0.8470** |
+| **Raw / raw** | **SIFT** | **1,000,000** | **24.920** | 0.8056 |
 
-既存 GUI checkpoint も 7,000 iteration / 88,632 Gaussians で止まっていた。ぼけの第一原因は
-30,000 iteration の約 1/4 しか終わっていないこと。さらに完全 run は 500k cap に早期到達し、
-残り約 17k iteration で topology を増やせなかった。この 2 原因を分離して確認したため、学習率
-は変えず、公式 eval preset と同じ 1M だけを新しい下限にした。LFStudio runtime default の 5M
-は eager VRAM allocation のため 12GB GPU の未検証既定にはしない。
+Saved render を同じ clean target に対して再計算した masked PSNR は、ALIKED pose で
+FastDVDnet training 24.223 / raw training 24.489、SIFT pose で FastDVDnet training
+**24.478** / raw training **25.028**。今回の夜間室内素材では、時間方向ノイズ除去により平面
+noise は減った一方、multi-view reconstruction に必要な細部も失われ、原画より約 0.55 dB 悪化した。
 
-Saved render を同一の denoised target に対して再計算した masked PSNR は、ALIKED で
-FastDVDnet training 24.223 / raw training 24.489、SIFT で FastDVDnet training 24.478 / raw
-training **25.028**。従って暗所素材でも training source の既定は raw とする。FastDVDnet は
-平面 noise を減らすが、今回の multi-view optimization では細部損失を上回る改善が無かった。
-Offline 値は saved 8-bit render による同条件比較で、LFStudio 内部の float metric とは約
-0.1–0.2 dB 差がある。
+この結果を受け、training image denoise stage、FastDVDnet / FFmpeg fallback、model download、
+設定、UI、依存 package は削除した。Export は常に feature extraction と同じ原画を使用する。
+Single-view の見た目が滑らかになることは、multi-view training の最終品質向上を意味しない。
 
-MRNF の grow/prune は時刻 seed を含むため run 間に小さな揺らぎがある。各 fresh 1M / 30k run
-は約 59–69 分。7k だけで止めず、30k checkpoint / PLY を最終成果物として使う。
-
-## 暗所ノイズ除去
-
-夜間室内の X5 image は sensor/ISP/HEVC の相関ノイズを含む。Single-frame generative denoiser は
-view ごとに別の texture を生成し得るため既定にしない。FastDVDnet は source-rate の前後 2 枚
-ずつ、計 5 frame から中心 frame の noise residual を予測し、明示的な optical-flow warp や
-座標 resampling を行わない。
-
-3 時点 × 2 lens の 3840² 実写比較:
-
-| Sigma | Mean absolute change | RGB mean shift | Wall high-frequency | Table edge energy |
-|---:|---:|---:|---:|---:|
-| 5 | 1.148 / 255 | (-0.201, -0.214, -0.116) | 81% | 95% |
-| **10** | 1.900 / 255 | (-0.001, -0.281, -0.377) | **51%** | **83%** |
-| 15 | 2.667 / 255 | (0.024, -0.399, -0.480) | 29% | 74% |
-
-Sigma 10 は平面ノイズを約半分にし、文字・輪郭を多く残した。15 は平面には強いが texture と
-色の変化が増える。512px core + 64px halo と 768px core の出力差は平均 0.033 / 255、95
-percentile 0 だった。Network の receptive-field radius は 74 px なので、製品既定は境界を完全に
-覆う 80 px halo とし、512px core を使う。
-
-Model は MIT license の clipped-noise checkpoint を immutable commit から取得し、
-SHA-256 `8118974ac7defaa5037f73caf87e0cb53efcfa49ae77d55c05ab187f59e55949`
-を検証してから `<workspace>/.models/fastdvdnet/` に publish する。Torch/CUDA が無い場合は
-FFmpeg `atadenoise` を source-rate で適用する。どちらも抽出後の疎な 1fps image を時間平均
-しない。
-
-208 枚を software decode した初回 full run は 4,368.5 秒（21.0 秒/image）。同じ 5 枚の
-3840² frame を source 中央まで decode する実測は software 24.4 秒、CUDA/NVDEC 2.8 秒だった。
-Hardware frame を `yuv420p` に戻してから RGB 化すると両経路の 5 image SHA-256 が完全一致
-したため、現在は `yuv420p` 入力で実動画 probe に成功した場合だけ CUDA decode を自動使用する。
-未検証 pixel format は画質優先で software decode を維持する。
+7,000 iteration の既存 checkpoint は学習不足で、30,000 iteration の約 1/4 しか完了していなかった。
+また 500k cap は残り約 17k iteration で topology を増やせないため、12GB GPU で検証した既定を
+1M とする。Fresh 1M / 30k run は約 59–69 分。MRNF の grow/prune は時刻 seed を含むため、run
+間に小さな揺らぎがある。
 
 ## Reconstruction mode
 
@@ -213,36 +186,36 @@ Hardware frame を `yuv420p` に戻してから RGB 化すると両経路の 5 i
 
 前後画像を `OPENCV_FISHEYE` camera として使用する。Front を rig reference、Back を 180°
 rotation + metadata baseline として固定する。再投影による情報損失がなく、2 lens に視覚 overlap
-がなくても同一 exposure の rig として 1 model に統合する。
+がなくても同じ exposure の rig として 1 model に統合する。
 
 ### Pinhole rig
 
-Dual fisheye / ERP を 6-view cubemap にする fallback。Known intrinsics/extrinsics を固定でき、
-IGS+ や pinhole-only downstream に向く。Training image temporal denoise は未対応。
+Dual fisheye / ERP を 6-view cubemap にする fallback。Known intrinsics / extrinsics を固定でき、
+IGS+ や pinhole-only downstream に向く。
 
 ### Equirectangular
 
-COLMAP 4.1 camera model ID 17 を使用する。LFStudio は GUT 対応 MRNF/MCMC だけを生成する。
-IGS+ は GUT と併用できず equirectangular を undistort できないため候補から除外する。
+COLMAP 4.1 camera model ID 17 を使用する。LFStudio config は GUT 対応 MRNF / MCMC だけを生成
+する。IGS+ は GUT と併用できず equirectangular を undistort できないため候補から除外する。
 
 ## Gravity alignment
 
-COLMAP world orientation の gauge freedom を、INSV の約 1kHz accelerometer と各 exposure
-timestamp で解く。
+COLMAP world orientation の gauge freedom を、INSV の accelerometer と各 exposure timestamp で
+解く。
 
-- 全 recording の device-frame acceleration を平均しない
 - `first_frame_timestamp`、`gyro_timestamp`、`is_raw_gyro` を metadata から読む
+- 全 recording の device-frame acceleration を単純平均しない
 - 24 個の右手系 signed-axis mapping から robust consensus を選ぶ
-- Inlier、median/P90 angular residual、time offset を記録する
+- Inlier、median / P90 angular residual、time offset を記録する
 - `model_transformer` で rig、frame、image、point 全体を変換する
-- GPS が無い scale は任意なので reference-camera trajectory span を 1 model unit に正規化する
+- GPS が無い scale は任意なので reference-camera trajectory diameter を 1 に正規化する
 
-Dataset は `-Y up`、Web viewer は `diag(1,-1,-1)` で `+Y up` 表示する。UI の位置単位は
-meter ではなく model unit。
+Dataset は `-Y up`、Web viewer は `diag(1,-1,-1)` で `+Y up` 表示する。UI の位置単位は meter
+ではなく model unit。
 
 ## LFStudio で開く
 
-次を dataset root として選ぶ。
+Export Inspector に表示される次の 1 directory を dataset root として選ぶ。
 
 ```text
 <workspace>/projects/<project-id>/export_dataset/
@@ -263,36 +236,49 @@ export_dataset/
 └── export_manifest.json
 ```
 
-Training output は dataset の外へ書く。
+CLI の再現可能な dataset / config 指定:
 
 ```text
-LichtFeld-Studio --config <dataset>/train_configs/train_config.mrnf.json \
-  --data-path <dataset> --output-path <project>/training_outputs/<run>
+LichtFeld-Studio --config <dataset>/train_configs/train_config.mrnf.json --data-path <dataset>
 ```
 
-LFStudio が dataset 内へ既定 `output/` を作っても、export 再生成前に unmanaged item を
-`training_outputs/` へ移す。使用中で移動できない場合は削除せず error にする。
+LFStudio の training output directory は LFStudio 側で選択する。本アプリケーションはその path を
+作成、表示、変更、移動しない。誤って `export_dataset/` 内に外部 output を作った場合、再生成や
+クリアによる消失を防ぐため、管理外 item を検出して明示的に停止する。別 directory へ移動してから
+export を操作する。
 
-LFStudio v0.5.3 の GUI folder import は `train_configs/` を自動適用しない。Folder 自体と camera
-pose は正しく読み込めるが、GUI training では MRNF、GUT、Segment mask を手動設定する必要が
-ある。再現可能な既定経路は上記 CLI であり、`<run>` は実行ごとに固有名へ置き換える。
-
-Binary mask は white=valid / black=excluded。`mask_mode="segment"` は masked pixel を loss
-から外し、その領域の Gaussian opacity も抑制する。
+LFStudio v0.5.3 の GUI folder import は `train_configs/` を自動適用しない。Folder と camera pose
+は読み込めるが、GUI training では MRNF、GUT、Segment mask を手動設定する。Binary mask は
+white=valid / black=excluded。`mask_mode="segment"` は masked pixel を loss から外す。
 
 ### Camera の色
 
-LFStudio の camera icon は per-camera photometric loss の相対 heatmap。Green は現在の最小、
-red は最大、brown/orange は中間、white は未観測。Min/max は更新のたび再正規化されるため、
-red は pose failure や camera disable を意味しない。Selected/hovered camera も orange に
-override される。
+LFStudio の camera icon は per-camera photometric loss の相対 heatmap。Green は現在の最小、red
+は最大、brown / orange は中間、white は未観測。Min / max は更新ごとに再正規化されるため、red
+は pose failure や camera disable を意味しない。Selected / hovered camera も orange になる。
 
 ### Transform Inspector が 0 の場合
 
-LFStudio は dataset camera pose を SceneNode transform ではなく `Camera.R/T` に保持し、center
-を `C=-Rᵀt` で計算する。Generic Transform Inspector が local node の `0,0,0` を表示しても
-pose は失われていない。本アプリの Camera Inspector は実 center を表示し、export validation は
-unique center 数と trajectory diameter を検査する。
+LFStudio は dataset camera pose を SceneNode transform ではなく `Camera.R/T` に保持し、center を
+`C=-Rᵀt` で計算する。Generic Transform Inspector が local node の `0,0,0` を表示しても pose は
+失われていない。本アプリケーションの Camera Inspector は実 center を表示し、export validation
+は unique center 数と trajectory diameter を検査する。
+
+## Stage statistics
+
+各 stage は `manifest.extra` に利用可能な統計を保存し、対応する Inspector に全 scalar statistic を
+表示する。
+
+- Source: container、calibration、gravity sample、解像度、尺
+- Frames: selected / candidates / rejection、FPS、時間範囲
+- Reproject / masks: render 数、有効領域、coverage、detection、warning
+- Features / matching: keypoint、descriptor、pair、inlier
+- Reconstruction: registration、point、observation、track、reprojection、trajectory
+- Alignment: consensus residual、inlier、time offset、normalization
+- Export: camera model、mask、LFStudio validation、training profile、推奨 cap
+
+LFStudio の loss / PSNR / SSIM は外部 training process の値であり、output directory も管理しないため
+自動取得しない。Export Inspector には「外部管理のため取得不可」と明示する。
 
 ## Runtime config
 
@@ -311,11 +297,6 @@ ffprobe = ""
 colmap = ""
 vocab_tree = ""
 
-[denoise]
-model_path = ""
-device = "auto"
-hardware_decode = "auto"
-
 [sam3]
 repo_path = ""
 checkpoint_path = ""
@@ -323,14 +304,12 @@ device = "cuda:0"
 dtype = "bfloat16"
 ```
 
-詳細は [docs/setup-gpu.md](docs/setup-gpu.md)。
-
-## Camera/source 拡張
+## Camera / source 拡張
 
 Source 固有ロジックは `colmap/input_workspace.py` の builder に隔離する。新 camera は共通
-`InputSpec` として images、optional masks、camera model/intrinsics、optional rig config、
-refine policy を返す。Feature、Matcher、Mapper、Alignment、Export は source format を再解釈
-しない。Fisheye circle は X5 固定値ではなく画像から推定し、UI で確認できる。
+`InputSpec` として images、optional masks、camera model / intrinsics、optional rig config、refine
+policy を返す。Feature、Matcher、Mapper、Alignment、Export は source format を再解釈しない。
+Fisheye circle は X5 固定値ではなく画像から推定し、UI で確認できる。
 
 ## Architecture
 
@@ -341,22 +320,21 @@ FastAPI + aiosqlite + WebSocket
                   |
 multiprocessing spawn worker
                   |
-FFmpeg / COLMAP / Torch / ONNX Runtime / SAM3
+FFmpeg / COLMAP / ONNX Runtime / optional SAM3
 ```
 
-FastAPI process は heavy CUDA model を import しない。Stage は temporary directory に書き、成功
-後だけ atomic replace する。Windows native library が handle を短時間保持する場合だけ対象を
-限定して retry する。再生成可能な artifact と LFStudio training result の ownership は分離する。
-Invalidation は線形順序ではなく artifact DAG を辿るため、feature / matching / Mapper を変更しても
-独立した denoise artifact は保持され、両 branch を消費する export だけが stale になる。
+FastAPI process は heavy CUDA model を import しない。Stage は temporary directory に書き、成功後
+だけ atomic replace する。Invalidation は線形順序ではなく artifact DAG を辿る。外部 application
+の training result は stage ownership に含めない。
 
 ## Test
 
 ```bash
 cd backend
-uv sync --extra dev --extra imaging --extra denoise
+uv sync --extra dev --extra imaging
 uv run pytest -q
-uv run ruff check
+uv run ruff check src tests
+uv run sphere-doctor
 ```
 
 ```bash
@@ -376,15 +354,13 @@ pnpm test:e2e
 
 ## License
 
-Project license は未確定。FastDVDnet 由来の network definition と checkpoint は MIT license で、
-notice を package に同梱する。外部公開前に project 本体の license を決定する。
+Project license は未確定。外部公開前に project 本体の license を決定する。
 
 ## References / legacy plugin
 
 - [MrNeRF/LichtFeld-Studio](https://github.com/MrNeRF/LichtFeld-Studio): loader、GUT、mask、MRNF、loss heatmap
 - [colmap/colmap](https://github.com/colmap/colmap): Global Mapper、ALIKED、rig、EQUIRECTANGULAR
-- [m-tassano/fastdvdnet](https://github.com/m-tassano/fastdvdnet): 5-frame residual denoiser（MIT）
 - [AdrianEddy/telemetry-parser](https://github.com/AdrianEddy/telemetry-parser): Insta360 metadata / IMU timestamp
 - [gyroflow/gyroflow](https://github.com/gyroflow/gyroflow): IMU orientation semantics
-- [alexmgee/lichtfeld-360-plugin](https://github.com/alexmgee/lichtfeld-360-plugin): 旧 workflow の比較対象（GPL-3.0-or-later）
 - [BenjaminHenriksson/insv-stitch](https://github.com/BenjaminHenriksson/insv-stitch): INSV container 調査の参考
+- [alexmgee/lichtfeld-360-plugin](https://github.com/alexmgee/lichtfeld-360-plugin): 旧 plugin workflow の比較対象（GPL-3.0-or-later）

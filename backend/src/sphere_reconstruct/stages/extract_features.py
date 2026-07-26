@@ -23,7 +23,7 @@ _FEATURE_TYPES = {"SIFT", "ALIKED_N16ROT", "ALIKED_N32"}
 @register
 class ExtractFeatures(Stage):
     name = StageName.EXTRACT_FEATURES
-    impl_version = "1.0"
+    impl_version = "1.1"
 
     def normalize_params(self, raw: dict) -> dict:
         feature_type = str(raw.get("feature_type", "SIFT")).upper()
@@ -120,6 +120,13 @@ class ExtractFeatures(Stage):
             )
 
         summary = _feature_summary(database_path)
+        summary.update(
+            {
+                "feature_type": ctx.params["feature_type"],
+                "gpu_enabled": ctx.params["use_gpu"],
+                "masks_enabled": bool(spec.mask_path),
+            }
+        )
         summary_path = ctx.stage_out_dir / "feature_summary.json"
         summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
         manifest.outputs = [
@@ -144,9 +151,12 @@ class ExtractFeatures(Stage):
 
     @staticmethod
     def _feature_args(params: dict, settings) -> list[str]:
-        args = ["--FeatureExtraction.max_image_size", str(params["max_image_size"])]
+        args = []
+        if params["max_image_size"] > 0:
+            args += ["--FeatureExtraction.max_image_size", str(params["max_image_size"])]
         if params["feature_type"] == "SIFT":
-            args += ["--SiftExtraction.max_num_features", str(params["max_num_features"])]
+            if params["max_num_features"] > 0:
+                args += ["--SiftExtraction.max_num_features", str(params["max_num_features"])]
             if params["sift_peak_threshold"] > 0:
                 args += ["--SiftExtraction.peak_threshold", str(params["sift_peak_threshold"])]
             if params["sift_edge_threshold"] > 0:
@@ -159,7 +169,8 @@ class ExtractFeatures(Stage):
                     "1",
                 ]
         else:
-            args += ["--AlikedExtraction.max_num_features", str(params["max_num_features"])]
+            if params["max_num_features"] > 0:
+                args += ["--AlikedExtraction.max_num_features", str(params["max_num_features"])]
             configured = settings.aliked.extractor_path
             if configured and params["feature_type"] == "ALIKED_N16ROT":
                 args += ["--AlikedExtraction.n16rot_model_path", configured]

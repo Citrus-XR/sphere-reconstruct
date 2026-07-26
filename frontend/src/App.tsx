@@ -91,7 +91,7 @@ export const App = () => {
     if (!projectId) return
     api.clearStage(projectId, 'generate_masks').then(() => {
       qc.invalidateQueries({ queryKey: ['stages', projectId] })
-      for (const key of ['reconstruction', 'masks', 'denoise', 'export-info']) {
+      for (const key of ['reconstruction', 'masks', 'export-info']) {
         qc.removeQueries({ queryKey: [key, projectId] })
       }
     }).catch(error => console.warn('mode invalidation failed', error))
@@ -147,8 +147,7 @@ export const App = () => {
     if (!k) return
     if (k !== 'insv' && reconMode === 'native_fisheye') setReconMode('equirectangular')
     if (k === 'insv' && reconMode === 'equirectangular') setReconMode('native_fisheye')
-    if (k === 'erp_images' && params.denoiseMethod !== 'off') setParams({ denoiseMethod: 'off' })
-  }, [project?.source_kind, params.denoiseMethod]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [project?.source_kind, reconMode]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // 工程に保存された UI 設定を復元 (工程ごと 1 回). 復元後の変更は debounce して保存する.
   const hydratedRef = useRef<string | null>(null)
@@ -158,10 +157,14 @@ export const App = () => {
     const ui = project.ui_state
     const defaultPrompt = (settingsData as { sam3?: { default_prompt?: string } } | undefined)
       ?.sam3?.default_prompt ?? ''
+    const savedParams = (ui?.params ?? {}) as Record<string, unknown>
+    const knownParams = Object.fromEntries(
+      Object.keys(DEFAULT_PARAMS).filter(key => Object.hasOwn(savedParams, key)).map(key => [key, savedParams[key]]),
+    ) as Partial<StageParams>
     setParamsState({
       ...DEFAULT_PARAMS,
       ...(defaultPrompt ? { prompt: defaultPrompt } : {}),
-      ...((ui?.params ?? {}) as Partial<StageParams>),
+      ...knownParams,
     })
     setReconMode((ui?.reconMode as ReconMode | undefined)
       ?? (project.source_kind === 'insv' || !project.source_kind ? 'native_fisheye' : 'equirectangular'))
@@ -206,9 +209,6 @@ export const App = () => {
     enabled: !!projectId && isFisheye, retry: false,
   })
   const firstFrame = framesData?.frames?.[0]?.index ?? null
-  const denoiseApplicable = params.denoiseMethod !== 'off'
-    && reconMode !== 'pinhole_rig'
-    && project?.source_kind !== 'erp_images'
   const route = [
     'inspect_source',
     'extract_frames',
@@ -219,7 +219,6 @@ export const App = () => {
     'match_features',
     'reconstruct',
     'align_reconstruction',
-    ...(denoiseApplicable ? ['denoise_frames'] : []),
     'export_dataset',
   ]
   const stageIsFresh = (stage: NonNullable<typeof stagesData>['stages'][number]): boolean => {
@@ -228,7 +227,6 @@ export const App = () => {
     return Object.entries(expected).every(([key, value]) => sameValue(stage.params?.[key], value))
   }
   const outputs = new Map((stagesData?.stages ?? []).map(stage => [stage.stage, stageIsFresh(stage)]))
-  const denoiseReady = !denoiseApplicable || outputs.get('denoise_frames') === true
   const nextStep = route.find(stage => stage === 'fisheye_region' ? !regionData?.saved : !outputs.get(stage)) ?? null
   // 次工程を開始できない構成を検出し, 理由をボタン tooltip に出す.
   // 魚眼有効領域は既定円で動くため必須ではない (未保存でも run-all は通る).
@@ -247,7 +245,7 @@ export const App = () => {
     if (jobData && ['succeeded', 'failed', 'cancelled'].includes(jobData.status)) {
       setActiveJobId(null)
       // ジョブ完了で成果物が変わるため, 依存クエリを更新 (写真リスト/再構成/魚眼領域).
-      for (const key of ['frames', 'reconstruction', 'fisheye-region', 'masks', 'denoise', 'export-info', 'stages']) {
+      for (const key of ['frames', 'reconstruction', 'fisheye-region', 'masks', 'export-info', 'stages']) {
         qc.invalidateQueries({ queryKey: [key, projectId] })
       }
     }
@@ -289,7 +287,7 @@ export const App = () => {
       qc.invalidateQueries({ queryKey: ['projects'] })
       qc.invalidateQueries({ queryKey: ['source-info', projectId] })
       qc.invalidateQueries({ queryKey: ['stages', projectId] })
-      for (const key of ['reconstruction', 'frames', 'fisheye-region', 'masks', 'denoise', 'export-info']) {
+      for (const key of ['reconstruction', 'frames', 'fisheye-region', 'masks', 'export-info']) {
         qc.removeQueries({ queryKey: [key, projectId] })
       }
       setSelectedFrameIndex(null)
@@ -318,7 +316,7 @@ export const App = () => {
       qc.invalidateQueries({ queryKey: ['stages', projectId] })
       // frames/reconstruction/fisheye-region は成果物が消えると 404 になり, react-query は
       // エラー時に前回 data を保持する (= 残像). invalidate では消えないため remove で破棄する.
-      for (const key of ['reconstruction', 'frames', 'fisheye-region', 'masks', 'denoise', 'export-info']) {
+      for (const key of ['reconstruction', 'frames', 'fisheye-region', 'masks', 'export-info']) {
         qc.removeQueries({ queryKey: [key, projectId] })
       }
       setSelectedFrameIndex(null); setSelectedCameraId(null)
@@ -344,16 +342,15 @@ export const App = () => {
   for (const s of stagesData?.stages ?? []) {
     // pinhole 再投影 (reproject_views) は pinhole_rig モードだけ必要. 他は「生成」不要で隠す.
     if (s.stage === 'reproject_views' && reconMode !== 'pinhole_rig') continue
-    const applicable = s.stage !== 'denoise_frames' || denoiseApplicable
-    const en = !disabled.has(s.stage) && applicable
+    const en = !disabled.has(s.stage)
     const done = stageIsFresh(s)
     const stale = s.status === 'stale' || (s.has_output && !done)
     items.push({
       key: s.stage, label: t(`st_${s.stage}`),
       badgeColor: s.status === 'failed' ? 'var(--error)' : stale ? '#d69a2a' : done ? '#4caf50' : 'var(--border)',
-      statusLabel: !applicable ? t('skip') : s.status === 'running' ? t('running') : s.status === 'failed' ? t('failed')
+      statusLabel: s.status === 'running' ? t('running') : s.status === 'failed' ? t('failed')
         : stale ? t('stale') : done ? t('done') : t('notrun'),
-      toggleable: OPTIONAL.has(s.stage), enabled: en, dim: !en, running: applicable && s.status === 'running',
+      toggleable: OPTIONAL.has(s.stage), enabled: en, dim: !en, running: s.status === 'running',
       progress: progressByStage[s.stage]?.progress ?? 0,
     })
     // 魚眼有効領域は魚眼ソース (native 魚眼 + INSV) を選んだ時点で pipeline に出す.
@@ -422,12 +419,10 @@ export const App = () => {
         return (
           <div className="dock-content">
             {selectedCamImage
-              ? <CameraInspector projectId={projectId as string} image={selectedCamImage}
-                  denoiseEnabled={denoiseApplicable} />
+              ? <CameraInspector projectId={projectId as string} image={selectedCamImage} />
               : selectedFrameIndex != null
               ? <FrameInspector projectId={projectId as string} frameIndex={selectedFrameIndex}
-                  frames={framesData?.frames} recon={recon} sourceKind={project?.source_kind ?? null}
-                  denoiseEnabled={denoiseApplicable} />
+                  frames={framesData?.frames} recon={recon} sourceKind={project?.source_kind ?? null} />
               : selectedStage === 'fisheye_region'
               ? (firstFrame !== null
                   ? <FisheyeRegionEditor projectId={projectId as string} frameIndex={firstFrame}
@@ -443,8 +438,7 @@ export const App = () => {
                   stageProgress={progressByStage[selectedStage]?.progress ?? 0}
                   stageStartedAt={stageStatus?.started_at ?? null}
                   stageProgressMsg={progressByStage[selectedStage] ? renderMsg(progressByStage[selectedStage]) : ''}
-                  blockedReason={selectedStage === 'export_dataset' && !denoiseReady
-                    ? t('denoiseRequiredForExport') : null} />
+                  blockedReason={null} />
               : <div className="hint">—</div>}
           </div>
         )

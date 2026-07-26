@@ -28,7 +28,7 @@ from ..pipeline.stage import Stage, StageContext, new_manifest
 @register
 class InspectSource(Stage):
     name = StageName.INSPECT_SOURCE
-    impl_version = "0.2"  # gravity 抽出を追加
+    impl_version = "0.3"
 
     def collect_inputs(self, ctx: StageContext) -> list[FileRef]:
         if ctx.source_path is None:
@@ -93,6 +93,7 @@ class InspectSource(Stage):
                 mime="application/json",
             )
         ]
+        manifest.extra = _source_statistics(summary)
         return manifest
 
     def _inspect_insv(self, path: Path, out_dir: Path, ctx: StageContext) -> dict:
@@ -248,3 +249,39 @@ class InspectSource(Stage):
             "image_count": len(images),
             "first_files": [p.name for p in images[:5]],
         }
+
+
+def _source_statistics(summary: dict) -> dict:
+    statistics = {
+        "kind": summary["kind"],
+        "file_size": summary.get("file_size"),
+        "calibration_source": summary.get("calibration_source"),
+    }
+    if summary["kind"] == "insv":
+        gravity = summary.get("gravity") or {}
+        offset = summary.get("offset_v3") or {}
+        statistics.update(
+            {
+                "mp4_box_count": len(summary.get("mp4_boxes", [])),
+                "footer_size": summary.get("footer_size"),
+                "calibration_valid": bool(offset.get("valid")),
+                "calibration_lenses": len(offset.get("lenses", [])),
+                "gravity_samples": gravity.get("samples", 0),
+                "gravity_mean_magnitude": gravity.get("mean_magnitude"),
+            }
+        )
+    elif summary["kind"] == "erp_video":
+        video = summary.get("video") or {}
+        statistics.update(
+            {
+                "duration_sec": summary.get("duration_sec"),
+                "width": video.get("width"),
+                "height": video.get("height"),
+                "fps": video.get("fps"),
+                "codec": video.get("codec"),
+                "source_frames": video.get("nb_frames"),
+            }
+        )
+    else:
+        statistics["image_count"] = summary.get("image_count", 0)
+    return {key: value for key, value in statistics.items() if value is not None}

@@ -264,7 +264,7 @@ def build_configs(profile: dict, *, has_masks: bool = False) -> tuple[dict[str, 
         "recommended_strategy": "mrnf",
         "usage": (
             "LichtFeld-Studio --config train_configs/train_config.mrnf.json "
-            "--data-path <export_dataset> --output-path <training_output>"
+            "--data-path <export_dataset>"
         ),
     }
     return configs, info

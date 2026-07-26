@@ -62,9 +62,9 @@ body { margin: 0; background: var(--bg); color: var(--fg); }
 .path-text { display: inline-flex; align-items: center; gap: 5px; min-width: 0; max-width: 100%;
   color: var(--fg-mute); font-family: var(--mono-font);
   font-size: 11px; direction: ltr; }
-.path-text.compact { flex: 1 1 0; overflow: hidden; }
+.path-text.compact { flex: 1 1 0; width: 100%; overflow: hidden; }
 .path-value { min-width: 0; overflow-wrap: anywhere; word-break: break-all; unicode-bidi: plaintext; }
-.path-text.compact .path-value { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.path-text.compact .path-value { flex: 1 1 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .path-copy { flex: none; border: 0; border-radius: 3px; padding: 1px 4px; background: transparent;
   color: var(--fg-mute); cursor: pointer; font: inherit; line-height: 1.2; }
 .path-copy:hover { background: rgba(128,128,128,.14); color: var(--fg); }
@@ -177,7 +177,11 @@ body { margin: 0; background: var(--bg); color: var(--fg); }
 /* 設定ポップオーバー */
 .pop { position: absolute; top: 42px; right: 8px; z-index: 200;
   background: var(--bg-elev); border: 1px solid var(--border); border-radius: 8px;
-  box-shadow: 0 6px 24px rgba(0,0,0,.35); padding: 12px; width: 240px; }
+  box-shadow: 0 6px 24px rgba(0,0,0,.35); padding: 12px;
+  box-sizing: border-box; width: min(320px, calc(100vw - 16px)); max-height: calc(100vh - 58px);
+  overflow-x: hidden; overflow-y: auto; }
+.environment-check { min-width: 0; }
+.environment-check .mono { overflow-wrap: anywhere; }
 
 /* 各コントロールの説明文 */
 .hint { font-size: 10.5px; color: var(--fg-mute); margin-top: 2px; line-height: 1.4; }
@@ -249,6 +253,10 @@ body { margin: 0; background: var(--bg); color: var(--fg); }
 .inspector-field.success dd { color: #3ad07a; }
 .inspector-field.error dd { color: var(--error); }
 .inspector-field.muted dd { color: var(--fg-mute); }
+.stage-statistics { margin-bottom: 10px; }
+.stage-statistics-toggle { width: 100%; padding: 4px 0; border: 0; background: transparent;
+  color: var(--fg-mute); text-align: left; font: inherit; font-size: 11px; cursor: pointer; }
+.stage-statistics-toggle:hover { color: var(--fg); }
 .inspector-section { margin: 12px 0; }
 .inspector-section-title { margin-bottom: 4px; color: var(--fg-mute); font-size: 11px; }
 

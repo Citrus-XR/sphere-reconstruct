@@ -50,7 +50,7 @@ from ..settings import get_settings
 @register
 class GenerateMasks(Stage):
     name = StageName.GENERATE_MASKS
-    impl_version = "0.2"
+    impl_version = "0.3"
 
     def _resolve_layout(self, ctx: StageContext) -> str:
         layout = ctx.params["layout"]
@@ -151,6 +151,7 @@ class GenerateMasks(Stage):
             )
         )
         manifest.outputs = outputs
+        manifest.extra = _mask_statistics(mask_manifest)
         ctx.progress.info("generate_masks done", progress=1.0, key="log.mask_done")
         return manifest
 
@@ -445,3 +446,30 @@ def _final_relpath(p: Path, ctx: StageContext) -> str:
     rel = p.relative_to(ctx.stage_out_dir)
     final_stage_dir_name = ctx.stage_out_dir.name.lstrip(".").removesuffix(".tmp")
     return str(Path(final_stage_dir_name) / rel)
+
+
+def _mask_statistics(manifest: dict) -> dict:
+    records = []
+    for frame in manifest.get("frames", []):
+        if "lenses" in frame:
+            records.extend(frame["lenses"])
+        elif "views" in frame:
+            records.extend(frame["views"])
+        else:
+            records.append(frame)
+    coverages = [float(record.get("coverage", 0.0)) for record in records]
+    detections = sum(
+        sum(int(count) for count in record.get("detections", {}).values()) for record in records
+    )
+    return {
+        "kind": manifest.get("kind"),
+        "frames": len(manifest.get("frames", [])),
+        "images": len(records),
+        "prompt_terms": len(manifest.get("prompt", [])),
+        "detections": detections,
+        "average_dynamic_coverage": sum(coverages) / len(coverages) if coverages else 0.0,
+        "maximum_dynamic_coverage": max(coverages) if coverages else 0.0,
+        "coverage_warnings": sum(bool(record.get("coverage_warning")) for record in records),
+        "max_inference_size": manifest.get("max_inference_size"),
+        "dilate_px": manifest.get("dilate_px"),
+    }

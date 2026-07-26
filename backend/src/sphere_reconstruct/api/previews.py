@@ -106,34 +106,6 @@ async def list_masks(project_id: str) -> dict:
     return json.loads(mf.read_text())
 
 
-@router.get("/api/projects/{project_id}/denoise")
-async def denoise_info(project_id: str) -> dict:
-    project_dir = await _project_dir(project_id)
-    manifest = project_dir / "denoise_frames" / "manifest_denoise.json"
-    if not manifest.is_file():
-        raise HTTPException(status_code=404, detail="denoise_frames not run yet")
-    return json.loads(manifest.read_text(encoding="utf-8"))
-
-
-@router.get("/api/projects/{project_id}/denoise/{index}/image")
-async def denoised_image(project_id: str, index: int, lens: int = 0) -> FileResponse:
-    project_dir = await _project_dir(project_id)
-    manifest = project_dir / "denoise_frames" / "manifest_denoise.json"
-    if not manifest.is_file():
-        raise HTTPException(status_code=404, detail="denoise_frames not run yet")
-    data = json.loads(manifest.read_text(encoding="utf-8"))
-    frame = next((item for item in data.get("frames", []) if item["index"] == index), None)
-    if frame is None:
-        raise HTTPException(status_code=404, detail="denoised frame not found")
-    key = f"lens{lens}" if f"lens{lens}" in frame else "erp"
-    if key not in frame:
-        raise HTTPException(status_code=404, detail=f"no denoised {key} for this frame")
-    path = _safe(project_dir, frame[key])
-    if not path.is_file():
-        raise HTTPException(status_code=404, detail="denoised image file missing")
-    return FileResponse(path, media_type="image/jpeg")
-
-
 @router.get("/api/projects/{project_id}/export-info")
 async def export_info(project_id: str) -> dict:
     """export_dataset の出力ディレクトリ (絶対パス) を返す. Inspector で場所を表示する用."""
@@ -141,23 +113,15 @@ async def export_info(project_id: str) -> dict:
     export = project_dir / "export_dataset"
     if not export.exists():
         raise HTTPException(status_code=404, detail="export_dataset not run yet")
-    preview = export / "preview"
     train_configs = export / "train_configs"
     recommendations = train_configs / "recommendations.json"
     gui_integration = None
-    command_template = None
     if recommendations.is_file():
         recommendation_data = json.loads(recommendations.read_text(encoding="utf-8"))
         gui_integration = recommendation_data.get("gui_integration")
-        command_template = recommendation_data.get("command_template")
     return {
         "dir": str(export),
-        "dataset_dir": str(export) if (export / "sparse" / "0" / "cameras.bin").exists() else None,
-        "preview_dir": str(preview) if preview.exists() else None,
-        "train_configs_dir": str(train_configs) if train_configs.exists() else None,
-        "training_output_dir": str(project_dir / "training_outputs"),
         "gui_integration": gui_integration,
-        "command_template": command_template,
     }
 
 

@@ -2,7 +2,6 @@ import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import {
   api,
-  denoisedImageUrl,
   fisheyeMaskUrl,
   frameImageUrl,
   frameReconMap,
@@ -22,14 +21,13 @@ import {
 // Hierarchy で写真を選んだときの Inspector: フレーム画像 + 抽出スコア + 処理結果 (再構成の
 // 登録可否 / 3D 点数) + SAM3 マスク (あれば 原画/マスク/重ね を切替, 動体被覆率も表示).
 export const FrameInspector = ({
-  projectId, frameIndex, frames, recon, sourceKind, denoiseEnabled,
+  projectId, frameIndex, frames, recon, sourceKind,
 }: {
   projectId: string
   frameIndex: number
   frames: FrameInfo[] | undefined
   recon: ReconstructionData | undefined
   sourceKind: string | null
-  denoiseEnabled: boolean
 }) => {
   const { t } = useSettings()
   const [lens, setLens] = useState(0)
@@ -42,17 +40,11 @@ export const FrameInspector = ({
   const { data: masks } = useQuery({
     queryKey: ['masks', projectId], queryFn: () => api.getMasks(projectId), retry: false,
   })
-  const { data: denoise } = useQuery({
-    queryKey: ['denoise', projectId], queryFn: () => api.getDenoise(projectId), enabled: denoiseEnabled, retry: false,
-  })
   const maskRec = masks?.kind === 'sam3_fisheye_masks'
     ? masks.frames.find(f => f.index === frameIndex)?.lenses?.find(l => l.lens === lens)
     : undefined
   // マスクが無い時は必ず原画表示 (壊れた画像を防ぐ).
   const eff = maskRec ? view : 'orig'
-  const denoisedAvailable = denoiseEnabled && !!denoise?.frames.some(frame => (
-    frame.index === frameIndex && (isInsv ? (lens === 0 ? frame.lens0 : frame.lens1) : frame.erp)
-  ))
 
   return (
     <div>
@@ -65,8 +57,7 @@ export const FrameInspector = ({
 
       <CapturePreview originalUrl={frameImageUrl(projectId, frameIndex, lens)}
         maskUrl={maskRec ? fisheyeMaskUrl(projectId, frameIndex, lens) : null}
-        denoisedUrl={denoisedAvailable ? denoisedImageUrl(projectId, frameIndex, lens) : null}
-        view={denoisedAvailable ? view : eff} onViewChange={setView} alt={`${t('frameLabel')} ${frameIndex}`} />
+        view={eff} onViewChange={setView} alt={`${t('frameLabel')} ${frameIndex}`} />
 
       <CaptureSummary frameIndex={frameIndex} lens={isInsv ? lens : null}
         pointsLabel={t('framePoints')}

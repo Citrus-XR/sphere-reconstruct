@@ -20,7 +20,7 @@ from .colmap_progress import counted_progress
 @register
 class MatchFeatures(Stage):
     name = StageName.MATCH_FEATURES
-    impl_version = "1.0"
+    impl_version = "1.1"
 
     def normalize_params(self, raw: dict) -> dict:
         feature_type = str(raw.get("feature_type", "SIFT")).upper()
@@ -129,6 +129,14 @@ class MatchFeatures(Stage):
             )
 
         summary = _matching_summary(database_path)
+        summary.update(
+            {
+                "matching_type": matching_type,
+                "pairing": pairing,
+                "loop_closure": ctx.params["loop_closure"] if pairing == "sequential" else False,
+                "gpu_enabled": ctx.params["use_gpu"],
+            }
+        )
         summary_path = ctx.stage_out_dir / "matching_summary.json"
         summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
         manifest.outputs = [_file_ref(database_path, ctx), _file_ref(summary_path, ctx)]

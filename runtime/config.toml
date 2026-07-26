@@ -43,12 +43,5 @@ max_extract_size = 0
 max_keypoints = 4096
 min_score = 0.2
 
-[denoise]
-# FastDVDnet checkpoint. 空なら初回実行時に固定 URL から SHA-256 検証付きで取得する.
-model_path = ""
-device = "auto"
-# auto は CUDA/NVDEC を実動画で probe し、同一 RGB 出力を保てる場合に利用する.
-hardware_decode = "auto"
-
 [log]
 level = "INFO"

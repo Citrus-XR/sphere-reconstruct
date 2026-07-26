@@ -126,31 +126,13 @@ def test_export_root_is_directly_loadable_by_lf_studio(tmp_path: Path):
     assert export_manifest["validation"]["matched_mask_count"] == 1
 
     recommendation = json.loads((output / "train_configs" / "recommendations.json").read_text())
-    assert str(project / "export_dataset") in recommendation["usage"]
-    assert str(project / "training_outputs" / "<run-name>") in recommendation["usage"]
-    assert recommendation["command_template"]["requires_unique_run_name"] is True
+    assert "--data-path <export_dataset>" in recommendation["usage"]
+    assert "--output-path" not in recommendation["usage"]
+    assert "command_template" not in recommendation
+    assert "training_output_dir" not in recommendation
     assert recommendation["gui_integration"]["train_configs_auto_applied"] is False
     config = json.loads((output / "train_configs" / "train_config.mrnf.json").read_text())
     assert config["mask_mode"] == "segment"
-
-
-def test_export_can_use_denoised_images_without_changing_camera_model(tmp_path: Path):
-    project = tmp_path / "project"
-    _write_model(project / "align_reconstruction" / "sparse" / "0")
-    _write_preview(project)
-    original = project / "extract_features" / "images" / "front" / "frame_000000.jpg"
-    _write_rgb(original)
-    denoised = project / "denoise_frames" / "images" / "front" / "frame_000000.jpg"
-    _write_rgb(denoised)
-    (project / "denoise_frames" / "manifest_denoise.json").write_text(
-        json.dumps({"method": "fastdvdnet"})
-    )
-
-    output = _execute(project, {"image_source": "denoised", "emit_train_configs": False})
-
-    assert (output / "images" / "front" / "frame_000000.jpg").read_bytes() == denoised.read_bytes()
-    exported = json.loads((output / "export_manifest.json").read_text())
-    assert exported["image_source"] == "denoised"
 
 
 @pytest.mark.parametrize("failure", ["corrupt", "wrong_size"])

@@ -12,7 +12,7 @@ pnpm --dir frontend build
 
 Write-Host "[2/5] Backend 依存関係"
 Push-Location backend
-$extras = @("--extra", "imaging", "--extra", "aliked", "--extra", "denoise")
+$extras = @("--extra", "imaging", "--extra", "aliked")
 if ($env:SPHERE_WITH_SAM3 -eq "1") { $extras += @("--extra", "sam3") }
 uv sync @extras
 Pop-Location

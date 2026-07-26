@@ -61,24 +61,19 @@ export const CaptureSummary = ({
 export const CapturePreview = ({
   originalUrl,
   maskUrl,
-  denoisedUrl,
   view,
   onViewChange,
   alt,
 }: {
   originalUrl: string
   maskUrl: string | null
-  denoisedUrl: string | null
   view: CaptureView
   onViewChange: (view: CaptureView) => void
   alt: string
 }) => {
   const { t } = useSettings()
   const maskAvailable = maskUrl !== null
-  const denoisedAvailable = denoisedUrl !== null
-  const effectiveView = view === 'denoised'
-    ? (denoisedAvailable ? view : 'orig')
-    : (maskAvailable ? view : 'orig')
+  const effectiveView = maskAvailable ? view : 'orig'
   return (
     <>
       {maskAvailable && (
@@ -89,22 +84,10 @@ export const CapturePreview = ({
             onClick={() => onViewChange('mask')}>{t('viewMask')}</button>
           <button type="button" role="tab" aria-selected={effectiveView === 'overlay'} className={effectiveView === 'overlay' ? 'on' : ''}
             onClick={() => onViewChange('overlay')}>{t('viewOverlay')}</button>
-          {denoisedAvailable && <button type="button" role="tab" aria-selected={effectiveView === 'denoised'}
-            className={effectiveView === 'denoised' ? 'on' : ''} onClick={() => onViewChange('denoised')}>{t('viewDenoised')}</button>}
-        </div>
-      )}
-      {!maskAvailable && denoisedAvailable && (
-        <div className="seg inspector-preview-tabs" role="tablist" aria-label={t('previewVariant')}>
-          <button type="button" role="tab" aria-selected={effectiveView === 'orig'} className={effectiveView === 'orig' ? 'on' : ''}
-            onClick={() => onViewChange('orig')}>{t('viewOrig')}</button>
-          <button type="button" role="tab" aria-selected={effectiveView === 'denoised'} className={effectiveView === 'denoised' ? 'on' : ''}
-            onClick={() => onViewChange('denoised')}>{t('viewDenoised')}</button>
         </div>
       )}
       {effectiveView === 'mask'
         ? <img className="inspector-preview-image" src={maskUrl ?? ''} alt={t('viewMask')} />
-        : effectiveView === 'denoised'
-        ? <img className="inspector-preview-image" src={denoisedUrl ?? ''} alt={t('viewDenoised')} />
         : <div className="inspector-preview">
             <img className="inspector-preview-image" src={originalUrl} alt={alt} />
             {effectiveView === 'overlay' && (
@@ -115,4 +98,4 @@ export const CapturePreview = ({
   )
 }
 
-export type CaptureView = 'orig' | 'mask' | 'overlay' | 'denoised'
+export type CaptureView = 'orig' | 'mask' | 'overlay'

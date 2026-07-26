@@ -30,7 +30,7 @@ from ..settings import get_settings
 @register
 class ExtractFrames(Stage):
     name = StageName.EXTRACT_FRAMES
-    impl_version = "0.3"
+    impl_version = "0.4"
 
     def collect_inputs(self, ctx: StageContext) -> list[FileRef]:
         if ctx.source_path is None:
@@ -72,7 +72,9 @@ class ExtractFrames(Stage):
 
         if ctx.source_kind == "erp_images":
             # 画像フォルダはそのまま参照するのでコピーしない (次段が manifest_frames.json を見る).
-            return self._prepare_erp_images(ctx, manifest)
+            result = self._prepare_erp_images(ctx, manifest)
+            _attach_frame_statistics(ctx, result)
+            return result
 
         probe = ffprobe.probe(ctx.source_path, ffprobe_bin=ffprobe_bin)
         ctx.progress.info(
@@ -89,6 +91,7 @@ class ExtractFrames(Stage):
         else:
             raise ValueError(f"unsupported source kind: {ctx.source_kind}")
 
+        _attach_frame_statistics(ctx, manifest)
         return manifest
 
     # -- INSV (dual lens) ---------------------------------------------------------
@@ -552,6 +555,29 @@ def _final_relpath(p: Path, ctx: StageContext) -> str:
     # stage_out_dir の parent 側 (project_dir) からみると .<stage>.tmp というディレクトリ名.
     final_stage_dir_name = ctx.stage_out_dir.name.lstrip(".").removesuffix(".tmp")
     return str(Path(final_stage_dir_name) / rel)
+
+
+def _attach_frame_statistics(ctx: StageContext, manifest: StageManifest) -> None:
+    data = json.loads((ctx.stage_out_dir / "manifest_frames.json").read_text(encoding="utf-8"))
+    frames = data.get("frames", [])
+    selection = data.get("selection") or {}
+    timestamps = [float(frame["timestamp_sec"]) for frame in frames if frame.get("timestamp_sec") is not None]
+    statistics = {
+        "kind": data.get("kind"),
+        "frames": data.get("count", len(frames)),
+        "width": data.get("width"),
+        "height": data.get("height"),
+        "fps": data.get("fps"),
+        "selection_mode": selection.get("mode"),
+        "selected": selection.get("selected", len(frames)),
+        "candidates": selection.get("candidates"),
+        "selection_fallback": selection.get("fallback", False),
+        "rejected_blur": (selection.get("reasons") or {}).get("blur"),
+        "rejected_exposure": (selection.get("reasons") or {}).get("exposure"),
+        "rejected_few_features": (selection.get("reasons") or {}).get("few_features"),
+        "time_span_sec": max(timestamps) - min(timestamps) if len(timestamps) > 1 else 0.0,
+    }
+    manifest.extra = {key: value for key, value in statistics.items() if value is not None}
 
 
 def _file_ref(p: Path, project_dir: Path, mime: str, ctx: StageContext) -> FileRef:

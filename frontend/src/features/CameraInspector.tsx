@@ -2,7 +2,6 @@ import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import {
   api,
-  denoisedImageUrl,
   fisheyeMaskUrl,
   frameImageUrl,
   parseImageName,
@@ -20,10 +19,9 @@ import {
 } from './CaptureInspectorParts'
 
 // カメラ選択時に Inspector に表示: 対応フレーム画像 + 適用マスクの重ね表示トグル.
-export const CameraInspector = ({ projectId, image, denoiseEnabled }: {
+export const CameraInspector = ({ projectId, image }: {
   projectId: string
   image: ReconstructionImage
-  denoiseEnabled: boolean
 }) => {
   const { t } = useSettings()
   const [view, setView] = useState<CaptureView>('orig')
@@ -35,20 +33,12 @@ export const CameraInspector = ({ projectId, image, denoiseEnabled }: {
   const { data: masks } = useQuery({
     queryKey: ['masks', projectId], queryFn: () => api.getMasks(projectId), retry: false,
   })
-  const { data: denoise } = useQuery({
-    queryKey: ['denoise', projectId], queryFn: () => api.getDenoise(projectId), enabled: denoiseEnabled, retry: false,
-  })
   const maskFrame = parsed ? masks?.frames.find(frame => frame.index === parsed.index) : undefined
   const maskRec = parsed?.kind === 'native' && masks?.kind === 'sam3_fisheye_masks'
     ? maskFrame?.lenses?.find(item => item.lens === parsed.lens)
     : parsed?.kind === 'pinhole' && masks?.kind === 'sam3_pinhole_masks'
     ? maskFrame?.views?.find(item => item.lens === parsed.lens && item.view === parsed.view)
     : undefined
-  const denoisedAvailable = denoiseEnabled && !!parsed && !!denoise?.frames.some(frame => (
-    frame.index === parsed.index && (parsed.kind === 'erp'
-      ? frame.erp
-      : parsed.kind === 'native' ? (parsed.lens === 0 ? frame.lens0 : frame.lens1) : false)
-  ))
   const originalUrl = parsed?.kind === 'pinhole'
     ? pinholeImageUrl(projectId, parsed.index, parsed.view, parsed.lens)
     : parsed ? frameImageUrl(projectId, parsed.index, parsed.lens) : null
@@ -61,7 +51,6 @@ export const CameraInspector = ({ projectId, image, denoiseEnabled }: {
       <InspectorHeader title={image.name} />
       {parsed && originalUrl ? (
         <CapturePreview originalUrl={originalUrl} maskUrl={maskUrl}
-          denoisedUrl={denoisedAvailable ? denoisedImageUrl(projectId, parsed.index, parsed.lens) : null}
           view={view} onViewChange={setView} alt={image.name} />
       ) : (
         <div className="hint">{t('noCamImage')}</div>

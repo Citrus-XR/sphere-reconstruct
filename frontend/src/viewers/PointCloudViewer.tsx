@@ -67,49 +67,104 @@ const typing = () => {
   return !!el && ['INPUT', 'TEXTAREA', 'SELECT'].includes(el.tagName)
 }
 
-// Unity シーンビュー風の操作:
-//   右ドラッグ=視点回転 (マウス掴み), WASD/矢印=移動, E/Q=上下, Z/X=傾き(ロール),
-//   F=フォーカス (選択カメラ or シーン中心), ホイール=前後. 慣性なし.
-// 回転はカメラ自身のローカル軸まわりの四元数増分で行う (ロールで傾けた後も, 右ドラッグ回転が
-// 世界空間ではなく現在の傾いた視点基準になる).
-const AXIS_X = new THREE.Vector3(1, 0, 0)
-const AXIS_Y = new THREE.Vector3(0, 1, 0)
-const AXIS_Z = new THREE.Vector3(0, 0, 1)
+// Mouse look の yaw / pitch と Z/X の roll を独立状態にする。ローカル軸の quaternion を
+// 累積すると通常の mouse look だけでも roll が混入するため、YXZ 順で毎回再構成する。
+export const composeViewQuaternion = (
+  yaw: number,
+  pitch: number,
+  roll: number,
+  target = new THREE.Quaternion(),
+): THREE.Quaternion => target.setFromEuler(new THREE.Euler(pitch, yaw, roll, 'YXZ'))
+
+export const panViewPosition = (
+  position: THREE.Vector3,
+  quaternion: THREE.Quaternion,
+  movementX: number,
+  movementY: number,
+  sceneScale: number,
+): THREE.Vector3 => {
+  const distance = sceneScale * 0.0012
+  const screenRight = new THREE.Vector3(1, 0, 0).applyQuaternion(quaternion)
+  const screenUp = new THREE.Vector3(0, 1, 0).applyQuaternion(quaternion)
+  return position
+    .addScaledVector(screenRight, -movementX * distance)
+    .addScaledVector(screenUp, movementY * distance)
+}
+
+const PITCH_LIMIT = Math.PI / 2 - 0.01
 
 const FlyControls = ({ scale, center, selectedPos }: {
   scale: number; center: THREE.Vector3; selectedPos: THREE.Vector3 | null
 }) => {
   const { camera, gl } = useThree()
-  const look = useRef(false)
+  const interaction = useRef<'look' | 'pan' | null>(null)
+  const capturedPointer = useRef<number | null>(null)
   const keys = useRef<Record<string, boolean>>({})
+  const angles = useRef({ yaw: 0, pitch: 0, roll: 0 })
+
+  const applyOrientation = () => {
+    const value = angles.current
+    composeViewQuaternion(value.yaw, value.pitch, value.roll, camera.quaternion)
+  }
+
+  const readOrientation = () => {
+    const value = new THREE.Euler().setFromQuaternion(camera.quaternion, 'YXZ')
+    angles.current = { yaw: value.y, pitch: value.x, roll: value.z }
+  }
 
   const fitTo = (tgt: THREE.Vector3, dist: number) => {
     camera.position.set(tgt.x, tgt.y, tgt.z + dist)
     camera.up.set(0, 1, 0)
-    camera.lookAt(tgt) // ロールを 0 に戻して正立させる.
+    angles.current = { yaw: 0, pitch: 0, roll: 0 }
+    applyOrientation()
   }
   useEffect(() => { fitTo(center, scale) }, [center, scale]) // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     const dom = gl.domElement
+    const stopInteraction = () => {
+      if (interaction.current === 'look' && document.pointerLockElement)
+        document.exitPointerLock()
+      if (capturedPointer.current !== null && dom.hasPointerCapture?.(capturedPointer.current))
+        dom.releasePointerCapture(capturedPointer.current)
+      interaction.current = null
+      capturedPointer.current = null
+      dom.style.cursor = ''
+    }
     const onDown = (e: PointerEvent) => {
-      if (e.button !== 2) return
-      look.current = true; dom.requestPointerLock?.()
+      if (interaction.current !== null) return
+      if (e.button === 2) {
+        readOrientation()
+        interaction.current = 'look'
+        dom.requestPointerLock?.()
+      } else if (e.button === 1) {
+        e.preventDefault()
+        interaction.current = 'pan'
+        capturedPointer.current = e.pointerId
+        dom.setPointerCapture?.(e.pointerId)
+        dom.style.cursor = 'grabbing'
+      }
     }
     const onUp = (e: PointerEvent) => {
-      if (e.button !== 2) return
-      look.current = false
-      if (document.pointerLockElement) document.exitPointerLock()
+      if ((e.button === 2 && interaction.current === 'look')
+        || (e.button === 1 && interaction.current === 'pan')) stopInteraction()
     }
     const onMove = (e: PointerEvent) => {
-      if (!look.current) return
-      const s = 0.0022
-      // ローカル軸まわりに右から掛ける (現在の姿勢基準で yaw/pitch).
-      camera.quaternion
-        .multiply(new THREE.Quaternion().setFromAxisAngle(AXIS_Y, -e.movementX * s))
-        .multiply(new THREE.Quaternion().setFromAxisAngle(AXIS_X, -e.movementY * s))
+      if (interaction.current === 'look') {
+        const s = 0.0022
+        angles.current.yaw -= e.movementX * s
+        angles.current.pitch = THREE.MathUtils.clamp(
+          angles.current.pitch - e.movementY * s,
+          -PITCH_LIMIT,
+          PITCH_LIMIT,
+        )
+        applyOrientation()
+      } else if (interaction.current === 'pan') {
+        panViewPosition(camera.position, camera.quaternion, e.movementX, e.movementY, scale)
+      }
     }
     const onCtx = (e: Event) => e.preventDefault()
+    const onAux = (e: MouseEvent) => { if (e.button === 1) e.preventDefault() }
     const onWheel = (e: WheelEvent) => {
       e.preventDefault()
       const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion)
@@ -118,27 +173,45 @@ const FlyControls = ({ scale, center, selectedPos }: {
     const kd = (e: KeyboardEvent) => {
       if (typing()) return
       if (e.code === 'KeyF') { fitTo(selectedPos ?? center, selectedPos ? scale * 0.2 : scale); return }
+      if (!e.repeat && (e.code === 'KeyZ' || e.code === 'KeyX')) readOrientation()
       if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.code)) e.preventDefault()
       keys.current[e.code] = true
     }
     const ku = (e: KeyboardEvent) => { keys.current[e.code] = false }
+    const onBlur = () => { keys.current = {}; stopInteraction() }
+    const onPointerLockChange = () => {
+      if (interaction.current === 'look' && document.pointerLockElement !== dom)
+        interaction.current = null
+    }
     dom.addEventListener('pointerdown', onDown); window.addEventListener('pointerup', onUp)
+    window.addEventListener('pointercancel', stopInteraction)
     window.addEventListener('pointermove', onMove); dom.addEventListener('contextmenu', onCtx)
+    dom.addEventListener('auxclick', onAux); window.addEventListener('blur', onBlur)
+    document.addEventListener('pointerlockchange', onPointerLockChange)
     dom.addEventListener('wheel', onWheel, { passive: false })
     window.addEventListener('keydown', kd); window.addEventListener('keyup', ku)
     return () => {
       dom.removeEventListener('pointerdown', onDown); window.removeEventListener('pointerup', onUp)
+      window.removeEventListener('pointercancel', stopInteraction)
       window.removeEventListener('pointermove', onMove); dom.removeEventListener('contextmenu', onCtx)
+      dom.removeEventListener('auxclick', onAux); window.removeEventListener('blur', onBlur)
+      document.removeEventListener('pointerlockchange', onPointerLockChange)
       dom.removeEventListener('wheel', onWheel)
       window.removeEventListener('keydown', kd); window.removeEventListener('keyup', ku)
+      stopInteraction()
     }
   }, [camera, gl, scale, center, selectedPos])
 
   useFrame((_, dt) => {
     const k = keys.current
-    // ロールはローカル前方軸 (Z) まわり.
-    if (k.KeyZ) camera.quaternion.multiply(new THREE.Quaternion().setFromAxisAngle(AXIS_Z, 1.3 * dt))
-    if (k.KeyX) camera.quaternion.multiply(new THREE.Quaternion().setFromAxisAngle(AXIS_Z, -1.3 * dt))
+    const rollDirection = (k.KeyZ ? 1 : 0) - (k.KeyX ? 1 : 0)
+    if (rollDirection !== 0) {
+      angles.current.roll = THREE.MathUtils.euclideanModulo(
+        angles.current.roll + rollDirection * 1.3 * dt + Math.PI,
+        Math.PI * 2,
+      ) - Math.PI
+      applyOrientation()
+    }
     const v = new THREE.Vector3(
       (k.KeyD || k.ArrowRight ? 1 : 0) - (k.KeyA || k.ArrowLeft ? 1 : 0),
       (k.KeyE ? 1 : 0) - (k.KeyQ ? 1 : 0),
@@ -210,7 +283,6 @@ export const PointCloudViewer = ({
         <label><input type="checkbox" checked={showCenter} onChange={e => setShowCenter(e.target.checked)} /> {t('sc_center')}</label>
         <label>{t('sc_points')} <input type="range" min={1} max={8} step={0.5} value={pointSize}
           onChange={e => setPointSize(Number(e.target.value))} /></label>
-        <span style={{ marginLeft: 'auto', opacity: 0.6 }}>{t('sceneControlsHelp')}</span>
       </div>
 
       <Canvas camera={{ position: [0, 0, 10], near: 0.01, far: 100000, fov: 55 }}>

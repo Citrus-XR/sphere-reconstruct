@@ -94,6 +94,9 @@ class Database:
         for col, decl in (("msg_key", "TEXT"), ("msg_args", "TEXT"), ("kind", "TEXT NOT NULL DEFAULT 'log'")):
             with suppress(aiosqlite.OperationalError):
                 await self._conn.execute(f"ALTER TABLE event ADD COLUMN {col} {decl}")
+        # 廃止済みの独立画像処理 branch は camera solve を変更しなかったため、旧要約状態は
+        # main branch の最終成果である aligned へ一度だけ正規化する。
+        await self._conn.execute("UPDATE project SET state='aligned' WHERE state='denoised'")
         await self._conn.commit()
 
     async def close(self) -> None:

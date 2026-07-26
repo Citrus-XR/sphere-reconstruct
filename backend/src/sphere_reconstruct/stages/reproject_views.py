@@ -33,7 +33,7 @@ from ..pipeline.stage import Stage, StageContext, new_manifest
 @register
 class ReprojectViews(Stage):
     name = StageName.REPROJECT_VIEWS
-    impl_version = "0.2"
+    impl_version = "0.3"
 
     def collect_inputs(self, ctx: StageContext) -> list[FileRef]:
         # 入力ハッシュ: inspect_source の source.json + extract_frames の manifest_frames.json
@@ -199,6 +199,7 @@ class ReprojectViews(Stage):
         )
 
         manifest.outputs = outputs
+        manifest.extra = _rig_statistics(rig_manifest)
         ctx.progress.info("reproject_views done", progress=1.0, key="log.reproject_done")
         return manifest
 
@@ -291,12 +292,31 @@ class ReprojectViews(Stage):
             )
         )
         manifest.outputs = outputs
+        manifest.extra = _rig_statistics(rig_manifest)
         ctx.progress.info("reproject_views(ERP) done", progress=1.0, key="log.reproject_erp_done")
         return manifest
 
 
 def _lens_from_dict(d: dict) -> calib.MeiLensCalibration:
     return calib.MeiLensCalibration(**d)
+
+
+def _rig_statistics(manifest: dict) -> dict:
+    images = [view for frame in manifest["frames"] for view in frame["views"]]
+    valid_ratios = [float(view.get("valid_ratio", 0.0)) for view in images]
+    view_specs = manifest.get("views", [])
+    return {
+        "kind": manifest["kind"],
+        "frames": len(manifest["frames"]),
+        "views_per_frame": manifest["view_count"],
+        "lenses": manifest["lens_count"],
+        "images": len(images),
+        "image_size": view_specs[0]["size"] if view_specs else None,
+        "fov_deg": view_specs[0]["fov_deg"] if view_specs else None,
+        "minimum_valid_ratio": min(valid_ratios) if valid_ratios else 0.0,
+        "average_valid_ratio": sum(valid_ratios) / len(valid_ratios) if valid_ratios else 0.0,
+        "maximum_valid_ratio": max(valid_ratios) if valid_ratios else 0.0,
+    }
 
 
 def _final_relpath(p: Path, ctx: StageContext) -> str:

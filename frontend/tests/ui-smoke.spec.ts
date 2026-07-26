@@ -4,13 +4,13 @@ import { DEFAULT_PARAMS, paramsForStage, type ReconMode } from '../src/features/
 
 const MOCK_SOURCE = 'D:\\VID 2026\\clip.insv'
 const MOCK_EXPORT = 'D:\\LFStudio\\export_dataset'
+const MOCK_ENV_PATH = 'D:\\very-long-workspace-directory\\nested-runtime\\models\\and-tools\\current-environment'
 
 interface MockOptions {
   sourceKind?: 'insv' | 'erp_video'
   imageName?: string
   cameraModel?: string
   reconMode?: ReconMode
-  denoiseMethod?: 'off' | 'fastdvdnet' | 'ffmpeg_adaptive'
   secondProject?: boolean
 }
 
@@ -37,9 +37,9 @@ const installUiMock = async (page: Page, options: MockOptions = {}) => {
       const projects = [{
         id: 'p1', name: 'Mock project', created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z',
         source_kind: sourceKind, source_path: MOCK_SOURCE, state: 'exported',
-        ui_state: options.reconMode || options.denoiseMethod ? {
+        ui_state: options.reconMode ? {
           reconMode: options.reconMode,
-          params: options.denoiseMethod ? { denoiseMethod: options.denoiseMethod } : {},
+          params: {},
           disabled: [],
         } : null,
       }]
@@ -56,7 +56,7 @@ const installUiMock = async (page: Page, options: MockOptions = {}) => {
     }
     if (path === '/api/system/doctor') {
       await route.fulfill({ json: { ready: true, platform: {}, checks: {
-        workspace: { ok: true, message: 'ok', path: 'D:\\workspace' },
+        workspace: { ok: true, message: 'ok', path: MOCK_ENV_PATH },
       } } })
       return
     }
@@ -75,12 +75,22 @@ const installUiMock = async (page: Page, options: MockOptions = {}) => {
     const projectMatch = path.match(/^\/api\/projects\/(p1|p2)/)
     const projectId = projectMatch?.[1]
     if (projectId && path === `/api/projects/${projectId}/stages`) {
-      const names = ['inspect_source', 'extract_frames', 'generate_masks', 'extract_features', 'match_features', 'reconstruct', 'align_reconstruction', 'denoise_frames', 'export_dataset']
+      const names = ['inspect_source', 'extract_frames', 'generate_masks', 'extract_features', 'match_features', 'reconstruct', 'align_reconstruction', 'export_dataset']
+      const extras: Record<string, Record<string, unknown>> = {
+        inspect_source: { kind: 'insv', file_size: 1024, gravity_samples: 42 },
+        extract_frames: { frames: 1, selection_mode: 'interval', selected: 1 },
+        generate_masks: { images: 2, average_dynamic_coverage: 0.1, coverage_warnings: 0 },
+        extract_features: { images: 2, minimum_keypoints: 100, average_keypoints: 200, maximum_keypoints: 300, descriptor_images: 2 },
+        match_features: { raw_pairs: 1, verified_pairs: 1, minimum_inliers: 20, average_inliers: 20, maximum_inliers: 20, total_inliers: 20 },
+        reconstruct: { input_images: 2, num_images: 2, num_points3D: 42, registered_ratio: 1, mean_reprojection_error: 0.5 },
+        align_reconstruction: { applied: true, spread_deg: 0.4, normalization_scale: 1, preview_points: 42 },
+        export_dataset: { images: 2, total_points: 42, validation: { loadable: true, training_ready: true }, lfstudio_training_metrics: 'external' },
+      }
       await route.fulfill({ json: { project_id: 'p1', state: 'exported', stages: names.map(stage => ({
         stage, has_output: true, status: 'succeeded', error_text: null, job_id: null,
         started_at: null, finished_at: null,
-        params: stage === 'denoise_frames' ? { method: 'fastdvdnet' } : paramsForStage(stage, DEFAULT_PARAMS, reconMode),
-        extra: null,
+        params: paramsForStage(stage, DEFAULT_PARAMS, reconMode),
+        extra: extras[stage],
       })) } })
       return
     }
@@ -123,22 +133,12 @@ const installUiMock = async (page: Page, options: MockOptions = {}) => {
         : { kind: 'sam3_erp_masks', frames: [{ index: 0, path: 'mask.png', coverage: 0.1 }] } })
       return
     }
-    if (projectId && path === `/api/projects/${projectId}/denoise`) {
-      await route.fulfill({ json: { method: 'fastdvdnet', device: 'cuda', frames: [
-        sourceKind === 'insv'
-          ? { index: 0, lens0: 'denoise/front/frame_000000.jpg', lens1: 'denoise/back/frame_000000.jpg' }
-          : { index: 0, erp: 'denoise/frame_000000.jpg' },
-      ] } })
-      return
-    }
     if (projectId && path === `/api/projects/${projectId}/fisheye-region`) {
       await route.fulfill({ json: { lens0: { cx: 0.5, cy: 0.5, r: 0.48 }, lens1: { cx: 0.5, cy: 0.5, r: 0.48 }, saved: true } })
       return
     }
     if (projectId && path === `/api/projects/${projectId}/export-info`) {
-      await route.fulfill({ json: { dir: MOCK_EXPORT, dataset_dir: MOCK_EXPORT,
-        preview_dir: `${MOCK_EXPORT}\\preview`, train_configs_dir: `${MOCK_EXPORT}\\train_configs`,
-        training_output_dir: 'D:\\LFStudio\\training_outputs' } })
+      await route.fulfill({ json: { dir: MOCK_EXPORT, gui_integration: null } })
       return
     }
     if (path.includes('/image') || path.includes('/fisheye-mask/') || path.includes('/pinhole/')) {
@@ -182,10 +182,19 @@ test('IDE loads the split pipeline and environment diagnostics', async ({ page }
   await expect(page.getByText('Extract features', { exact: true })).toBeVisible()
   await expect(page.getByText('Match features', { exact: true })).toBeVisible()
   await expect(page.getByText('Gravity alignment', { exact: true })).toBeVisible()
-  await expect(page.getByText('Training image denoise', { exact: true })).toBeVisible()
+  await expect(page.getByText('Export', { exact: true })).toBeVisible()
 
   await page.getByTitle('Settings').click()
   await expect(page.getByText(/Environment [✓⚠]/)).toBeVisible()
+  const popBox = await page.locator('.pop').boundingBox()
+  const environmentPath = page.locator('.environment-check .path-text')
+  const pathBox = await environmentPath.boundingBox()
+  expect(popBox).not.toBeNull()
+  expect(pathBox).not.toBeNull()
+  expect(pathBox!.x + pathBox!.width).toBeLessThanOrEqual(popBox!.x + popBox!.width + 0.5)
+  expect(await environmentPath.locator('.path-value').evaluate(
+    element => element.scrollWidth > element.clientWidth,
+  )).toBe(true)
   expect(errors).toEqual([])
   expect(mock.unexpectedRequests).toEqual([])
 })
@@ -195,7 +204,7 @@ test('scene copy follows language and paths remain copyable native values', asyn
   const mock = await installUiMock(page)
   await page.goto('/')
 
-  await expect(page.getByText('Right-drag: look · WASD/arrows: move · Z/X: roll · F: focus')).toBeVisible()
+  await expect(page.locator('.scene-toolbar')).not.toContainText('Right-drag')
   await expect(page.getByText(/Images 1 · Points 42 · Registered 100% · Path span 1\.250 units/)).toBeVisible()
 
   const sourcePath = page.locator('.ide-source-path')
@@ -207,22 +216,45 @@ test('scene copy follows language and paths remain copyable native values', asyn
   expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(MOCK_SOURCE)
 
   await page.getByText('Export', { exact: true }).click()
-  await expect(page.getByText('D:/LFStudio/export_dataset', { exact: true }).first()).toBeVisible()
+  await expect(page.getByText('D:/LFStudio/export_dataset', { exact: true })).toHaveCount(1)
+  const statistics = page.getByRole('button', { name: 'Stage statistics', exact: true })
+  await expect(statistics).toHaveAttribute('aria-expanded', 'false')
+  await expect(page.getByText('LFStudio training loss / PSNR / SSIM', { exact: true })).toHaveCount(0)
+  await statistics.click()
+  await expect(statistics).toHaveAttribute('aria-expanded', 'true')
+  await expect(page.getByText('LFStudio training loss / PSNR / SSIM', { exact: true })).toBeVisible()
+  await expect(page.getByText(/unavailable \(LFStudio training and its output directory are externally managed\)/)).toBeVisible()
   const displayedPaths = (await page.locator('.path-value').allTextContents()).join('\n')
   expect(displayedPaths).not.toContain('¥')
   expect(displayedPaths).not.toContain('\\')
 
   await page.getByTitle('Settings').click()
   await page.locator('.pop select').nth(1).selectOption('zh')
-  await expect(page.getByText('右键拖动: 视角 · WASD/方向键: 移动 · Z/X: 倾斜 · F: 聚焦')).toBeVisible()
   await expect(page.getByText(/图像 1 · 点 42 · 注册 100% · 轨迹范围 1\.250 单位/)).toBeVisible()
   await expect(page.getByText('场景视图', { exact: true }).first()).toBeVisible()
   expect(mock.unexpectedRequests).toEqual([])
 })
 
+test('middle mouse drag activates Scene View panning', async ({ page }) => {
+  const mock = await installUiMock(page)
+  await page.goto('/')
+
+  const canvas = page.locator('canvas').first()
+  await expect(canvas).toBeVisible()
+  const bounds = await canvas.boundingBox()
+  expect(bounds).not.toBeNull()
+  await page.mouse.move(bounds!.x + bounds!.width / 2, bounds!.y + bounds!.height / 2)
+  await page.mouse.down({ button: 'middle' })
+  await expect(canvas).toHaveCSS('cursor', 'grabbing')
+  await page.mouse.move(bounds!.x + bounds!.width / 2 + 80, bounds!.y + bounds!.height / 2 + 40, { steps: 4 })
+  await page.mouse.up({ button: 'middle' })
+  await expect(canvas).not.toHaveCSS('cursor', 'grabbing')
+  expect(mock.unexpectedRequests).toEqual([])
+})
+
 test('photo and dataset camera inspectors share capture summary fields', async ({ page }) => {
   test.setTimeout(60_000)
-  const mock = await installUiMock(page, { denoiseMethod: 'fastdvdnet' })
+  const mock = await installUiMock(page)
   await page.goto('/')
 
   const photo = page.getByText('Frame 0', { exact: true })
@@ -234,10 +266,6 @@ test('photo and dataset camera inspectors share capture summary fields', async (
   await expect(summary.getByText('Lens', { exact: true })).toBeVisible()
   await expect(summary.getByText('Reconstruction registration', { exact: true })).toBeVisible()
   await expect(summary.getByText('Frame 3D points', { exact: true })).toBeVisible()
-  await expect(page.getByText('Denoised', { exact: true })).toBeVisible()
-  const frameDenoiseRequest = page.waitForRequest(request => request.url().includes('/denoise/0/image?lens=0'))
-  await page.getByText('Denoised', { exact: true }).click()
-  await frameDenoiseRequest
 
   const cameras = page.getByText(/Dataset · Cameras/)
   await expect(cameras).toBeVisible()
@@ -252,59 +280,61 @@ test('photo and dataset camera inspectors share capture summary fields', async (
   await expect(summary.getByText('Reconstruction registration', { exact: true })).toBeVisible()
   await expect(summary.getByText('Image 3D points', { exact: true })).toBeVisible()
   await expect(page.getByText('Camera position', { exact: true })).toBeVisible()
-  await expect(page.getByText('Denoised', { exact: true })).toBeVisible()
   expect(mock.unexpectedRequests).toEqual([])
 })
 
-test('temporal denoise can be configured from the stage inspector', async ({ page }) => {
+test('feature, matching, and mapper controls have localized names and explanations', async ({ page }) => {
   const mock = await installUiMock(page)
   await page.goto('/')
 
-  await page.getByText('Training image denoise', { exact: true }).click()
-  const method = page.getByText('Temporal denoise', { exact: true }).locator('..').locator('select')
-  const runButton = page.getByRole('button', { name: 'Regenerate', exact: true })
-  await expect(method).toHaveValue('off')
-  await expect(runButton).toBeDisabled()
+  await page.getByText('Extract features', { exact: true }).click()
+  await expect(page.getByText('Feature image-size limit (max_image_size)', { exact: true })).toBeVisible()
+  await expect(page.getByText('Features per image (max_num_features)', { exact: true })).toBeVisible()
+  await expect(page.getByText('SIFT peak threshold (peak_threshold)', { exact: true })).toBeVisible()
+  await expect(page.getByText('SIFT edge threshold (edge_threshold)', { exact: true })).toBeVisible()
+  await expect(page.getByText('Affine shape + DSP (affine_shape + DSP)', { exact: true })).toBeVisible()
+  const featureStatistics = page.getByRole('button', { name: 'Stage statistics', exact: true })
+  await expect(featureStatistics).toHaveAttribute('aria-expanded', 'false')
+  await featureStatistics.click()
+  await expect(page.getByText('Minimum keypoints', { exact: true })).toBeVisible()
+  await expect(page.getByText('Maximum keypoints', { exact: true })).toBeVisible()
 
-  await method.selectOption('fastdvdnet')
-  await expect(page.getByText('Noise strength σ', { exact: true })).toBeVisible()
-  await expect(page.getByText('GPU tile', { exact: true })).toBeVisible()
-  await expect(page.getByText('LFStudio export: denoised images (camera poses unchanged)')).toBeVisible()
-  await expect(runButton).toBeEnabled()
-  await runButton.click()
-  await expect.poll(() => mock.reruns.length).toBe(1)
-  expect(mock.reruns[0]).toEqual({
-    stage: 'denoise_frames',
-    body: { params_by_stage: { denoise_frames: {
-      method: 'fastdvdnet', sigma: 10, tile_size: 512, tile_overlap: 80, jpeg_quality: 98,
-    } } },
-  })
+  await page.getByText('Match features', { exact: true }).click()
+  await expect(page.getByText('Feature matcher (matcher_type)', { exact: true })).toBeVisible()
+  await expect(page.getByText('Image-pair strategy (pairing)', { exact: true })).toBeVisible()
+  await expect(page.getByText('Loop closure (loop_closure)', { exact: true })).toBeVisible()
+  await expect(page.getByText('Matches per image pair (max_num_matches)', { exact: true })).toBeVisible()
+  await expect(page.getByText('Two-view minimum inliers (two-view min_num_inliers)', { exact: true })).toBeVisible()
+  await expect(page.getByText('Geometry-guided matching (guided_matching)', { exact: true })).toBeVisible()
+
+  await page.getByText('Sparse reconstruction', { exact: true }).click()
+  await expect(page.getByText('Reconstruction solver (mapper)', { exact: true })).toBeVisible()
+  await expect(page.getByText('View-graph calibration (view_graph_calibration)', { exact: true })).toBeVisible()
+  await expect(page.getByText('GPU bundle adjustment (ba_use_gpu)', { exact: true })).toBeVisible()
+
+  await page.getByTitle('Settings').click()
+  await page.locator('.pop select').nth(1).selectOption('zh')
+  await expect(page.getByText('重建器 (mapper)', { exact: true })).toBeVisible()
+  await expect(page.getByText('视图图校准 (view_graph_calibration)', { exact: true })).toBeVisible()
+  await expect(page.getByText('GPU 光束平差 (ba_use_gpu)', { exact: true })).toBeVisible()
+  await page.mouse.click(10, 200)
+  await page.getByText('特征匹配', { exact: true }).click()
+  await expect(page.getByText('特征匹配器 (matcher_type)', { exact: true })).toBeVisible()
+  await expect(page.getByText('图像配对策略 (pairing)', { exact: true })).toBeVisible()
+  await expect(page.getByText('双视图最少内点数 (two-view min_num_inliers)', { exact: true })).toBeVisible()
+  await page.getByText('特征抽取', { exact: true }).click()
+  await expect(page.getByText('特征抽取最大图像尺寸 (max_image_size)', { exact: true })).toBeVisible()
+  await expect(page.getByText('每张图像最大特征数 (max_num_features)', { exact: true })).toBeVisible()
+  await expect(page.getByText('SIFT 峰值阈值 (peak_threshold)', { exact: true })).toBeVisible()
+  await expect(page.getByText('SIFT 边缘阈值 (edge_threshold)', { exact: true })).toBeVisible()
+  await expect(page.getByText('仿射形状 + DSP (affine_shape + DSP)', { exact: true })).toBeVisible()
   expect(mock.unexpectedRequests).toEqual([])
 })
 
-test('denoise applicability and export prerequisite follow current settings', async ({ page }) => {
-  const mock = await installUiMock(page)
-  await page.goto('/')
-
-  await page.getByRole('button', { name: /Frame 0/ }).click()
-  await expect(page.getByRole('tab', { name: 'Denoised' })).toHaveCount(0)
-  const denoiseStep = page.getByRole('button', { name: /Training image denoise skip/ })
-  await expect(denoiseStep).toBeVisible()
-  await denoiseStep.click()
-  await page.getByLabel('Temporal denoise').selectOption('fastdvdnet')
-
-  await page.getByRole('button', { name: /Export/ }).click()
-  await expect(page.getByText('Generate training-image denoise with the current settings first.')).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Regenerate', exact: true })).toBeDisabled()
-  expect(mock.unexpectedRequests).toEqual([])
-})
-
-test('switching projects resets denoise and inspector selection state', async ({ page }) => {
+test('switching projects resets inspector selection state', async ({ page }) => {
   const mock = await installUiMock(page, { secondProject: true })
   await page.goto('/')
 
-  await page.getByRole('button', { name: /Training image denoise skip/ }).click()
-  await page.getByLabel('Temporal denoise').selectOption('fastdvdnet')
   await page.getByRole('button', { name: /Frame 0/ }).click()
   await expect(page.getByTestId('capture-summary')).toBeVisible()
 
@@ -312,8 +342,6 @@ test('switching projects resets denoise and inspector selection state', async ({
   await page.getByText('Second project', { exact: true }).click()
   await expect(page.locator('h1')).toHaveText('Second project')
   await expect(page.getByTestId('capture-summary')).toHaveCount(0)
-  await page.getByRole('button', { name: /Training image denoise skip/ }).click()
-  await expect(page.getByLabel('Temporal denoise')).toHaveValue('off')
   expect(mock.unexpectedRequests).toEqual([])
 })
 
@@ -333,15 +361,11 @@ test('dataset camera preview resolves ERP and pinhole image layouts', async ({ p
     sourceKind: 'erp_video',
     imageName: 'frame_000000.jpg',
     cameraModel: 'EQUIRECTANGULAR',
-    denoiseMethod: 'fastdvdnet',
   })
   await page.goto('/')
   await page.getByRole('button', { name: /Dataset · Cameras/ }).click()
   await page.getByRole('button', { name: 'frame_000000.jpg' }).click()
   await expect(page.locator('.inspector-preview-image')).toHaveAttribute('src', /\/frames\/0\/image\?lens=0$/)
-  const erpDenoise = page.waitForRequest(request => request.url().includes('/denoise/0/image?lens=0'))
-  await page.getByRole('tab', { name: 'Denoised' }).click()
-  await erpDenoise
   expect(erpMock.unexpectedRequests).toEqual([])
 })
 
@@ -355,7 +379,6 @@ test('pinhole dataset camera uses the reprojected view endpoint', async ({ page 
   await page.getByRole('button', { name: /Dataset · Cameras/ }).click()
   await page.getByRole('button', { name: 'front_lens0/frame_000000.jpg' }).click()
   await expect(page.locator('.inspector-preview-image')).toHaveAttribute('src', /\/pinhole\/0\/front\?lens=0$/)
-  await expect(page.getByRole('tab', { name: 'Denoised' })).toHaveCount(0)
   expect(mock.unexpectedRequests).toEqual([])
 })
 
@@ -449,10 +472,8 @@ test('complete INSV flow can be driven from UI', async ({ page, request }) => {
     stages: Array<{ stage: string; has_output: boolean }>
   }
   expect(finalStatuses.stages.find(item => item.stage === 'export_dataset')?.has_output).toBe(true)
-  const exportInfo = await (await request.get(`/api/projects/${project!.id}/export-info`)).json() as {
-    dir: string; dataset_dir: string
-  }
-  expect(exportInfo.dataset_dir).toBe(exportInfo.dir)
+  const exportInfo = await (await request.get(`/api/projects/${project!.id}/export-info`)).json() as { dir: string }
+  expect(exportInfo.dir).toBeTruthy()
   if (process.env.SPHERE_E2E_KEEP !== '1') {
     await request.delete(`/api/projects/${project!.id}`)
   } else {

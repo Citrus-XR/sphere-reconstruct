@@ -15,6 +15,13 @@ def test_feature_defaults_use_sift_for_normal_footage():
     assert params["max_num_features"] == 8192
 
 
+def test_zero_feature_limits_delegate_to_colmap_defaults():
+    params = ExtractFeatures().normalize_params({"max_image_size": 0, "max_num_features": 0})
+    args = ExtractFeatures._feature_args(params, None)
+    assert "--FeatureExtraction.max_image_size" not in args
+    assert "--SiftExtraction.max_num_features" not in args
+
+
 def test_matching_defaults_to_fast_bruteforce():
     params = MatchFeatures().normalize_params({})
     assert params["matcher_type"] == "bruteforce"

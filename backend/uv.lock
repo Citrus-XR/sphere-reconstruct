@@ -1671,12 +1671,6 @@ aliked = [
     { name = "onnxruntime-gpu", marker = "sys_platform != 'darwin'" },
     { name = "opencv-python-headless" },
 ]
-denoise = [
-    { name = "opencv-python-headless" },
-    { name = "pillow" },
-    { name = "torch", version = "2.11.0+cu128", source = { registry = "https://download.pytorch.org/whl/cu128" }, marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
-    { name = "torch", version = "2.13.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'linux' and sys_platform != 'win32'" },
-]
 dev = [
     { name = "httpx" },
     { name = "mypy" },
@@ -1735,11 +1729,9 @@ requires-dist = [
     { name = "onnxruntime-gpu", marker = "sys_platform != 'darwin' and extra == 'aliked'", specifier = ">=1.19,<1.23" },
     { name = "open-clip-torch", marker = "extra == 'sam3'" },
     { name = "opencv-python-headless", marker = "extra == 'aliked'", specifier = ">=4.10" },
-    { name = "opencv-python-headless", marker = "extra == 'denoise'", specifier = ">=4.10" },
     { name = "opencv-python-headless", marker = "extra == 'imaging'", specifier = ">=4.10" },
     { name = "opencv-python-headless", marker = "extra == 'sam3'", specifier = ">=4.10" },
     { name = "pandas", marker = "extra == 'sam3'" },
-    { name = "pillow", marker = "extra == 'denoise'", specifier = ">=11.0" },
     { name = "pillow", marker = "extra == 'imaging'", specifier = ">=11.0" },
     { name = "pillow", marker = "extra == 'sam3'", specifier = ">=11.0" },
     { name = "psutil", specifier = ">=6.1" },
@@ -1758,9 +1750,7 @@ requires-dist = [
     { name = "submitit", marker = "extra == 'sam3'" },
     { name = "timm", marker = "extra == 'sam3'", specifier = ">=1.0.17" },
     { name = "tomli", marker = "python_full_version < '3.11'", specifier = ">=2.0" },
-    { name = "torch", marker = "(sys_platform == 'linux' and extra == 'denoise') or (sys_platform == 'win32' and extra == 'denoise')", specifier = ">=2.5", index = "https://download.pytorch.org/whl/cu128" },
     { name = "torch", marker = "(sys_platform == 'linux' and extra == 'sam3') or (sys_platform == 'win32' and extra == 'sam3')", specifier = ">=2.5", index = "https://download.pytorch.org/whl/cu128" },
-    { name = "torch", marker = "sys_platform != 'linux' and sys_platform != 'win32' and extra == 'denoise'", specifier = ">=2.5" },
     { name = "torch", marker = "sys_platform != 'linux' and sys_platform != 'win32' and extra == 'sam3'", specifier = ">=2.5" },
     { name = "torchmetrics", marker = "extra == 'sam3'" },
     { name = "torchvision", marker = "(sys_platform == 'linux' and extra == 'sam3') or (sys_platform == 'win32' and extra == 'sam3')", specifier = ">=0.20", index = "https://download.pytorch.org/whl/cu128" },
@@ -1769,7 +1759,7 @@ requires-dist = [
     { name = "typing-extensions", specifier = ">=4.12" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
 ]
-provides-extras = ["imaging", "denoise", "sam3", "dev", "aliked"]
+provides-extras = ["imaging", "sam3", "dev", "aliked"]
 
 [[package]]
 name = "starlette"

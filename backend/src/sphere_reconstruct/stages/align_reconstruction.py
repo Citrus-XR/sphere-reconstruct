@@ -22,7 +22,7 @@ from .colmap_progress import hidden_log
 @register
 class AlignReconstruction(Stage):
     name = StageName.ALIGN_RECONSTRUCTION
-    impl_version = "1.0"
+    impl_version = "1.1"
 
     def normalize_params(self, raw: dict) -> dict:
         method = str(raw.get("method", "auto")).lower()

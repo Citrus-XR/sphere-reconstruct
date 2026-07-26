@@ -27,13 +27,13 @@ from pathlib import Path
 from typing import Any
 
 from ..domain.artifacts import StageManifest, manifest_path
-from ..domain.pipeline_state import STAGE_ORDER, StageName
+from ..domain.pipeline_state import STAGE_ORDER, StageName, downstream_of
 from ..infrastructure.filesystem import atomic_replace_dir
 from .invalidation import (
+    assert_export_is_managed,
     clear_stale,
     derive_pipeline_state,
     invalidate_from,
-    preserve_export_outputs,
 )
 from .manifest import get as get_stage_cls
 from .stage import ProgressReporter, StageContext
@@ -156,6 +156,9 @@ class Engine:
             self._refresh_project_state()
             return
 
+        if StageName.EXPORT_DATASET in downstream_of(stage_name):
+            assert_export_is_managed(project_dir)
+
         # stage_run 挿入 (running).
         self._execute(
             """
@@ -190,15 +193,10 @@ class Engine:
             shutil.rmtree(tmp_dir, ignore_errors=True)
             raise
 
-        # LFStudio の既定 output は export_dataset 内に作られる。stage の原子置換前に
-        # unmanaged training result を永続領域へ移し、再生成可能な export だけを置換する。
+        # 外部アプリケーションの成果は管理しない。dataset root に混在している場合は、
+        # 原子置換で失われる前に明示的に停止する。
         if stage_name == StageName.EXPORT_DATASET:
-            for preserved in preserve_export_outputs(project_dir):
-                reporter.warn(
-                    f"LFStudio 学習結果を保護しました: {preserved}",
-                    key="log.export_preserved_output",
-                    args={"path": str(preserved)},
-                )
+            assert_export_is_managed(project_dir)
 
         # tmp -> final を原子置換.
         atomic_replace_dir(tmp_dir, final_dir)

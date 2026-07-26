@@ -36,7 +36,7 @@ export const SettingsMenu = () => {
                 <option value="en">English</option>
               </select>
             </div>
-            {doctor && <div className="ctl" style={{ marginTop: 10, marginBottom: 0, minWidth: 280 }}>
+            {doctor && <div className="ctl environment-check" style={{ marginTop: 10, marginBottom: 0 }}>
               <label>{t('environment')} {doctor.ready ? '✓' : '⚠'}</label>
               {Object.entries(doctor.checks).map(([name, check]) => (
                 <div key={name} style={{ marginBottom: 4, color: check.ok ? '#4caf50' : check.optional ? '#d69a2a' : 'var(--error)' }}>

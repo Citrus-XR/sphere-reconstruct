@@ -28,11 +28,6 @@ imaging = [
     "opencv-python-headless>=4.10",
     "Pillow>=11.0",
 ]
-denoise = [
-    "torch>=2.5",
-    "opencv-python-headless>=4.10",
-    "Pillow>=11.0",
-]
 # SAM3 推論. torch は cu128 index から. sam3 パッケージ本体は sys.path 経由で
 # import するので, ここではその実行時依存を入れる. sam3 の pyproject が宣言する
 # 依存は不完全で, model_builder が tracker / train パスを無条件 import するため

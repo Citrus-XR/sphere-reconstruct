@@ -1,8 +1,8 @@
 """パイプライン全体の状態遷移.
 
 Main reconstruction branch は EXTRACTED から FEATURES_EXTRACTED -> MATCHED -> RECONSTRUCTED ->
-ALIGNED へ進む。DENOISED は EXTRACTED から分岐し、両 branch を EXPORTED が消費する。
-REPROJECTED / MASKED は mode と optional stage に応じて main branch の途中へ入る。
+ALIGNED -> EXPORTED へ進む。REPROJECTED / MASKED は mode と optional stage に応じて
+main branch の途中へ入る。
 
 各ステージは冪等。入力が変わった場合は consumer graph だけを transitive invalidate し、独立
 branch の再生成可能 artifact を保持する。PipelineState は UI / DB 用の要約で、artifact の真偽は
@@ -24,7 +24,6 @@ class PipelineState(StrEnum):
     MATCHED = "matched"
     RECONSTRUCTED = "reconstructed"
     ALIGNED = "aligned"
-    DENOISED = "denoised"
     EXPORTED = "exported"
 
     def order(self) -> int:
@@ -44,8 +43,7 @@ _ORDER: dict[PipelineState, int] = {
     PipelineState.MATCHED: 6,
     PipelineState.RECONSTRUCTED: 7,
     PipelineState.ALIGNED: 8,
-    PipelineState.DENOISED: 9,
-    PipelineState.EXPORTED: 10,
+    PipelineState.EXPORTED: 9,
 }
 
 
@@ -60,7 +58,6 @@ class StageName(StrEnum):
     MATCH_FEATURES = "match_features"
     RECONSTRUCT = "reconstruct"
     ALIGN_RECONSTRUCTION = "align_reconstruction"
-    DENOISE_FRAMES = "denoise_frames"
     EXPORT_DATASET = "export_dataset"
 
 
@@ -73,7 +70,6 @@ STAGE_TO_STATE: dict[StageName, PipelineState] = {
     StageName.MATCH_FEATURES: PipelineState.MATCHED,
     StageName.RECONSTRUCT: PipelineState.RECONSTRUCTED,
     StageName.ALIGN_RECONSTRUCTION: PipelineState.ALIGNED,
-    StageName.DENOISE_FRAMES: PipelineState.DENOISED,
     StageName.EXPORT_DATASET: PipelineState.EXPORTED,
 }
 
@@ -87,7 +83,6 @@ STAGE_ORDER: tuple[StageName, ...] = (
     StageName.MATCH_FEATURES,
     StageName.RECONSTRUCT,
     StageName.ALIGN_RECONSTRUCTION,
-    StageName.DENOISE_FRAMES,
     StageName.EXPORT_DATASET,
 )
 
@@ -98,7 +93,6 @@ _STAGE_CONSUMERS: dict[StageName, tuple[StageName, ...]] = {
         StageName.REPROJECT_VIEWS,
         StageName.GENERATE_MASKS,
         StageName.EXTRACT_FEATURES,
-        StageName.DENOISE_FRAMES,
     ),
     StageName.REPROJECT_VIEWS: (StageName.GENERATE_MASKS, StageName.EXTRACT_FEATURES),
     StageName.GENERATE_MASKS: (StageName.EXTRACT_FEATURES,),
@@ -106,7 +100,6 @@ _STAGE_CONSUMERS: dict[StageName, tuple[StageName, ...]] = {
     StageName.MATCH_FEATURES: (StageName.RECONSTRUCT,),
     StageName.RECONSTRUCT: (StageName.ALIGN_RECONSTRUCTION,),
     StageName.ALIGN_RECONSTRUCTION: (StageName.EXPORT_DATASET,),
-    StageName.DENOISE_FRAMES: (StageName.EXPORT_DATASET,),
     StageName.EXPORT_DATASET: (),
 }
 

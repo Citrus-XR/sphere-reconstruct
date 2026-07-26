@@ -67,7 +67,7 @@ export const StageSettings = ({
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['stages', projectId] })
       // 成果物が消えると 404 になるクエリは remove で破棄 (invalidate だと前回 data が残る).
-      for (const key of ['reconstruction', 'frames', 'fisheye-region', 'masks', 'denoise', 'export-info']) {
+      for (const key of ['reconstruction', 'frames', 'fisheye-region', 'masks', 'export-info']) {
         qc.removeQueries({ queryKey: [key, projectId] })
       }
     },
@@ -80,18 +80,14 @@ export const StageSettings = ({
 
   const predBase = sourceInfo?.duration_sec ? Math.floor(sourceInfo.duration_sec * params.fps) : null
   const predCapped = predBase != null && params.maxFrames > 0 ? Math.min(predBase, params.maxFrames) : predBase
-  const stageConfigDisabled = stage === 'denoise_frames'
-    && (params.denoiseMethod === 'off' || reconMode === 'pinhole_rig' || sourceKind === 'erp_images')
   return (
     <div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
         <strong style={{ flex: 1 }}>{t(`st_${stage}`)}</strong>
         {processing && stageIsRunning
           ? <button className="btn stop" onClick={onStop}>■ {t('stop')}</button>
-          : <button className="btn" disabled={run.isPending || !hasSource || processing || stageConfigDisabled || !!blockedReason}
+          : <button className="btn" disabled={run.isPending || !hasSource || processing || !!blockedReason}
               title={!hasSource ? t('noSource') : processing ? t('otherRunning')
-                : stageConfigDisabled ? (reconMode === 'pinhole_rig' ? t('denoisePinholeUnsupported')
-                  : sourceKind === 'erp_images' ? t('denoiseVideoOnly') : t('denoiseEnableFirst'))
                 : blockedReason ?? ''}
               onClick={() => run.mutate()}>
               {status?.has_output ? t('regenerate') : t('generate')}
@@ -124,7 +120,7 @@ export const StageSettings = ({
       {blockedReason && <div className="hint" style={{ color: '#d69a2a', marginBottom: 8 }}>{blockedReason}</div>}
       {run.error && <div className="error">{String(run.error)}</div>}
       {clear.error && <div className="error">{String(clear.error)}</div>}
-      {status?.has_output && status.extra && <StageResult stage={stage} extra={status.extra} />}
+      {status?.has_output && status.extra && <StageResult key={stage} stage={stage} extra={status.extra} />}
 
       {stage === 'extract_frames' && (
         <>
@@ -278,23 +274,26 @@ export const StageSettings = ({
             </select>
             <div className="hint">{t('hint_backend')}</div>
           </div>
-          <NumField label={t('f_maxImageSize')} value={params.featureMaxImageSize}
+          <NumField label={t('f_maxImageSize')} hint={t('hint_maxImageSize')} value={params.featureMaxImageSize}
             onChange={value => setParams({ featureMaxImageSize: value, qualityPreset: 'custom' })} />
-          <NumField label={t('f_maxFeatures')} value={params.featureMaxNumFeatures}
+          <NumField label={t('f_maxFeatures')} hint={t('hint_maxFeatures')} value={params.featureMaxNumFeatures}
             onChange={value => setParams({ featureMaxNumFeatures: value, qualityPreset: 'custom' })} />
           <label style={{ display: 'inline-flex', gap: 6, alignItems: 'center', margin: '4px 0' }}>
             <input type="checkbox" checked={params.featureUseGpu}
               onChange={() => setParams({ featureUseGpu: !params.featureUseGpu })} /> GPU
           </label>
           {params.featureType === 'SIFT' && <>
-            <NumField label={t('f_peakThreshold')} value={params.siftPeakThreshold} step={0.0001}
+            <NumField label={t('f_peakThreshold')} hint={t('hint_peakThreshold')} value={params.siftPeakThreshold} step={0.0001}
               onChange={value => setParams({ siftPeakThreshold: value, qualityPreset: 'custom' })} />
-            <NumField label={t('f_edgeThreshold')} value={params.siftEdgeThreshold} step={0.5}
+            <NumField label={t('f_edgeThreshold')} hint={t('hint_edgeThreshold')} value={params.siftEdgeThreshold} step={0.5}
               onChange={value => setParams({ siftEdgeThreshold: value, qualityPreset: 'custom' })} />
-            <label style={{ display: 'inline-flex', gap: 6, alignItems: 'center', margin: '4px 0' }}>
-              <input type="checkbox" checked={params.siftAffineDsp}
-                onChange={() => setParams({ siftAffineDsp: !params.siftAffineDsp, qualityPreset: 'custom' })} /> {t('f_affineDsp')}
-            </label>
+            <div className="ctl">
+              <label style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
+                <input type="checkbox" checked={params.siftAffineDsp}
+                  onChange={() => setParams({ siftAffineDsp: !params.siftAffineDsp, qualityPreset: 'custom' })} /> {t('f_affineDsp')}
+              </label>
+              <div className="hint">{t('hint_affineDsp')}</div>
+            </div>
           </>}
         </>
       )}
@@ -308,6 +307,7 @@ export const StageSettings = ({
               <option value="bruteforce">Brute-force</option>
               <option value="lightglue">LightGlue</option>
             </select>
+            <div className="hint">{t('hint_matcher')}</div>
           </div>
           <div className="ctl">
             <label>{t('lbl_pairing')}</label>
@@ -317,23 +317,30 @@ export const StageSettings = ({
               <option value="exhaustive">{t('matcher_exhaustive')}</option>
               <option value="vocab_tree">{t('matcher_vocab')}</option>
             </select>
+            <div className="hint">{t('hint_pairing')}</div>
           </div>
           {params.pairing === 'sequential' && <>
             <Slider label={t('lbl_overlap')} hint={t('hint_overlap')} min={2} max={20} step={1}
               value={params.overlap} onChange={value => setParams({ overlap: Math.round(value) })} fmt={value => `${value}`} />
-            <label style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
-              <input type="checkbox" checked={params.loopClosure}
-                onChange={() => setParams({ loopClosure: !params.loopClosure })} /> {t('lbl_loopClosure')}
-            </label>
+            <div className="ctl">
+              <label style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
+                <input type="checkbox" checked={params.loopClosure}
+                  onChange={() => setParams({ loopClosure: !params.loopClosure })} /> {t('lbl_loopClosure')}
+              </label>
+              <div className="hint">{t('hint_loopClosure')}</div>
+            </div>
           </>}
-          <NumField label={t('f_maxMatches')} value={params.maxNumMatches}
+          <NumField label={t('f_maxMatches')} hint={t('hint_maxMatches')} value={params.maxNumMatches}
             onChange={value => setParams({ maxNumMatches: value, qualityPreset: 'custom' })} />
-          <NumField label={t('f_twoViewInliers')} value={params.twoViewMinInliers}
+          <NumField label={t('f_twoViewInliers')} hint={t('hint_twoViewInliers')} value={params.twoViewMinInliers}
             onChange={value => setParams({ twoViewMinInliers: value })} />
-          <label style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
-            <input type="checkbox" checked={params.guidedMatching}
-              onChange={() => setParams({ guidedMatching: !params.guidedMatching })} /> {t('f_guidedMatching')}
-          </label>
+          <div className="ctl">
+            <label style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
+              <input type="checkbox" checked={params.guidedMatching}
+                onChange={() => setParams({ guidedMatching: !params.guidedMatching })} /> {t('f_guidedMatching')}
+            </label>
+            <div className="hint">{t('hint_guidedMatching')}</div>
+          </div>
         </>
       )}
 
@@ -346,20 +353,27 @@ export const StageSettings = ({
                 mapper: e.target.value as StageParams['mapper'],
                 viewGraphCalibration: e.target.value === 'global',
               })}>
-              <option value="global">Global Mapper</option>
-              <option value="incremental">Incremental Mapper</option>
+              <option value="global">{t('mapperGlobal')}</option>
+              <option value="incremental">{t('mapperIncremental')}</option>
             </select>
+            <div className="hint">{t('hint_mapper')}</div>
           </div>
-          {params.mapper === 'global' && <label style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
-              <input type="checkbox" checked={params.viewGraphCalibration}
-              onChange={() => setParams({ viewGraphCalibration: !params.viewGraphCalibration })} /> {t('viewGraphCalibration')}
-          </label>}
-          <label style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
-            <input type="checkbox" checked={params.baUseGpu}
-              disabled={!doctor?.checks.colmap.capabilities?.gpu_bundle_adjustment}
-              onChange={() => setParams({ baUseGpu: !params.baUseGpu })} /> {t('f_baUseGpu')}
-          </label>
-          {!doctor?.checks.colmap.capabilities?.gpu_bundle_adjustment && (
+          {params.mapper === 'global' && <div className="ctl">
+            <label style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
+                <input type="checkbox" checked={params.viewGraphCalibration}
+                onChange={() => setParams({ viewGraphCalibration: !params.viewGraphCalibration })} /> {t('viewGraphCalibration')}
+            </label>
+            <div className="hint">{t('hint_viewGraphCalibration')}</div>
+          </div>}
+          <div className="ctl">
+            <label style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
+              <input type="checkbox" checked={params.baUseGpu}
+                disabled={!doctor?.checks.colmap?.capabilities?.gpu_bundle_adjustment}
+                onChange={() => setParams({ baUseGpu: !params.baUseGpu })} /> {t('f_baUseGpu')}
+            </label>
+            <div className="hint">{t('hint_baUseGpu')}</div>
+          </div>
+          {!doctor?.checks.colmap?.capabilities?.gpu_bundle_adjustment && (
             <div className="hint" style={{ color: '#d69a2a' }}>
               {t('ceresCpuUnavailable')}
             </div>
@@ -398,62 +412,6 @@ export const StageSettings = ({
           </select>
           <div className="hint">{t('hint_alignment')}</div>
         </div>
-      )}
-
-      {stage === 'denoise_frames' && (
-        <>
-          <div className="ctl">
-            <label htmlFor="denoise-method">{t('lbl_denoiseMethod')}</label>
-            <select id="denoise-method" className="input" value={params.denoiseMethod}
-              onChange={e => setParams({ denoiseMethod: e.target.value as StageParams['denoiseMethod'] })}>
-              <option value="off">{t('denoiseOff')}</option>
-              <option value="fastdvdnet">{t('denoiseFastDvdnet')}</option>
-              <option value="ffmpeg_adaptive">{t('denoiseFfmpeg')}</option>
-            </select>
-            <div className="hint">{t('hint_denoiseMethod')}</div>
-          </div>
-          {sourceKind === 'erp_images' && params.denoiseMethod !== 'off' && (
-            <div className="hint" style={{ color: '#d69a2a' }}>{t('denoiseVideoOnly')}</div>
-          )}
-          {reconMode === 'pinhole_rig' && params.denoiseMethod !== 'off' && (
-            <div className="hint" style={{ color: '#d69a2a' }}>{t('denoisePinholeUnsupported')}</div>
-          )}
-          {params.denoiseMethod === 'fastdvdnet' && (
-            <>
-              <Slider label={t('lbl_denoiseSigma')} hint={t('hint_denoiseSigma')}
-                min={5} max={20} step={1} value={params.denoiseSigma}
-                onChange={value => setParams({ denoiseSigma: Math.round(value) })} fmt={value => `${value}`} />
-              <div className="ctl">
-                <label htmlFor="denoise-tile">{t('lbl_denoiseTile')}</label>
-                <select id="denoise-tile" className="input" value={params.denoiseTileSize}
-                  onChange={e => setParams({ denoiseTileSize: Number(e.target.value) })}>
-                  <option value={256}>256 px</option>
-                  <option value={512}>512 px</option>
-                  <option value={768}>768 px</option>
-                </select>
-                <div className="hint">{t('hint_denoiseTile')}</div>
-              </div>
-            </>
-          )}
-          {params.denoiseMethod === 'ffmpeg_adaptive' && (
-            <>
-              <div className="ctl">
-                <label htmlFor="denoise-window">{t('lbl_denoiseWindow')}</label>
-                <select id="denoise-window" className="input" value={params.denoiseTemporalWindow}
-                  onChange={e => setParams({ denoiseTemporalWindow: Number(e.target.value) })}>
-                  <option value={5}>5</option><option value={9}>9</option><option value={13}>13</option>
-                </select>
-                <div className="hint">{t('hint_denoiseWindow')}</div>
-              </div>
-              <label style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
-                <input type="checkbox" checked={params.denoiseLumaOnly}
-                  onChange={() => setParams({ denoiseLumaOnly: !params.denoiseLumaOnly })} /> {t('lbl_denoiseLuma')}
-              </label>
-            </>
-          )}
-          <div className="predict">{params.denoiseMethod === 'off' || reconMode === 'pinhole_rig'
-            ? t('denoiseExportOriginal') : t('denoiseExportProcessed')}</div>
-        </>
       )}
 
       {stage === 'reproject_views' && (
@@ -509,35 +467,11 @@ export const StageSettings = ({
                 onChange={() => setParams({ emitTrainConfigs: !params.emitTrainConfigs })} /> {t('lbl_emitTrainConfigs')}
             </label>
             <div className="hint">{t('hint_emitTrainConfigs')}</div>
-            <div className="hint">{params.denoiseMethod === 'off' || reconMode === 'pinhole_rig'
-              ? t('denoiseExportOriginal') : t('denoiseExportProcessed')}</div>
           </div>
           {exportInfo
             ? <div className="ctl">
                 <label>{t('exportDir')}</label>
                 <PathText path={exportInfo.dir} />
-                {exportInfo.dataset_dir && (
-                  <div style={{ marginTop: 6 }}>
-                    <div className="hint">{t('exportDataset')}</div>
-                    <PathText path={exportInfo.dataset_dir} />
-                  </div>
-                )}
-                {exportInfo.preview_dir && (
-                  <div style={{ marginTop: 6 }}>
-                    <div className="hint">{t('exportPreview')}</div>
-                    <PathText path={exportInfo.preview_dir} />
-                  </div>
-                )}
-                {exportInfo.train_configs_dir && (
-                  <div style={{ marginTop: 6 }}>
-                    <div className="hint">{t('exportTrainConfigs')}</div>
-                    <PathText path={exportInfo.train_configs_dir} />
-                  </div>
-                )}
-                <div style={{ marginTop: 6 }}>
-                  <div className="hint">{t('exportTrainingOutput')}</div>
-                  <PathText path={exportInfo.training_output_dir} />
-                </div>
                 {exportInfo.gui_integration && !exportInfo.gui_integration.train_configs_auto_applied && (
                   <div className="hint" style={{ marginTop: 10, color: '#d69a2a' }}>
                     {t('lfGuiConfigWarning')}
@@ -557,8 +491,8 @@ export const StageSettings = ({
 }
 
 // COLMAP 詳細用の数値入力 (0 = COLMAP 既定). placeholder で「既定」を示す.
-const NumField = ({ label, value, step = 1, onChange }: {
-  label: string; value: number; step?: number; onChange: (v: number) => void
+const NumField = ({ label, hint, value, step = 1, onChange }: {
+  label: string; hint?: string; value: number; step?: number; onChange: (v: number) => void
 }) => {
   const { t } = useSettings()
   const inputId = useId()
@@ -567,28 +501,81 @@ const NumField = ({ label, value, step = 1, onChange }: {
       <label htmlFor={inputId} style={{ fontSize: 11 }}>{label}</label>
       <input id={inputId} className="input" type="number" min={0} step={step} value={value || ''}
         placeholder={t('defaultZero')} onChange={e => onChange(Number(e.target.value) || 0)} />
+      {hint && <div className="hint">{hint}</div>}
     </div>
   )
 }
 
 const StageResult = ({ stage, extra }: { stage: string; extra: Record<string, unknown> }) => {
   const { t } = useSettings()
-  const rows: Array<[string, unknown]> = stage === 'extract_features'
-    ? [[t('resultImages'), extra.images], [t('resultAvgKeypoints'), Math.round(Number(extra.average_keypoints ?? 0))]]
-    : stage === 'match_features'
-    ? [[t('resultVerifiedPairs'), extra.verified_pairs], [t('resultAvgInliers'), Number(extra.average_inliers ?? 0).toFixed(1)]]
-    : stage === 'reconstruct'
-    ? [[t('resultRegistered'), `${extra.num_images ?? 0}`], [t('resultPoints'), extra.num_points3D], [t('resultError'), `${Number(extra.mean_reprojection_error ?? 0).toFixed(3)} px`]]
-    : stage === 'align_reconstruction'
-    ? [[t('resultApplied'), String(extra.applied)], [t('resultSpread'), `${Number(extra.spread_deg ?? 0).toFixed(2)}°`], [t('resultInliers'), extra.inlier_count], [t('resultTimeOffset'), `${Number(extra.time_offset_sec ?? 0).toFixed(3)} s`]]
-    : stage === 'denoise_frames'
-    ? [[t('resultMethod'), extra.method], [t('resultImages'), extra.images], [t('resultDevice'), extra.device ?? '—'],
-      [t('resultSigma'), extra.sigma ?? '—'], [t('resultMeanDelta'), extra.mean_abs_delta ?? '—']]
-    : []
+  const [expanded, setExpanded] = useState(false)
+  const statisticsId = useId()
+  const seen = new Set<string>()
+  const rows: Array<[string, string, string]> = []
+  const visit = (value: unknown, path: string[]) => {
+    if (value == null) return
+    if (Array.isArray(value)) {
+      const leaf = path.at(-1) ?? ''
+      const signature = `${leaf}:${JSON.stringify(value)}`
+      if (seen.has(signature)) return
+      seen.add(signature)
+      const simple = value.every(item => ['string', 'number', 'boolean'].includes(typeof item))
+      rows.push([path.join('.'), statLabel(t, leaf), simple ? (value.length ? value.join(', ') : '0') : String(value.length)])
+      return
+    }
+    if (typeof value === 'object') {
+      for (const [key, child] of Object.entries(value as Record<string, unknown>)) visit(child, [...path, key])
+      return
+    }
+    if (typeof value !== 'string' && typeof value !== 'number' && typeof value !== 'boolean') return
+    const leaf = path.at(-1) ?? ''
+    const signature = `${leaf}:${String(value)}`
+    if (seen.has(signature)) return
+    seen.add(signature)
+    rows.push([path.join('.'), statLabel(t, leaf), formatStatistic(t, leaf, value)])
+  }
+  visit(extra, [stage])
   if (!rows.length) return null
-  return <div className="predict" style={{ marginBottom: 10 }}>
-    {rows.map(([label, value]) => <div key={label}><span className="hint">{label}: </span>{String(value ?? '—')}</div>)}
+  return <div className="stage-statistics">
+    <button type="button" className="stage-statistics-toggle" aria-expanded={expanded}
+      aria-controls={statisticsId} onClick={() => setExpanded(value => !value)}>
+      <span aria-hidden="true">{expanded ? '▾' : '▸'}</span> {t('resultStatistics')}
+    </button>
+    {expanded && <dl id={statisticsId} className="inspector-fields">
+        {rows.map(([path, label, value]) => (
+          <div className="inspector-field" key={path}>
+            <dt>{label}</dt>
+            <dd>{value}</dd>
+          </div>
+        ))}
+      </dl>}
   </div>
+}
+
+const statLabel = (t: (key: string) => string, key: string): string => {
+  const translationKey = `stat_${key}`
+  const translated = t(translationKey)
+  return translated === translationKey
+    ? key.replaceAll('_', ' ').replace(/\b\w/g, char => char.toUpperCase())
+    : translated
+}
+
+const formatStatistic = (t: (key: string) => string, key: string, value: string | number | boolean): string => {
+  if (key === 'lfstudio_training_metrics' && value === 'external') return t('notAvailableExternalTraining')
+  if (typeof value === 'boolean') return value ? t('yes') : t('no')
+  if (typeof value === 'string') return value
+  if (key === 'file_size' || key === 'footer_size') {
+    const units = ['B', 'KiB', 'MiB', 'GiB']
+    let amount = value, index = 0
+    while (amount >= 1024 && index < units.length - 1) { amount /= 1024; index += 1 }
+    return `${amount.toFixed(index ? 2 : 0)} ${units[index]}`
+  }
+  if (key.endsWith('_ratio') || key.endsWith('_coverage')) return `${(value * 100).toFixed(2)}%`
+  if (key.includes('reprojection_error')) return `${value.toFixed(4)} px`
+  if (key.endsWith('_deg')) return `${value.toFixed(3)}°`
+  if (key.endsWith('_sec')) return `${value.toFixed(3)} s`
+  if (Number.isInteger(value)) return value.toLocaleString()
+  return Number(value.toPrecision(6)).toLocaleString()
 }
 
 const Slider = ({
