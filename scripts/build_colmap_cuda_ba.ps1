@@ -1,4 +1,4 @@
-param(
+﻿param(
     [Parameter(Mandatory = $true)]
     [string]$OutputDirectory
 )
@@ -33,6 +33,24 @@ git -C $CeresSource checkout $CeresCommit
 git clone https://github.com/microsoft/vcpkg.git $VcpkgRoot
 git -C $VcpkgRoot checkout $VcpkgCommit
 & (Join-Path $VcpkgRoot "bootstrap-vcpkg.bat") -disableMetrics
+
+# COLMAP の manifest Ceres は CPU build で、直後に Ceres_DIR で差し替えても vcpkg が重複 build する。
+# それ以外の upstream dependency/feature 定義は維持し、Ceres だけを単独 CUDA build に一本化する。
+$ColmapManifestPath = Join-Path $ColmapSource "vcpkg.json"
+$ColmapManifest = Get-Content $ColmapManifestPath -Raw | ConvertFrom-Json
+$OriginalDependencyCount = $ColmapManifest.dependencies.Count
+$ColmapManifest.dependencies = @(
+    $ColmapManifest.dependencies | Where-Object {
+        if ($_ -is [string]) {
+            return $_ -ne "ceres"
+        }
+        return $_.name -ne "ceres"
+    }
+)
+if ($ColmapManifest.dependencies.Count -ne $OriginalDependencyCount - 1) {
+    throw "COLMAP vcpkg manifest から Ceres dependency を一意に除外できません"
+}
+$ColmapManifest | ConvertTo-Json -Depth 20 | Set-Content $ColmapManifestPath -Encoding utf8
 
 & (Join-Path $VcpkgRoot "vcpkg.exe") install `
     "eigen3:$Triplet" `
