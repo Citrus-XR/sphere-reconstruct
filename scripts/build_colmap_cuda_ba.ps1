@@ -1,6 +1,8 @@
 ﻿param(
     [Parameter(Mandatory = $true)]
-    [string]$OutputDirectory
+    [string]$OutputDirectory,
+    [string]$CudaArchitectures = "",
+    [string]$CudssWheelPath = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -8,9 +10,55 @@ $PSNativeCommandUseErrorActionPreference = $true
 $ColmapTag = "4.1.1"
 $CeresCommit = "bac1127f9ef672405bd0d2d9c84e809ae89bd239"
 $VcpkgCommit = "6d9d7df564a1ccdaa994e4ad39ccd4a32360867b"
-$CudssPackage = "nvidia-cudss-cu13==0.8.0.10"
-$BuildRoot = Join-Path $env:RUNNER_TEMP "sphere-colmap-cuda-ba"
+$CudaVersionMatch = [regex]::Match($env:CUDA_PATH, 'v(?<major>\d+)\.(?<minor>\d+)')
+if (-not $CudaVersionMatch.Success) {
+    throw "CUDA_PATH から CUDA version を判定できません: $env:CUDA_PATH"
+}
+$CudaMajor = [int]$CudaVersionMatch.Groups['major'].Value
+$CudssWheel = switch ($CudaMajor) {
+    12 {
+        @{
+            FileName = "nvidia_cudss_cu12-0.8.0.10-py3-none-win_amd64.whl"
+            Url = "https://files.pythonhosted.org/packages/49/4c/85bfa40b863e1d2ec8629964283ba8b4b3f85b2c01b8ab6fe5ba60d5eed0/nvidia_cudss_cu12-0.8.0.10-py3-none-win_amd64.whl"
+            Sha256 = "89bf57d4d05d25c7f6e1288acbc94c5eed519763c55d7ec1f6d73099ace8554e"
+        }
+    }
+    13 {
+        @{
+            FileName = "nvidia_cudss_cu13-0.8.0.10-py3-none-win_amd64.whl"
+            Url = "https://files.pythonhosted.org/packages/04/83/42ca016cd77181354147edb9c03587fc6d517a706d042256ad290feb7923/nvidia_cudss_cu13-0.8.0.10-py3-none-win_amd64.whl"
+            Sha256 = "c084261bdc9cf3468d0fda5a20c56aa29b54b888d143bbdd39205c19fe3639a3"
+        }
+    }
+    default { throw "CUDA $CudaMajor 用 cuDSS 0.8.0.10 Windows runtime は提供されていません" }
+}
+$TemporaryRoot = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { $env:TEMP }
+$BuildRoot = Join-Path $TemporaryRoot "sphere-colmap-cuda-ba"
 $Triplet = "x64-windows-release"
+$CompilerLauncherArgs = @()
+if (Get-Command sccache -ErrorAction SilentlyContinue) {
+    $CompilerLauncherArgs = @(
+        "-DCMAKE_C_COMPILER_LAUNCHER=sccache",
+        "-DCMAKE_CXX_COMPILER_LAUNCHER=sccache"
+    )
+}
+
+function Initialize-PinnedRepository {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Url,
+        [Parameter(Mandatory = $true)]
+        [string]$Revision,
+        [Parameter(Mandatory = $true)]
+        [string]$Destination
+    )
+
+    New-Item $Destination -ItemType Directory | Out-Null
+    git -C $Destination init --quiet
+    git -C $Destination remote add origin $Url
+    git -C $Destination fetch --depth 1 origin $Revision
+    git -C $Destination checkout --detach FETCH_HEAD
+}
 
 if (Test-Path $BuildRoot) {
     Remove-Item $BuildRoot -Recurse -Force
@@ -31,17 +79,30 @@ $CeresConfigDirectory = Join-Path $CeresInstall "lib/cmake/Ceres"
 $ColmapBuild = Join-Path $BuildRoot "colmap-build"
 $ColmapInstall = Join-Path $BuildRoot "colmap-install"
 
-git clone --depth 1 --branch $ColmapTag https://github.com/colmap/colmap.git $ColmapSource
+Initialize-PinnedRepository `
+    -Url "https://github.com/colmap/colmap.git" `
+    -Revision $ColmapTag `
+    -Destination $ColmapSource
 $RigPairPatch = Join-Path $PSScriptRoot "patches/colmap-4.1.1-sequential-rig-pairs.patch"
 # 4.1.1 の folder-major rig pairing bug に upstream の最小 semantic fix だけを backport する。
 # https://github.com/colmap/colmap/pull/4591
 git -C $ColmapSource apply --check $RigPairPatch
 git -C $ColmapSource apply $RigPairPatch
-git clone https://github.com/ceres-solver/ceres-solver.git $CeresSource
-git -C $CeresSource checkout $CeresCommit
+Initialize-PinnedRepository `
+    -Url "https://github.com/ceres-solver/ceres-solver.git" `
+    -Revision $CeresCommit `
+    -Destination $CeresSource
+$CeresArchitecturePatch = Join-Path $PSScriptRoot "patches/ceres-preserve-cuda-architectures.patch"
+# Ceres bac1127 は caller の architecture list を破棄するため、明示値だけを優先させる。
+# https://github.com/ceres-solver/ceres-solver/blob/bac1127f9ef672405bd0d2d9c84e809ae89bd239/CMakeLists.txt#L319-L353
+git -C $CeresSource apply --check $CeresArchitecturePatch
+git -C $CeresSource apply $CeresArchitecturePatch
 git -C $CeresSource submodule update --init --depth 1 third_party/abseil-cpp
-git clone https://github.com/microsoft/vcpkg.git $VcpkgRoot
-git -C $VcpkgRoot checkout $VcpkgCommit
+Initialize-PinnedRepository `
+    -Url "https://github.com/microsoft/vcpkg.git" `
+    -Revision $VcpkgCommit `
+    -Destination $VcpkgRoot
+Remove-Item Env:VCPKG_ROOT -ErrorAction SilentlyContinue
 & (Join-Path $VcpkgRoot "bootstrap-vcpkg.bat") -disableMetrics
 
 # COLMAP の manifest Ceres は CPU build で、直後に Ceres_DIR で差し替えても vcpkg が重複 build する。
@@ -94,16 +155,33 @@ $ColmapManifest | ConvertTo-Json -Depth 20 | Set-Content $ColmapManifestPath -En
 
 $WheelDirectory = Join-Path $BuildRoot "wheel"
 New-Item $WheelDirectory -ItemType Directory | Out-Null
-python -m pip download --no-deps $CudssPackage --dest $WheelDirectory
-$Wheel = Get-ChildItem $WheelDirectory -Filter "*.whl" | Select-Object -First 1
-if ($null -eq $Wheel) {
-    throw "cuDSS wheel を取得できません"
+$WheelPath = Join-Path $WheelDirectory $CudssWheel.FileName
+if ($CudssWheelPath) {
+    Copy-Item $CudssWheelPath $WheelPath
+}
+else {
+    curl.exe `
+        --fail `
+        --location `
+        --retry 5 `
+        --retry-all-errors `
+        --retry-delay 2 `
+        --connect-timeout 30 `
+        --speed-limit 1024 `
+        --speed-time 60 `
+        --continue-at - `
+        --output $WheelPath `
+        $CudssWheel.Url
+}
+$WheelHash = (Get-FileHash $WheelPath -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($WheelHash -ne $CudssWheel.Sha256) {
+    throw "cuDSS wheel の SHA-256 が一致しません: $WheelHash"
 }
 $WheelZip = Join-Path $WheelDirectory "cudss.zip"
-Copy-Item $Wheel.FullName $WheelZip
+Copy-Item $WheelPath $WheelZip
 Expand-Archive $WheelZip -DestinationPath $CudssRoot
 
-$CudssPackageRoot = Join-Path $CudssRoot "nvidia/cu13"
+$CudssPackageRoot = Join-Path $CudssRoot "nvidia/cu$CudaMajor"
 $CudssConfigDirectory = Join-Path $CudssPackageRoot "lib/cmake/cudss"
 New-Item $CudssConfigDirectory -ItemType Directory -Force | Out-Null
 $CudssConfig = @(
@@ -125,11 +203,18 @@ $CudssVersionConfig = @(
 Set-Content (Join-Path $CudssConfigDirectory "cudssConfigVersion.cmake") $CudssVersionConfig -Encoding utf8
 
 $Toolchain = Join-Path $VcpkgRoot "scripts/buildsystems/vcpkg.cmake"
-$CudaArchitectures = "75;80;86;89;100;120"
+$EffectiveCudaArchitectures = if ($CudaArchitectures) {
+    $CudaArchitectures
+}
+elseif ($CudaMajor -ge 13) {
+    "75;80-real;86-real;89-real;90-real;100-real;120-real"
+}
+else {
+    "75;80-real;86-real;89-real;90-real"
+}
 cmake -S $CeresSource -B $CeresBuild -GNinja `
     "-DCMAKE_BUILD_TYPE=Release" `
-    "-DCMAKE_C_COMPILER_LAUNCHER=sccache" `
-    "-DCMAKE_CXX_COMPILER_LAUNCHER=sccache" `
+    @CompilerLauncherArgs `
     "-DCMAKE_CUDA_STANDARD=17" `
     "-DCMAKE_CUDA_STANDARD_REQUIRED=ON" `
     "-DCMAKE_TOOLCHAIN_FILE=$Toolchain" `
@@ -145,13 +230,12 @@ cmake -S $CeresSource -B $CeresBuild -GNinja `
     "-DUSE_CUDA=ON" `
     "-DSUITESPARSE=ON" `
     "-DLAPACK=ON" `
-    "-DCMAKE_CUDA_ARCHITECTURES=$CudaArchitectures"
+    "-DCMAKE_CUDA_ARCHITECTURES:STRING=$EffectiveCudaArchitectures"
 cmake --build $CeresBuild --target install
 
 cmake -S $ColmapSource -B $ColmapBuild -GNinja `
     "-DCMAKE_BUILD_TYPE=Release" `
-    "-DCMAKE_C_COMPILER_LAUNCHER=sccache" `
-    "-DCMAKE_CXX_COMPILER_LAUNCHER=sccache" `
+    @CompilerLauncherArgs `
     "-DCMAKE_CUDA_STANDARD=17" `
     "-DCMAKE_CUDA_STANDARD_REQUIRED=ON" `
     "-DCMAKE_TOOLCHAIN_FILE=$Toolchain" `
@@ -169,7 +253,7 @@ cmake -S $ColmapSource -B $ColmapBuild -GNinja `
     "-DOPENGL_ENABLED=OFF" `
     "-DCGAL_ENABLED=OFF" `
     "-DTESTS_ENABLED=OFF" `
-    "-DCMAKE_CUDA_ARCHITECTURES=$CudaArchitectures"
+    "-DCMAKE_CUDA_ARCHITECTURES:STRING=$EffectiveCudaArchitectures"
 cmake --build $ColmapBuild --target install
 
 $InstallBin = Join-Path $ColmapInstall "bin"
@@ -215,6 +299,7 @@ $Metadata = @{
     ceres_commit = $CeresCommit
     vcpkg_commit = $VcpkgCommit
     cuda_version = $env:CUDA_PATH -replace '^.*v', ''
+    cuda_architectures = $EffectiveCudaArchitectures
     cudss_version = "0.8.0.10"
     ceres_cuda = $true
     cudss = $true

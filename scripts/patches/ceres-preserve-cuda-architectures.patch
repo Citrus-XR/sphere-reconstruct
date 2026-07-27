@@ -1,0 +1,19 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -324,5 +324,5 @@ if (USE_CUDA)
+         "find_dependency(CUDAToolkit ${CUDAToolkit_VERSION})")
+       enable_language(CUDA)
+       if (CMAKE_VERSION VERSION_GREATER_EQUAL "3.18")
+-        set(CMAKE_CUDA_ARCHITECTURES "")
++        if (NOT CMAKE_CUDA_ARCHITECTURES)
+         if (CUDAToolkit_VERSION VERSION_LESS "13.0")
+@@ -350,4 +350,8 @@ if (USE_CUDA)
+           list(APPEND CMAKE_CUDA_ARCHITECTURES "90")
+         endif(CUDAToolkit_VERSION VERSION_GREATER_EQUAL "11.8")
+         message("-- Setting CUDA Architecture to ${CMAKE_CUDA_ARCHITECTURES}")
++        else()
++          message("-- Using caller-provided CUDA Architecture: "
++            "${CMAKE_CUDA_ARCHITECTURES}")
++        endif(NOT CMAKE_CUDA_ARCHITECTURES)
+       endif()

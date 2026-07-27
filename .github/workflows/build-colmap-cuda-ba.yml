@@ -11,8 +11,8 @@ jobs:
     runs-on: windows-2025
     timeout-minutes: 360
     env:
-      CUDA_MAJOR_VERSION: "13"
-      CUDA_MINOR_VERSION: "2"
+      CUDA_MAJOR_VERSION: "12"
+      CUDA_MINOR_VERSION: "8"
       CUDA_PATCH_VERSION: "0"
       VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}\vcpkg-binary-cache
       SCCACHE_GHA_ENABLED: "true"
@@ -79,7 +79,7 @@ jobs:
           prerelease: true
           body: |
             COLMAP 4.1.1 CLI runtime built with Ceres 2.3.0-dev at
-            bac1127f9ef672405bd0d2d9c84e809ae89bd239, CUDA 13.2, and cuDSS 0.8.0.10.
+            bac1127f9ef672405bd0d2d9c84e809ae89bd239, CUDA 12.8, and cuDSS 0.8.0.10.
             Includes the minimal sequential rig-pairing fix from COLMAP PR 4591.
             The archive is intended for sphere-reconstruct's pinned Windows installer.
           files: |
