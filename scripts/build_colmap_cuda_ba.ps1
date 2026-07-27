@@ -169,6 +169,14 @@ $CudssMetadata = Get-ChildItem $CudssRoot -Recurse -Filter "METADATA" | Select-O
 if ($null -ne $CudssMetadata) {
     Copy-Item $CudssMetadata.FullName (Join-Path $LicenseDirectory "NVIDIA-CUDSS-METADATA.txt")
 }
+$CudaEula = Join-Path $env:CUDA_PATH "EULA.txt"
+if (Test-Path $CudaEula) {
+    Copy-Item $CudaEula (Join-Path $LicenseDirectory "NVIDIA-CUDA-EULA.txt")
+}
+Invoke-WebRequest `
+    -Uri "https://docs.nvidia.com/cuda/cudss/license.html" `
+    -OutFile (Join-Path $LicenseDirectory "NVIDIA-CUDSS-LICENSE.html") `
+    -UseBasicParsing
 
 $Archive = Join-Path $OutputDirectory "colmap-4.1.1-x64-windows-cuda-ba.zip"
 if (Test-Path $Archive) {

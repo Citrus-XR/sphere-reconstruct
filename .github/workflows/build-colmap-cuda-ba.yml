@@ -9,7 +9,7 @@ permissions:
 jobs:
   windows-runtime:
     runs-on: windows-2025
-    timeout-minutes: 180
+    timeout-minutes: 360
     env:
       CUDA_MAJOR_VERSION: "13"
       CUDA_MINOR_VERSION: "2"
