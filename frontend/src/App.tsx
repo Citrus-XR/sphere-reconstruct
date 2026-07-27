@@ -398,7 +398,7 @@ export const App = () => {
       case 'sceneHier':
         return (
           <div className="dock-content nopad">
-            <SceneHierarchy recon={recon} frames={framesData?.frames} sources={framesData?.sources}
+            <SceneHierarchy key={projectId} recon={recon} frames={framesData?.frames} sources={framesData?.sources}
               showPoints={showPoints} setShowPoints={setShowPoints}
               showCams={showCams} setShowCams={setShowCams} selectedCameraId={selectedCameraId} onSelectCamera={selectCamera}
               selectedFrameIndex={selectedFrameIndex} onSelectFrame={selectFrame} />

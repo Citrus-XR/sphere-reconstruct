@@ -89,7 +89,8 @@ Inspect every source
 ```
 
 各 stage は個別に生成、再生成、クリアできる。Source 構成を変更すると affected source branch と
-aggregate reconstruction だけを invalidation する。Stage statistics は Inspector で既定折り畳み。
+aggregate reconstruction だけを invalidation する。Scene Hierarchy の photo は source ごとにまとまり、
+各 source group を互いに独立して折り畳める。Stage statistics は Inspector で既定折り畳み。
 
 ### Image preparation
 

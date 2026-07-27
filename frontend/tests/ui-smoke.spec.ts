@@ -13,6 +13,7 @@ interface MockOptions {
   cameraModel?: string
   reconMode?: ReconMode
   secondProject?: boolean
+  multipleFrameSources?: boolean
 }
 
 const installUiMock = async (page: Page, options: MockOptions = {}) => {
@@ -132,11 +133,25 @@ const installUiMock = async (page: Page, options: MockOptions = {}) => {
       return
     }
     if (projectId && path === `/api/projects/${projectId}/frames`) {
-      await route.fulfill({ json: { count: 1,
-        sources: [{ id: 's1', label: 'Primary 360', role: 'primary', projection: sourceKind === 'insv' ? 'dual_fisheye' : 'equirectangular',
-          kind: sourceKind === 'insv' ? 'insv_dual' : 'equirectangular_video', count: 1, width: 100, height: 100, fps: 30,
-          selection: { mode: 'interval', selected: 1 } }],
-        frames: [{ index: 0, source_id: 's1', source_index: 0, timestamp_sec: 0, score: { sharpness: 12 } }] } })
+      const frameSources = [{
+        id: 's1', label: 'Primary 360', role: 'primary',
+        projection: sourceKind === 'insv' ? 'dual_fisheye' : 'equirectangular',
+        kind: sourceKind === 'insv' ? 'insv_dual' : 'equirectangular_video',
+        count: 1, width: 100, height: 100, fps: 30,
+        selection: { mode: 'interval', selected: 1 },
+      }]
+      const frames = [
+        { index: 0, source_id: 's1', source_index: 0, timestamp_sec: 0, score: { sharpness: 12 } },
+      ]
+      if (options.multipleFrameSources) {
+        frameSources.push({
+          id: 's2', label: 'Phone photos', role: 'supplemental', projection: 'perspective',
+          kind: 'perspective_images', count: 1, width: 100, height: 100, fps: 0,
+          selection: { mode: 'all', selected: 1 },
+        })
+        frames.push({ index: 1, source_id: 's2', source_index: 0, timestamp_sec: 0, score: { sharpness: 24 } })
+      }
+      await route.fulfill({ json: { count: frames.length, sources: frameSources, frames } })
       return
     }
     if (projectId && path === `/api/projects/${projectId}/masks`) {
@@ -288,6 +303,33 @@ test('scene copy follows language and paths remain copyable native values', asyn
   await page.locator('.pop select').nth(1).selectOption('zh')
   await expect(page.getByText(/图像 1 · 点 42 · 注册 100% · 轨迹范围 1\.250 单位/)).toBeVisible()
   await expect(page.getByText('场景视图', { exact: true }).first()).toBeVisible()
+  expect(mock.unexpectedRequests).toEqual([])
+})
+
+test('photo source groups collapse independently', async ({ page }) => {
+  const mock = await installUiMock(page, { multipleFrameSources: true })
+  await page.goto('/')
+
+  const primaryGroup = page.locator('[data-source-id="s1"]')
+  const phoneGroup = page.locator('[data-source-id="s2"]')
+  const primaryToggle = primaryGroup.getByRole('button', { name: /Primary 360/ })
+  const phoneToggle = phoneGroup.getByRole('button', { name: /Phone photos/ })
+
+  await expect(primaryToggle).toHaveAttribute('aria-expanded', 'true')
+  await expect(phoneToggle).toHaveAttribute('aria-expanded', 'true')
+  await expect(primaryGroup.getByRole('button', { name: /Frame 0/ })).toBeVisible()
+  await expect(phoneGroup.getByRole('button', { name: /Frame 0/ })).toBeVisible()
+
+  await primaryToggle.click()
+  await expect(primaryToggle).toHaveAttribute('aria-expanded', 'false')
+  await expect(primaryGroup.getByRole('button', { name: /Frame 0/ })).toHaveCount(0)
+  await expect(phoneGroup.getByRole('button', { name: /Frame 0/ })).toBeVisible()
+
+  await phoneToggle.click()
+  await expect(phoneToggle).toHaveAttribute('aria-expanded', 'false')
+  await primaryToggle.click()
+  await expect(primaryGroup.getByRole('button', { name: /Frame 0/ })).toBeVisible()
+  await expect(phoneGroup.getByRole('button', { name: /Frame 0/ })).toHaveCount(0)
   expect(mock.unexpectedRequests).toEqual([])
 })
 
