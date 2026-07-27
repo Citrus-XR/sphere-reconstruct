@@ -41,7 +41,7 @@ class JobStarted(BaseModel):
 
 class RunBody(BaseModel):
     # ステージ名 -> パラメータ dict. 省略可.
-    # 例: {"reproject_views": {"size": 1024, "max_frames": 10},
+    # 例: {"prepare_images": {"size": 1024, "reconstruction_mode": "pinhole_rig"},
     #      "generate_masks": {"prompt": "person,tripod"}}
     params_by_stage: dict[str, dict] | None = None
     # Batch pipeline API で実行対象から外す optional stage.

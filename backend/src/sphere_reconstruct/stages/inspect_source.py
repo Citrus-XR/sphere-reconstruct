@@ -15,85 +15,73 @@ from pathlib import Path
 
 from ..domain.artifacts import FileRef, StageManifest
 from ..domain.pipeline_state import StageName
-from ..infrastructure.filesystem import sha256_bytes, sha256_file
+from ..domain.source import MediaKind, SourceAdapter
+from ..infrastructure.filesystem import sha256_file
 from ..insta360 import calibration as calib
 from ..insta360 import imu as insv_imu
 from ..insta360 import insv
 from ..insta360 import metadata as insv_metadata
 from ..insta360 import protobuf as pb
 from ..pipeline.manifest import register
+from ..pipeline.source_inputs import IMAGE_EXTENSIONS, collect_source_inputs
 from ..pipeline.stage import Stage, StageContext, new_manifest
 
 
 @register
 class InspectSource(Stage):
     name = StageName.INSPECT_SOURCE
-    impl_version = "0.3"
+    impl_version = "2.0"
 
     def collect_inputs(self, ctx: StageContext) -> list[FileRef]:
-        if ctx.source_path is None:
-            return []
-        p = ctx.source_path
-        if not p.exists():
-            raise FileNotFoundError(f"source not found: {p}")
-        if p.is_dir():
-            entries = [
-                (item.name, item.stat().st_size, item.stat().st_mtime_ns)
-                for item in sorted(p.iterdir())
-                if item.is_file() and item.suffix.lower() in {".jpg", ".jpeg", ".png"}
-            ]
-            payload = json.dumps(entries, ensure_ascii=False, separators=(",", ":")).encode()
-            return [
-                FileRef(
-                    path=str(p),
-                    size=sum(entry[1] for entry in entries),
-                    sha256=sha256_bytes(payload),
-                )
-            ]
-        return [
-            FileRef(
-                path=str(p),
-                size=p.stat().st_size,
-                sha256=sha256_file(p),
-            )
-        ]
+        return collect_source_inputs(ctx.sources)
 
     def execute(self, ctx: StageContext) -> StageManifest:
         manifest = new_manifest(self.name, self.impl_version)
         manifest.inputs = self.collect_inputs(ctx)
         manifest.params = ctx.params
 
-        if ctx.source_path is None or ctx.source_kind is None:
-            raise RuntimeError("source is not set. call POST /api/projects/{id}/source first.")
+        if not ctx.sources:
+            raise RuntimeError("project has no enabled sources")
 
         out_dir = ctx.stage_out_dir
         out_dir.mkdir(parents=True, exist_ok=True)
 
-        source_kind = ctx.source_kind
-        source_path = ctx.source_path
+        summaries = []
+        for source in ctx.sources:
+            source_out = out_dir / "sources" / source.id
+            source_out.mkdir(parents=True, exist_ok=True)
+            if source.adapter == SourceAdapter.INSTA360_INSV:
+                summary = self._inspect_insv(source.path, source_out, ctx)
+            elif source.media_kind == MediaKind.VIDEO:
+                summary = self._inspect_video(source.path, ctx)
+            else:
+                summary = self._inspect_images(source.path, ctx)
+            summaries.append(
+                {
+                    "id": source.id,
+                    "label": source.label,
+                    "role": source.role.value,
+                    "adapter": source.adapter.value,
+                    "media_kind": source.media_kind.value,
+                    "projection": source.projection.value,
+                    **summary,
+                }
+            )
 
-        if source_kind == "insv":
-            summary = self._inspect_insv(source_path, out_dir, ctx)
-        elif source_kind == "erp_video":
-            summary = self._inspect_erp_video(source_path, ctx)
-        elif source_kind == "erp_images":
-            summary = self._inspect_erp_images(source_path, ctx)
-        else:
-            raise ValueError(f"unknown source_kind: {source_kind}")
-
-        (out_dir / "source.json").write_text(
-            json.dumps(summary, ensure_ascii=False, indent=2),
+        summary_path = out_dir / "sources.json"
+        summary_path.write_text(
+            json.dumps({"version": 2, "sources": summaries}, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
         manifest.outputs = [
             FileRef(
-                path=str((out_dir / "source.json").relative_to(ctx.project_dir)),
-                size=(out_dir / "source.json").stat().st_size,
-                sha256=sha256_file(out_dir / "source.json"),
+                path=str(summary_path.relative_to(ctx.project_dir)),
+                size=summary_path.stat().st_size,
+                sha256=sha256_file(summary_path),
                 mime="application/json",
             )
         ]
-        manifest.extra = _source_statistics(summary)
+        manifest.extra = _source_statistics(summaries)
         return manifest
 
     def _inspect_insv(self, path: Path, out_dir: Path, ctx: StageContext) -> dict:
@@ -209,16 +197,15 @@ class InspectSource(Stage):
         return summary
 
     # -- ERP video / images (最小実装) ---------------------------------------------
-    def _inspect_erp_video(self, path: Path, ctx: StageContext) -> dict:
+    def _inspect_video(self, path: Path, ctx: StageContext) -> dict:
         from ..imaging import ffprobe as _ffprobe
         from ..settings import get_settings
 
-        ctx.progress.info("ffprobe on erp video", progress=0.5, key="log.inspect_ffprobe_erp")
+        ctx.progress.info("ffprobe on video source", progress=0.5, key="log.inspect_video")
         pr = _ffprobe.probe(path, ffprobe_bin=get_settings().binaries.ffprobe or None)
         vs = pr.video_streams[0] if pr.video_streams else None
         ctx.progress.info("inspect done", progress=1.0, key="log.inspect_done")
         return {
-            "kind": "erp_video",
             "path": str(path),
             "file_size": path.stat().st_size,
             "duration_sec": pr.duration,
@@ -233,55 +220,33 @@ class InspectSource(Stage):
             else None,
         }
 
-    def _inspect_erp_images(self, path: Path, ctx: StageContext) -> dict:
+    def _inspect_images(self, path: Path, ctx: StageContext) -> dict:
         if not path.is_dir():
-            raise NotADirectoryError(f"erp_images source must be a directory: {path}")
-        images = sorted([p for p in path.iterdir() if p.suffix.lower() in {".jpg", ".jpeg", ".png"}])
+            raise NotADirectoryError(f"image source must be a directory: {path}")
+        images = sorted(
+            item for item in path.rglob("*") if item.is_file() and item.suffix.lower() in IMAGE_EXTENSIONS
+        )
         ctx.progress.info(
-            f"erp images: {len(images)} files",
+            f"image collection: {len(images)} files",
             progress=1.0,
-            key="log.inspect_erp_images",
+            key="log.inspect_images",
             args={"count": len(images)},
         )
         return {
-            "kind": "erp_images",
             "path": str(path),
             "image_count": len(images),
             "first_files": [p.name for p in images[:5]],
         }
 
 
-def _source_statistics(summary: dict) -> dict:
-    statistics = {
-        "kind": summary["kind"],
-        "file_size": summary.get("file_size"),
-        "calibration_source": summary.get("calibration_source"),
+def _source_statistics(summaries: list[dict]) -> dict:
+    return {
+        "sources": len(summaries),
+        "videos": sum(source["media_kind"] == "video" for source in summaries),
+        "image_collections": sum(source["media_kind"] == "images" for source in summaries),
+        "source_images": sum(int(source.get("image_count", 0)) for source in summaries),
+        "gravity_sources": sum(bool(source.get("gravity")) for source in summaries),
+        "calibrated_dual_fisheye_sources": sum(
+            bool((source.get("offset_v3") or {}).get("valid")) for source in summaries
+        ),
     }
-    if summary["kind"] == "insv":
-        gravity = summary.get("gravity") or {}
-        offset = summary.get("offset_v3") or {}
-        statistics.update(
-            {
-                "mp4_box_count": len(summary.get("mp4_boxes", [])),
-                "footer_size": summary.get("footer_size"),
-                "calibration_valid": bool(offset.get("valid")),
-                "calibration_lenses": len(offset.get("lenses", [])),
-                "gravity_samples": gravity.get("samples", 0),
-                "gravity_mean_magnitude": gravity.get("mean_magnitude"),
-            }
-        )
-    elif summary["kind"] == "erp_video":
-        video = summary.get("video") or {}
-        statistics.update(
-            {
-                "duration_sec": summary.get("duration_sec"),
-                "width": video.get("width"),
-                "height": video.get("height"),
-                "fps": video.get("fps"),
-                "codec": video.get("codec"),
-                "source_frames": video.get("nb_frames"),
-            }
-        )
-    else:
-        statistics["image_count"] = summary.get("image_count", 0)
-    return {key: value for key, value in statistics.items() if value is not None}

@@ -11,6 +11,7 @@ from ..colmap import model as colmap_model
 from ..colmap import runner as colmap_runner
 from ..domain.artifacts import FileRef, StageManifest
 from ..domain.pipeline_state import StageName
+from ..domain.source import SourceAdapter
 from ..infrastructure.filesystem import sha256_file
 from ..insta360 import imu
 from ..pipeline.manifest import register
@@ -22,7 +23,7 @@ from .colmap_progress import hidden_log
 @register
 class AlignReconstruction(Stage):
     name = StageName.ALIGN_RECONSTRUCTION
-    impl_version = "1.1"
+    impl_version = "2.0"
 
     def normalize_params(self, raw: dict) -> dict:
         method = str(raw.get("method", "auto")).lower()
@@ -38,7 +39,8 @@ class AlignReconstruction(Stage):
         candidates = [
             ctx.project_dir / "manifests" / "reconstruct.json",
             ctx.project_dir / "manifests" / "extract_frames.json",
-            ctx.project_dir / "inspect_source" / "source.json",
+            ctx.project_dir / "inspect_source" / "sources.json",
+            ctx.project_dir / "prepare_images" / "image_catalog.json",
         ]
         candidates += list((ctx.project_dir / "reconstruct" / "sparse" / "0").glob("*"))
         return [
@@ -129,7 +131,9 @@ class AlignReconstruction(Stage):
 
     def _estimate(self, ctx: StageContext, input_model: Path) -> dict:
         reconstruction = colmap_model.read_model(input_model)
-        diameter = gravity_align.reference_trajectory_diameter(reconstruction)
+        primary = ctx.primary_source
+        reference_prefix = f"sources/{primary.id}/" if primary else None
+        diameter = gravity_align.reference_trajectory_diameter(reconstruction, reference_prefix)
         normalization_scale = 1.0 / diameter if ctx.params["normalize_scale"] and diameter > 1e-9 else 1.0
         if ctx.params["method"] == "none":
             return {
@@ -142,7 +146,7 @@ class AlignReconstruction(Stage):
                     gravity_align.TARGET_UP, gravity_align.TARGET_UP
                 ),
             }
-        if ctx.source_kind != "insv" or ctx.source_path is None:
+        if primary is None or primary.adapter != SourceAdapter.INSTA360_INSV:
             if ctx.params["method"] == "imu":
                 raise RuntimeError("IMU alignment requires an INSV source")
             return {
@@ -157,13 +161,17 @@ class AlignReconstruction(Stage):
             }
 
         frames_path = ctx.project_dir / "extract_frames" / "manifest_frames.json"
-        frames = json.loads(frames_path.read_text(encoding="utf-8"))["frames"]
+        frames = [
+            frame
+            for frame in json.loads(frames_path.read_text(encoding="utf-8"))["frames"]
+            if frame["source_id"] == primary.id
+        ]
         frame_times = {
             int(frame["index"]): float(frame["timestamp_sec"])
             for frame in frames
             if frame.get("timestamp_sec") is not None
         }
-        recording = imu.read_imu_recording(ctx.source_path)
+        recording = imu.read_imu_recording(primary.path)
         if recording is None:
             raise RuntimeError("INSV contains no IMU samples")
         rotation, diagnostics = gravity_align.compute_timed_align_rotation(
@@ -171,6 +179,7 @@ class AlignReconstruction(Stage):
             frame_times,
             recording.samples,
             imu_timestamps_sec=recording.timestamps_sec,
+            image_prefix=f"sources/{primary.id}/",
         )
         if rotation is None:
             raise RuntimeError(f"IMU gravity alignment failed: {diagnostics}")
@@ -182,6 +191,7 @@ class AlignReconstruction(Stage):
             "target_dataset_up": [0, -1, 0],
             "normalization_scale": normalization_scale,
             "source_trajectory_diameter": diameter,
+            "reference_image_prefix": f"sources/{primary.id}/",
             "rotation": rotation,
             **diagnostics,
         }

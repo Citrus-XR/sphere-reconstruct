@@ -9,10 +9,12 @@ export const FileBrowser = ({
   onPick,
   onClose,
   selectionError,
+  selectionKind,
 }: {
   onPick: (path: string, isDir: boolean) => void
   onClose: () => void
   selectionError?: unknown
+  selectionKind: 'file' | 'directory'
 }) => {
   const { t } = useSettings()
   const { data: drivesData } = useQuery({ queryKey: ['fs-drives'], queryFn: api.getFsDrives, retry: false })
@@ -67,11 +69,13 @@ export const FileBrowser = ({
                 <span>📁</span>
                 <span style={{ flex: 1 }}>{d.name}</span>
               </button>
-              <button className="btn btn-secondary" style={{ fontSize: 10, padding: '2px 6px' }}
-                type="button" onClick={() => onPick(d.path, true)}>{t('selectErpImages')}</button>
+              {selectionKind === 'directory' && (
+                <button className="btn btn-secondary" style={{ fontSize: 10, padding: '2px 6px' }}
+                  type="button" onClick={() => onPick(d.path, true)}>{t('selectFolder')}</button>
+              )}
             </div>
           ))}
-          {data?.files.map((f: FsEntry) => (
+          {selectionKind === 'file' && data?.files.map((f: FsEntry) => (
             <button type="button" key={f.path} className="fs-row fs-row-button" onClick={() => onPick(f.path, false)}>
               <span>🎬</span>
               <span style={{ flex: 1 }}>{f.name}</span>

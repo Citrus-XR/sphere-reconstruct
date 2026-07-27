@@ -14,6 +14,6 @@ from . import (
     generate_masks,  # noqa: F401
     inspect_source,  # noqa: F401
     match_features,  # noqa: F401
+    prepare_images,  # noqa: F401
     reconstruct,  # noqa: F401
-    reproject_views,  # noqa: F401
 )

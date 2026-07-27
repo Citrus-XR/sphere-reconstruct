@@ -5,6 +5,7 @@ import { DEFAULT_PARAMS, paramsForStage, type ReconMode } from '../src/features/
 const MOCK_SOURCE = 'D:\\VID 2026\\clip.insv'
 const MOCK_EXPORT = 'D:\\LFStudio\\export_dataset'
 const MOCK_ENV_PATH = 'D:\\very-long-workspace-directory\\nested-runtime\\models\\and-tools\\current-environment'
+const MOCK_PHONE = 'D:\\mixed-inputs\\Phone photos'
 
 interface MockOptions {
   sourceKind?: 'insv' | 'erp_video'
@@ -17,10 +18,21 @@ interface MockOptions {
 const installUiMock = async (page: Page, options: MockOptions = {}) => {
   const sourceKind = options.sourceKind ?? 'insv'
   const reconMode = options.reconMode ?? (sourceKind === 'insv' ? 'native_fisheye' : 'equirectangular')
-  const imageName = options.imageName ?? (sourceKind === 'insv' ? 'front/frame_000000.jpg' : 'frame_000000.jpg')
+  const imageName = options.imageName ?? (sourceKind === 'insv'
+    ? 'sources/s1/front/frame_000000.jpg' : 'sources/s1/frame_000000.jpg')
   const unexpectedRequests: string[] = []
   const reruns: Array<{ stage: string; body: Record<string, Record<string, unknown>> }> = []
+  const sourceAdds: Array<Record<string, unknown>> = []
   const deletedProjects = new Set<string>()
+  const sourcesByProject: Record<string, Array<Record<string, unknown>>> = {
+    p1: [{
+      id: 's1', label: sourceKind === 'insv' ? 'Primary 360' : 'Primary ERP', role: 'primary',
+      adapter: sourceKind === 'insv' ? 'insta360_insv' : 'generic_video', media_kind: 'video',
+      projection: sourceKind === 'insv' ? 'dual_fisheye' : 'equirectangular', path: MOCK_SOURCE,
+      ordinal: 0, enabled: true,
+    }],
+    p2: [],
+  }
   await page.addInitScript(() => {
     localStorage.clear()
     localStorage.setItem('lang', 'en')
@@ -36,7 +48,7 @@ const installUiMock = async (page: Page, options: MockOptions = {}) => {
     if (path === '/api/projects') {
       const projects = [{
         id: 'p1', name: 'Mock project', created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z',
-        source_kind: sourceKind, source_path: MOCK_SOURCE, state: 'exported',
+        sources: sourcesByProject.p1, state: 'exported',
         ui_state: options.reconMode ? {
           reconMode: options.reconMode,
           params: {},
@@ -45,7 +57,7 @@ const installUiMock = async (page: Page, options: MockOptions = {}) => {
       }]
       if (options.secondProject) projects.push({
         id: 'p2', name: 'Second project', created_at: '2025-01-01T00:00:00Z', updated_at: '2025-01-01T00:00:00Z',
-        source_kind: 'insv', source_path: 'D:\\second.insv', state: 'created', ui_state: null,
+        sources: sourcesByProject.p2, state: 'created', ui_state: null,
       })
       await route.fulfill({ json: projects.filter(project => !deletedProjects.has(project.id)) })
       return
@@ -69,16 +81,18 @@ const installUiMock = async (page: Page, options: MockOptions = {}) => {
       return
     }
     if (path === '/api/fs/browse') {
-      await route.fulfill({ json: { path: 'D:\\', parent: null, dirs: [], files: [] } })
+      await route.fulfill({ json: { path: 'D:\\', parent: null,
+        dirs: [{ name: 'Phone photos', path: MOCK_PHONE, is_dir: true }], files: [] } })
       return
     }
     const projectMatch = path.match(/^\/api\/projects\/(p1|p2)/)
     const projectId = projectMatch?.[1]
     if (projectId && path === `/api/projects/${projectId}/stages`) {
-      const names = ['inspect_source', 'extract_frames', 'generate_masks', 'extract_features', 'match_features', 'reconstruct', 'align_reconstruction', 'export_dataset']
+      const names = ['inspect_source', 'extract_frames', 'prepare_images', 'generate_masks', 'extract_features', 'match_features', 'reconstruct', 'align_reconstruction', 'export_dataset']
       const extras: Record<string, Record<string, unknown>> = {
         inspect_source: { kind: 'insv', file_size: 1024, gravity_samples: 42 },
         extract_frames: { frames: 1, selection_mode: 'interval', selected: 1 },
+        prepare_images: { images: 2, sources: 1, camera_groups: 1 },
         generate_masks: { images: 2, average_dynamic_coverage: 0.1, coverage_warnings: 0 },
         extract_features: { images: 2, minimum_keypoints: 100, average_keypoints: 200, maximum_keypoints: 300, descriptor_images: 2 },
         match_features: { raw_pairs: 1, verified_pairs: 1, minimum_inliers: 20, average_inliers: 20, maximum_inliers: 20, total_inliers: 20 },
@@ -95,7 +109,8 @@ const installUiMock = async (page: Page, options: MockOptions = {}) => {
       return
     }
     if (projectId && path === `/api/projects/${projectId}/source-info`) {
-      await route.fulfill({ json: { kind: sourceKind, duration_sec: 1, fps: 30, width: 100, height: 100 } })
+      await route.fulfill({ json: { id: 's1', duration_sec: 1, duration_sec_total: 1, fps: 30, width: 100, height: 100,
+        sources: [{ id: 's1', duration_sec: 1, fps: 30, width: 100, height: 100 }] } })
       return
     }
     if (projectId && path === `/api/projects/${projectId}/reconstruction`) {
@@ -117,20 +132,21 @@ const installUiMock = async (page: Page, options: MockOptions = {}) => {
       return
     }
     if (projectId && path === `/api/projects/${projectId}/frames`) {
-      await route.fulfill({ json: { kind: sourceKind === 'insv' ? 'insv_dual' : 'erp_video', count: 1, width: 100, height: 100, fps: 30,
-        selection: { mode: 'interval', selected: 1 }, frames: [{ index: 0, timestamp_sec: 0, score: { sharpness: 12 } }] } })
+      await route.fulfill({ json: { count: 1,
+        sources: [{ id: 's1', label: 'Primary 360', role: 'primary', projection: sourceKind === 'insv' ? 'dual_fisheye' : 'equirectangular',
+          kind: sourceKind === 'insv' ? 'insv_dual' : 'equirectangular_video', count: 1, width: 100, height: 100, fps: 30,
+          selection: { mode: 'interval', selected: 1 } }],
+        frames: [{ index: 0, source_id: 's1', source_index: 0, timestamp_sec: 0, score: { sharpness: 12 } }] } })
       return
     }
     if (projectId && path === `/api/projects/${projectId}/masks`) {
-      await route.fulfill({ json: reconMode === 'pinhole_rig'
-        ? { kind: 'sam3_pinhole_masks', frames: [{ index: 0, views: [
-            { view: 'front', lens: 0, path: 'mask.png', coverage: 0.1 },
-          ] }] }
-        : sourceKind === 'insv'
-        ? { kind: 'sam3_fisheye_masks', frames: [{ index: 0, lenses: [
-            { lens: 0, path: 'mask.png', coverage: 0.1 }, { lens: 1, path: 'mask.png', coverage: 0.2 },
-          ] }] }
-        : { kind: 'sam3_erp_masks', frames: [{ index: 0, path: 'mask.png', coverage: 0.1 }] } })
+      const maskNames = sourceKind === 'insv' && reconMode !== 'pinhole_rig'
+        ? ['sources/s1/front/frame_000000.jpg', 'sources/s1/back/frame_000000.jpg']
+        : [imageName]
+      await route.fulfill({ json: { version: 2, prompt: ['person'], images: maskNames.map((name, index) => ({
+        name, source_id: 's1', capture_index: 0, path: 'mask.png', coverage: 0.1 + index * 0.1,
+        coverage_warning: false,
+      })) } })
       return
     }
     if (projectId && path === `/api/projects/${projectId}/fisheye-region`) {
@@ -141,13 +157,42 @@ const installUiMock = async (page: Page, options: MockOptions = {}) => {
       await route.fulfill({ json: { dir: MOCK_EXPORT, gui_integration: null } })
       return
     }
-    if (path.includes('/image') || path.includes('/fisheye-mask/') || path.includes('/pinhole/')) {
+    if (path.includes('/image') || path.includes('/prepared-image') || path.includes('/prepared-mask')) {
       const pixel = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M/wHwAF/gL+AvJkGQAAAABJRU5ErkJggg==', 'base64')
       await route.fulfill({ status: 200, contentType: 'image/png', body: pixel })
       return
     }
     if (projectId && path === `/api/projects/${projectId}/ui-state` && route.request().method() === 'PUT') {
       await route.fulfill({ json: {} })
+      return
+    }
+    if (projectId && path === `/api/projects/${projectId}/sources` && route.request().method() === 'POST') {
+      const body = route.request().postDataJSON() as Record<string, unknown>
+      sourceAdds.push(body)
+      sourcesByProject[projectId].push({
+        id: `s${sourcesByProject[projectId].length + 1}`,
+        label: body.label || 'Supplemental source',
+        role: sourcesByProject[projectId].length ? 'supplemental' : 'primary',
+        adapter: body.adapter,
+        media_kind: body.media_kind,
+        projection: body.projection,
+        path: body.path,
+        ordinal: sourcesByProject[projectId].length,
+        enabled: true,
+      })
+      await route.fulfill({ json: { id: projectId, sources: sourcesByProject[projectId] } })
+      return
+    }
+    const sourceMutation = path.match(/^\/api\/projects\/(p1|p2)\/sources\/([^/]+)(\/make-primary)?$/)
+    if (sourceMutation && route.request().method() === 'DELETE') {
+      sourcesByProject[sourceMutation[1]] = sourcesByProject[sourceMutation[1]].filter(source => source.id !== sourceMutation[2])
+      await route.fulfill({ json: { id: sourceMutation[1], sources: sourcesByProject[sourceMutation[1]] } })
+      return
+    }
+    if (sourceMutation?.[3] && route.request().method() === 'POST') {
+      for (const source of sourcesByProject[sourceMutation[1]])
+        source.role = source.id === sourceMutation[2] ? 'primary' : 'supplemental'
+      await route.fulfill({ json: { id: sourceMutation[1], sources: sourcesByProject[sourceMutation[1]] } })
       return
     }
     if (projectId && path === `/api/projects/${projectId}` && route.request().method() === 'DELETE') {
@@ -170,7 +215,7 @@ const installUiMock = async (page: Page, options: MockOptions = {}) => {
     unexpectedRequests.push(`${route.request().method()} ${path}`)
     await route.fulfill({ status: 501, json: { detail: 'unexpected mocked request' } })
   })
-  return { unexpectedRequests, reruns }
+  return { unexpectedRequests, reruns, sourceAdds }
 }
 
 test('IDE loads the split pipeline and environment diagnostics', async ({ page }) => {
@@ -270,7 +315,7 @@ test('photo and dataset camera inspectors share capture summary fields', async (
   const cameras = page.getByText(/Dataset · Cameras/)
   await expect(cameras).toBeVisible()
   await cameras.click()
-  const camera = page.getByText('front/frame_000000.jpg', { exact: true })
+  const camera = page.getByText('sources/s1/front/frame_000000.jpg', { exact: true })
   await expect(camera).toBeVisible()
   await camera.click()
   summary = page.getByTestId('capture-summary')
@@ -302,6 +347,7 @@ test('feature, matching, and mapper controls have localized names and explanatio
   await page.getByText('Match features', { exact: true }).click()
   await expect(page.getByText('Feature matcher (matcher_type)', { exact: true })).toBeVisible()
   await expect(page.getByText('Image-pair strategy (pairing)', { exact: true })).toBeVisible()
+  await page.getByText('Image-pair strategy (pairing)', { exact: true }).locator('..').locator('select').selectOption('sequential')
   await expect(page.getByText('Loop closure (loop_closure)', { exact: true })).toBeVisible()
   await expect(page.getByText('Matches per image pair (max_num_matches)', { exact: true })).toBeVisible()
   await expect(page.getByText('Two-view minimum inliers (two-view min_num_inliers)', { exact: true })).toBeVisible()
@@ -328,6 +374,30 @@ test('feature, matching, and mapper controls have localized names and explanatio
   await expect(page.getByText('SIFT 峰值阈值 (peak_threshold)', { exact: true })).toBeVisible()
   await expect(page.getByText('SIFT 边缘阈值 (edge_threshold)', { exact: true })).toBeVisible()
   await expect(page.getByText('仿射形状 + DSP (affine_shape + DSP)', { exact: true })).toBeVisible()
+  expect(mock.unexpectedRequests).toEqual([])
+})
+
+test('phone image folders can be added as supplemental perspective sources', async ({ page }) => {
+  const mock = await installUiMock(page)
+  await page.goto('/')
+
+  await page.getByRole('button', { name: /Source done/ }).click()
+  const sourceType = page.getByText('Add data source', { exact: true }).locator('..').locator('select')
+  await sourceType.selectOption('perspective_images')
+  await page.getByRole('button', { name: 'Choose path…' }).click()
+  const phoneRow = page.locator('.fs-row').filter({ hasText: 'Phone photos' })
+  await phoneRow.getByRole('button', { name: 'Select this folder' }).click()
+
+  await expect.poll(() => mock.sourceAdds.length).toBe(1)
+  expect(mock.sourceAdds[0]).toMatchObject({
+    role: 'supplemental',
+    adapter: 'generic_images',
+    media_kind: 'images',
+    projection: 'perspective',
+    path: MOCK_PHONE,
+  })
+  await expect(page.getByText('Supplemental source', { exact: true })).toBeVisible()
+  await expect(page.getByText('Detail', { exact: true })).toBeVisible()
   expect(mock.unexpectedRequests).toEqual([])
 })
 
@@ -359,26 +429,26 @@ test('deleting the current project selects the next available project', async ({
 test('dataset camera preview resolves ERP and pinhole image layouts', async ({ page }) => {
   const erpMock = await installUiMock(page, {
     sourceKind: 'erp_video',
-    imageName: 'frame_000000.jpg',
+    imageName: 'sources/s1/frame_000000.jpg',
     cameraModel: 'EQUIRECTANGULAR',
   })
   await page.goto('/')
   await page.getByRole('button', { name: /Dataset · Cameras/ }).click()
-  await page.getByRole('button', { name: 'frame_000000.jpg' }).click()
-  await expect(page.locator('.inspector-preview-image')).toHaveAttribute('src', /\/frames\/0\/image\?lens=0$/)
+  await page.getByRole('button', { name: 'sources/s1/frame_000000.jpg' }).click()
+  await expect(page.locator('.inspector-preview-image')).toHaveAttribute('src', /\/prepared-image\?name=/)
   expect(erpMock.unexpectedRequests).toEqual([])
 })
 
 test('pinhole dataset camera uses the reprojected view endpoint', async ({ page }) => {
   const mock = await installUiMock(page, {
-    imageName: 'front_lens0/frame_000000.jpg',
+    imageName: 'sources/s1/front_lens0/frame_000000.jpg',
     cameraModel: 'PINHOLE',
     reconMode: 'pinhole_rig',
   })
   await page.goto('/')
   await page.getByRole('button', { name: /Dataset · Cameras/ }).click()
-  await page.getByRole('button', { name: 'front_lens0/frame_000000.jpg' }).click()
-  await expect(page.locator('.inspector-preview-image')).toHaveAttribute('src', /\/pinhole\/0\/front\?lens=0$/)
+  await page.getByRole('button', { name: 'sources/s1/front_lens0/frame_000000.jpg' }).click()
+  await expect(page.locator('.inspector-preview-image')).toHaveAttribute('src', /\/prepared-image\?name=/)
   expect(mock.unexpectedRequests).toEqual([])
 })
 
@@ -389,7 +459,7 @@ test('stage rows and source dialog support keyboard navigation', async ({ page }
   const sourceStep = page.getByRole('button', { name: /Source done/ })
   await sourceStep.focus()
   await page.keyboard.press('Enter')
-  await page.getByRole('button', { name: 'Select source…' }).click()
+  await page.getByRole('button', { name: 'Choose path…' }).click()
   const dialog = page.getByRole('dialog', { name: 'Select source…' })
   await expect(dialog).toBeVisible()
   await page.keyboard.press('Escape')
@@ -423,7 +493,7 @@ test('complete INSV flow can be driven from UI', async ({ page, request }) => {
   expect(root, `No file-browser root contains ${source}`).toBeTruthy()
 
   await page.getByRole('button', { name: /Source/ }).click()
-  await page.getByRole('button', { name: 'Select source…' }).click()
+  await page.getByRole('button', { name: 'Choose path…' }).click()
   const dialog = page.getByRole('dialog', { name: 'Select source…' })
   await dialog.getByRole('button', { name: root.replaceAll('\\', '/') }).click()
   const relativeDirectory = filesystem.relative(root, filesystem.dirname(source))
@@ -431,7 +501,7 @@ test('complete INSV flow can be driven from UI', async ({ page, request }) => {
     await dialog.locator('.fs-main').filter({ hasText: directory }).click()
   }
   const sourceSet = page.waitForResponse(response => (
-    response.request().method() === 'POST' && response.url().endsWith(`/api/projects/${project!.id}/source`)
+    response.request().method() === 'POST' && response.url().endsWith(`/api/projects/${project!.id}/sources`)
   ))
   await dialog.locator('.fs-row-button').filter({ hasText: filesystem.basename(source) }).click()
   await sourceSet

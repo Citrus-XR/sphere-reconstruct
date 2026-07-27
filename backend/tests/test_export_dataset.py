@@ -9,6 +9,8 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
+from sphere_reconstruct.colmap import model as colmap_model
+from sphere_reconstruct.colmap.input_workspace import InputSpec
 from sphere_reconstruct.pipeline.stage import ProgressReporter, StageContext
 from sphere_reconstruct.stages.export_dataset import ExportDataset
 
@@ -88,14 +90,44 @@ def _write_mask(path: Path, size: tuple[int, int] = (64, 64)) -> None:
 def _execute(project: Path, raw_params: dict | None = None) -> Path:
     output = project / ".export_dataset.tmp"
     output.mkdir()
+    reconstruction = colmap_model.read_model(project / "align_reconstruction" / "sparse" / "0")
+    names = [image.name for image in reconstruction.images.values()]
+    spec = InputSpec(
+        version=2,
+        reconstruction_mode="native_fisheye",
+        image_count=len(names),
+        source_count=1,
+        primary_source_id="primary",
+        primary_image_names=names,
+        sources=[{"id": "primary", "label": "Primary", "role": "primary", "projection": "dual_fisheye"}],
+        images=[
+            {
+                "name": name,
+                "source_id": "primary",
+                "source_role": "primary",
+                "capture_index": index,
+                "sensor_id": "front",
+            }
+            for index, name in enumerate(names)
+        ],
+        feature_batches=[],
+        image_path="images",
+        mask_path="masks",
+        rig_config_path="rig_config.json",
+        refine_intrinsics=True,
+        refine_rig=False,
+        multiple_models=False,
+    )
+    input_spec = project / "extract_features" / "input_spec.json"
+    input_spec.parent.mkdir(parents=True, exist_ok=True)
+    spec.write(input_spec)
     stage = ExportDataset()
     ctx = StageContext(
         project_id="test",
         project_dir=project,
         stage_out_dir=output,
         params=stage.normalize_params(raw_params or {}),
-        source_path=None,
-        source_kind="insv",
+        sources=(),
         progress=ProgressReporter(lambda *_args: None),
     )
     stage.execute(ctx)
@@ -191,7 +223,7 @@ def test_unmatched_mask_does_not_enable_segment_mode(tmp_path: Path):
     exported = json.loads((output / "export_manifest.json").read_text())
     assert config["mask_mode"] == "none"
     assert exported["masks"] == 0
-    assert "unmatched_mask_files" in exported["validation"]["warnings"]
+    assert not (output / "masks" / "unrelated.png").exists()
 
 
 def test_stationary_rig_is_detected_from_reference_sensor_trajectory(tmp_path: Path):
@@ -200,9 +232,7 @@ def test_stationary_rig_is_detected_from_reference_sensor_trajectory(tmp_path: P
     _write_preview(project)
     for lens in ("front", "back"):
         for index in range(2):
-            _write_rgb(
-                project / "extract_features" / "images" / lens / f"frame_{index:06d}.jpg"
-            )
+            _write_rgb(project / "extract_features" / "images" / lens / f"frame_{index:06d}.jpg")
 
     output = _execute(project, {"emit_train_configs": False})
 

@@ -11,18 +11,20 @@ const DEFAULT_CIRCLE: LensCircle = { cx: 0.5, cy: 0.5, r: 0.459 }
 
 export const FisheyeRegionEditor = ({
   projectId,
+  sourceId,
   frameIndex,
   onSaved,
 }: {
   projectId: string
+  sourceId: string
   frameIndex: number
   onSaved?: () => void
 }) => {
   const { t } = useSettings()
   const qc = useQueryClient()
   const { data } = useQuery({
-    queryKey: ['fisheye-region', projectId],
-    queryFn: () => api.getFisheyeRegion(projectId),
+    queryKey: ['fisheye-region', projectId, sourceId],
+    queryFn: () => api.getFisheyeRegion(projectId, sourceId),
     enabled: !!projectId, retry: false,
   })
   const [region, setRegion] = useState<FisheyeRegion>({ lens0: DEFAULT_CIRCLE, lens1: DEFAULT_CIRCLE })
@@ -33,11 +35,11 @@ export const FisheyeRegionEditor = ({
   useEffect(() => { if (data) setRegion(data) }, [data])
 
   const save = useMutation({
-    mutationFn: () => api.putFisheyeRegion(projectId, region),
+    mutationFn: () => api.putFisheyeRegion(projectId, sourceId, region),
     onSuccess: r => {
       setRegion(r)
       setSavedMsg(true); setTimeout(() => setSavedMsg(false), 1500)
-      qc.invalidateQueries({ queryKey: ['fisheye-region', projectId] })
+      qc.invalidateQueries({ queryKey: ['fisheye-region', projectId, sourceId] })
       onSaved?.()
     },
   })

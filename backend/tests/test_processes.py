@@ -34,7 +34,10 @@ def test_cancel_stops_worker_descendants(tmp_path: Path):
     try:
         cancel(handle, grace_seconds=1.0)
         assert not handle.is_alive
-        child = psutil.Process(child_pid) if psutil.pid_exists(child_pid) else None
+        try:
+            child = psutil.Process(child_pid) if psutil.pid_exists(child_pid) else None
+        except psutil.NoSuchProcess:
+            child = None
         if child is not None:
             _gone, alive = psutil.wait_procs([child], timeout=5.0)
             assert not alive

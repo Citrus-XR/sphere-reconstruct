@@ -24,7 +24,25 @@ from ..settings import get_settings
 router = APIRouter(tags=["system"])
 
 # 選択可能な入力拡張子.
-_SOURCE_EXTS = {".insv", ".mp4", ".mov", ".mkv", ".avi", ".jpg", ".jpeg", ".png"}
+_SOURCE_EXTS = {
+    ".insv",
+    ".mp4",
+    ".mov",
+    ".mkv",
+    ".avi",
+    ".m4v",
+    ".mts",
+    ".m2ts",
+    ".webm",
+    ".wmv",
+    ".3gp",
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".tif",
+    ".tiff",
+    ".webp",
+}
 
 
 @router.get("/api/system/stats")

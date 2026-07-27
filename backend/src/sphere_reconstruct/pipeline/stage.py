@@ -21,6 +21,7 @@ from typing import Any
 
 from ..domain.artifacts import FileRef, StageManifest
 from ..domain.pipeline_state import StageName
+from ..domain.source import MediaKind, Projection, SourceAdapter, SourceRole
 
 
 @dataclass
@@ -68,14 +69,30 @@ class ProgressReporter:
 
 
 @dataclass
+class SourceContext:
+    id: str
+    label: str
+    role: SourceRole
+    adapter: SourceAdapter
+    media_kind: MediaKind
+    projection: Projection
+    path: Path
+    ordinal: int
+    enabled: bool
+
+
+@dataclass
 class StageContext:
     project_id: str
     project_dir: Path  # workspace/projects/<id>
     stage_out_dir: Path  # 出力書き込み先 (tmp, 成功後に atomic replace)
     params: dict[str, Any]
-    source_path: Path | None
-    source_kind: str | None
+    sources: tuple[SourceContext, ...]
     progress: ProgressReporter
+
+    @property
+    def primary_source(self) -> SourceContext | None:
+        return next((source for source in self.sources if source.role == SourceRole.PRIMARY), None)
 
 
 class Stage(ABC):

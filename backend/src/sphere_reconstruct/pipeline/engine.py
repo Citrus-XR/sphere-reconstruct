@@ -28,6 +28,7 @@ from typing import Any
 
 from ..domain.artifacts import StageManifest, manifest_path
 from ..domain.pipeline_state import STAGE_ORDER, StageName, downstream_of
+from ..domain.source import MediaKind, Projection, SourceAdapter, SourceRole
 from ..infrastructure.filesystem import atomic_replace_dir
 from .invalidation import (
     assert_export_is_managed,
@@ -36,7 +37,7 @@ from .invalidation import (
     invalidate_from,
 )
 from .manifest import get as get_stage_cls
-from .stage import ProgressReporter, StageContext
+from .stage import ProgressReporter, SourceContext, StageContext
 
 
 class PipelineError(RuntimeError):
@@ -82,6 +83,29 @@ class Engine:
             raise PipelineError(f"project {self._project_id} not found")
         return row
 
+    def _project_sources(self) -> tuple[SourceContext, ...]:
+        with self._lock:
+            self._conn.row_factory = sqlite3.Row
+            rows = self._conn.execute(
+                "SELECT * FROM project_source WHERE project_id=? AND enabled=1 "
+                "ORDER BY ordinal, created_at, id",
+                (self._project_id,),
+            ).fetchall()
+        return tuple(
+            SourceContext(
+                id=row["id"],
+                label=row["label"],
+                role=SourceRole(row["role"]),
+                adapter=SourceAdapter(row["adapter"]),
+                media_kind=MediaKind(row["media_kind"]),
+                projection=Projection(row["projection"]),
+                path=Path(row["path"]),
+                ordinal=int(row["ordinal"]),
+                enabled=bool(row["enabled"]),
+            )
+            for row in rows
+        )
+
     # -- ステージ実行 -------------------------------------------------------------
     def run_stage(self, stage_name: StageName, params: dict[str, Any] | None = None) -> None:
         params = params or {}
@@ -92,7 +116,8 @@ class Engine:
         project_dir.mkdir(parents=True, exist_ok=True)
         (project_dir / "manifests").mkdir(parents=True, exist_ok=True)
 
-        proj = self._project_row()
+        self._project_row()
+        sources = self._project_sources()
 
         # 出力先は tmp ディレクトリ, 成功時に final に atomic replace.
         final_dir = project_dir / stage_name.value
@@ -138,8 +163,7 @@ class Engine:
             project_dir=project_dir,
             stage_out_dir=tmp_dir,
             params=stage.normalize_params(params),
-            source_path=Path(proj["source_path"]) if proj["source_path"] else None,
-            source_kind=proj["source_kind"],
+            sources=sources,
             progress=reporter,
         )
 
@@ -271,13 +295,6 @@ class Engine:
     ) -> None:
         params_by_stage = params_by_stage or {}
         skip = set(skip or set())
-        # pinhole_rig 以外 (native_fisheye / equirectangular) は生フレームを直接 COLMAP に
-        # 渡すため, pinhole 再投影 (reproject_views) は不要でスキップする. SAM3 マスクは
-        # generate_masks が入力形式に応じたレイアウトで作るので, これは従来通り実行する.
-        features = params_by_stage.get(StageName.EXTRACT_FEATURES, {})
-        mode = features.get("reconstruction_mode", "native_fisheye")
-        if mode != "pinhole_rig":
-            skip.add(StageName.REPROJECT_VIEWS)
         for st in STAGE_ORDER:
             if st in skip:
                 continue

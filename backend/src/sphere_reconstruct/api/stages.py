@@ -71,11 +71,11 @@ async def list_stages(project_id: str) -> dict:
             except (OSError, json.JSONDecodeError):
                 params = None
         run = latest.get(st.value, {})
-        status = run.get("status")
-        if not has_output and is_stale(proj_dir, st):
-            status = "stale"
-        elif not has_output and status == "succeeded":
-            status = None
+        status = _resolve_stage_status(
+            has_output=has_output,
+            stale=is_stale(proj_dir, st),
+            run_status=run.get("status"),
+        )
         stages.append(
             {
                 "stage": st.value,
@@ -92,6 +92,16 @@ async def list_stages(project_id: str) -> dict:
     return {"project_id": project_id, "state": p.state.value, "stages": stages}
 
 
+def _resolve_stage_status(*, has_output: bool, stale: bool, run_status: str | None) -> str | None:
+    if run_status in {"running", "queued", "failed"}:
+        return run_status
+    if not has_output and stale:
+        return "stale"
+    if not has_output and run_status == "succeeded":
+        return None
+    return run_status
+
+
 @router.post("/api/projects/{project_id}/stages/{stage}/clear")
 async def clear_stage(project_id: str, stage: str) -> dict:
     if stage not in [s.value for s in StageName]:
@@ -102,9 +112,7 @@ async def clear_stage(project_id: str, stage: str) -> dict:
         raise HTTPException(status_code=404, detail="project not found")
 
     proj_dir = _project_dir(project_id)
-    invalidated = await run_in_threadpool(
-        invalidate_from, proj_dir, StageName(stage), include_self=True
-    )
+    invalidated = await run_in_threadpool(invalidate_from, proj_dir, StageName(stage), include_self=True)
 
     new_state = derive_pipeline_state(proj_dir)
     await db.conn.execute(

@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 
 from sphere_reconstruct.domain import project as project_domain
-from sphere_reconstruct.domain.project import SourceKind
+from sphere_reconstruct.domain import source as source_domain
 from sphere_reconstruct.infrastructure.database import close_db, init_db
 from sphere_reconstruct.job_supervisor import init_supervisor, shutdown_supervisor
 
@@ -71,7 +71,7 @@ async def _wait_job(db, jid: str, timeout: int = 60) -> tuple[str, str | None]:
     return "timeout", None
 
 
-async def _run_pipeline(tmp_workspace: Path, src: Path, kind: SourceKind):
+async def _run_pipeline(tmp_workspace: Path, src: Path):
     """FastAPI レイヤは経由せず, domain + supervisor 直接使う."""
     import os
 
@@ -86,7 +86,16 @@ async def _run_pipeline(tmp_workspace: Path, src: Path, kind: SourceKind):
     try:
         sup = init_supervisor(db, db_path)
         p = await project_domain.create_project(db, "integ")
-        await project_domain.set_source(db, p.id, kind=kind, path=str(src))
+        await source_domain.add_source(
+            db,
+            p.id,
+            label="synthetic INSV",
+            role=source_domain.SourceRole.PRIMARY,
+            adapter=source_domain.SourceAdapter.INSTA360_INSV,
+            media_kind=source_domain.MediaKind.VIDEO,
+            projection=source_domain.Projection.DUAL_FISHEYE,
+            path=str(src),
+        )
 
         j1 = await sup.enqueue_run_pipeline(project_id=p.id, stage="inspect_source")
         st1, err1 = await _wait_job(db, j1, 30)
@@ -97,11 +106,11 @@ async def _run_pipeline(tmp_workspace: Path, src: Path, kind: SourceKind):
         assert st2 == "succeeded", f"extract failed: {err2}"
 
         project_dir = tmp_workspace / "projects" / p.id
-        assert (project_dir / "inspect_source" / "source.json").exists()
+        assert (project_dir / "inspect_source" / "sources.json").exists()
         mf_path = project_dir / "extract_frames" / "manifest_frames.json"
         assert mf_path.exists()
         mf = json.loads(mf_path.read_text())
-        assert mf["kind"] == "insv_dual"
+        assert mf["sources"][0]["kind"] == "insv_dual"
         assert mf["count"] > 0
         # 相対パスが実際に解決できる (原子置換後の名前になっている) ことを確認.
         first = mf["frames"][0]
@@ -118,4 +127,4 @@ def test_full_pipeline_on_synthetic_dual_stream(tmp_path: Path):
     fake_insv = tmp_path / "fake.insv"
     _make_dual_stream_mp4(fake_insv, duration=2.0, fps=10)
 
-    asyncio.run(_run_pipeline(tmp_path / "workspace", fake_insv, SourceKind.INSV))
+    asyncio.run(_run_pipeline(tmp_path / "workspace", fake_insv))

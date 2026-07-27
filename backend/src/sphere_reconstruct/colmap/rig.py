@@ -75,6 +75,7 @@ def compute_rig_cameras(
     *,
     ref_view: str = "front",
     ref_lens: int = 0,
+    prefix: str = "",
 ) -> list[RigCamera]:
     """rig manifest の views + lenses から, 12 (= views x lenses) 個の RigCamera を計算する.
 
@@ -91,7 +92,7 @@ def compute_rig_cameras(
             is_ref = v["name"] == ref_view and lens["index"] == ref_lens
             cams.append(
                 RigCamera(
-                    image_prefix=f"{v['name']}_lens{lens['index']}/",
+                    image_prefix=f"{prefix}{v['name']}_lens{lens['index']}/",
                     is_ref=is_ref,
                     quat_wxyz=q,
                     translation=(float(t[0]), float(t[1]), float(t[2])),

@@ -25,6 +25,7 @@ from PIL import Image as PilImage
 
 from ..colmap import gravity_align, lichtfeld_config, train_profile
 from ..colmap import model as colmap_model
+from ..colmap.input_workspace import InputSpec
 from ..domain.artifacts import FileRef, StageManifest
 from ..domain.pipeline_state import StageName
 from ..infrastructure.filesystem import sha256_file
@@ -35,12 +36,13 @@ from ..pipeline.stage import Stage, StageContext, new_manifest
 @register
 class ExportDataset(Stage):
     name = StageName.EXPORT_DATASET
-    impl_version = "0.7"
+    impl_version = "1.1"
 
     def collect_inputs(self, ctx: StageContext) -> list[FileRef]:
         candidates = [
             ctx.project_dir / "manifests" / "align_reconstruction.json",
             ctx.project_dir / "manifests" / "extract_features.json",
+            ctx.project_dir / "extract_features" / "input_spec.json",
             ctx.project_dir / "align_reconstruction" / "alignment.json",
             ctx.project_dir / "align_reconstruction" / "sparse" / "0" / "rigs.bin",
             ctx.project_dir / "align_reconstruction" / "sparse" / "0" / "cameras.bin",
@@ -75,6 +77,7 @@ class ExportDataset(Stage):
             raise RuntimeError("align_reconstruction must run first (sparse/0 missing)")
 
         recon = colmap_model.read_model(model_dir)
+        spec = InputSpec.read(ctx.project_dir / "extract_features" / "input_spec.json")
         out = ctx.stage_out_dir
         outputs: list[FileRef] = []
         train_profile_data = train_profile.compute_profile(recon)
@@ -113,21 +116,28 @@ class ExportDataset(Stage):
                     shutil.copy2(source, ds_sparse / source.name)
             # 画像名は images.bin の相対 path をそのまま保つ.
             recon_images = ctx.project_dir / "extract_features" / "images"
-            if recon_images.exists():
-                image_extensions = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
-                for img_file in recon_images.rglob("*"):
-                    if not img_file.is_file() or img_file.suffix.lower() not in image_extensions:
-                        continue
-                    rel = img_file.relative_to(recon_images)
-                    dst = ds_images / rel
-                    dst.parent.mkdir(parents=True, exist_ok=True)
-                    _link_or_copy(img_file, dst)
-            mask_files_copied = _copy_masks(ctx.project_dir / "extract_features" / "masks", ds / "masks")
-            validation = _validate_lf_dataset(ds, recon)
+            registered_names = {image.name for image in recon.images.values()}
+            for name in sorted(registered_names):
+                source = recon_images / name
+                if not source.is_file():
+                    raise RuntimeError(f"registered training image is missing: {name}")
+                _link_or_copy(source, ds_images / name)
+            mask_files_copied = _copy_masks(
+                ctx.project_dir / "extract_features" / "masks",
+                ds / "masks",
+                registered_names,
+            )
+            primary_prefix = f"sources/{spec.primary_source_id}/"
+            if not any(name.startswith(primary_prefix) for name in registered_names):
+                primary_prefix = None
+            validation = _validate_lf_dataset(
+                ds,
+                recon,
+                reference_prefix=primary_prefix,
+            )
+            source_registration = _source_registration(recon, spec)
             if not validation["loadable"]:
-                raise RuntimeError(
-                    "LFStudio export 検証に失敗しました: " + ", ".join(validation["errors"])
-                )
+                raise RuntimeError("LFStudio export 検証に失敗しました: " + ", ".join(validation["errors"]))
             export_manifest = {
                 "format": "sphere-reconstruct-export",
                 "version": 1,
@@ -139,6 +149,7 @@ class ExportDataset(Stage):
                 "mask_files_copied": mask_files_copied,
                 "image_source": "original",
                 "validation": validation,
+                "source_registration": source_registration,
             }
             export_manifest_path = ds / "export_manifest.json"
             export_manifest_path.write_text(
@@ -171,8 +182,7 @@ class ExportDataset(Stage):
                 has_masks=bool(validation and validation["matched_mask_count"] > 0),
             )
             cfg_info["usage"] = (
-                "LichtFeld-Studio --config train_configs/train_config.mrnf.json "
-                "--data-path <export_dataset>"
+                "LichtFeld-Studio --config train_configs/train_config.mrnf.json --data-path <export_dataset>"
             )
             cfg_info["gui_integration"] = {
                 "train_configs_auto_applied": False,
@@ -229,24 +239,30 @@ class ExportDataset(Stage):
             "training_profile": train_profile_data,
             "training_recommendation": cfg_info,
             "lfstudio_training_metrics": "external",
+            "source_registration": _source_registration(recon, spec),
         }
         ctx.progress.info("export_dataset done", progress=1.0, key="log.export_done")
         return manifest
 
+
 def _link_or_copy(src: Path, dst: Path) -> None:
     if dst.exists():
         return
+    dst.parent.mkdir(parents=True, exist_ok=True)
     try:
         os.link(src, dst)
     except OSError:
         shutil.copy2(src, dst)
 
 
-def _copy_masks(source_dir: Path, destination_dir: Path) -> int:
+def _copy_masks(source_dir: Path, destination_dir: Path, image_names: set[str]) -> int:
     if not source_dir.exists():
         return 0
     count = 0
-    for source in source_dir.rglob("*.png"):
+    for image_name in sorted(image_names):
+        source = _find_mask_path(source_dir, Path(image_name))
+        if source is None:
+            continue
         destination = destination_dir / source.relative_to(source_dir)
         destination.parent.mkdir(parents=True, exist_ok=True)
         _link_or_copy(source, destination)
@@ -254,7 +270,12 @@ def _copy_masks(source_dir: Path, destination_dir: Path) -> int:
     return count
 
 
-def _validate_lf_dataset(dataset_dir: Path, recon: colmap_model.Reconstruction) -> dict:
+def _validate_lf_dataset(
+    dataset_dir: Path,
+    recon: colmap_model.Reconstruction,
+    *,
+    reference_prefix: str | None = None,
+) -> dict:
     images_root = dataset_dir / "images"
     masks_root = dataset_dir / "masks"
     missing_images: list[str] = []
@@ -325,11 +346,9 @@ def _validate_lf_dataset(dataset_dir: Path, recon: colmap_model.Reconstruction) 
         sum(1 for path in masks_root.rglob("*.png") if path.is_file()) if masks_root.exists() else 0
     )
     summary = recon.summary()
-    reference_centers = gravity_align.reference_camera_centers(recon)
-    reference_diameter = gravity_align.reference_trajectory_diameter(recon)
-    reference_unique = len(
-        {tuple(round(value, 6) for value in center) for center in reference_centers}
-    )
+    reference_centers = gravity_align.reference_camera_centers(recon, reference_prefix)
+    reference_diameter = gravity_align.reference_trajectory_diameter(recon, reference_prefix)
+    reference_unique = len({tuple(round(value, 6) for value in center) for center in reference_centers})
     errors: list[str] = []
     for code, values in (
         ("unsupported_camera_models", unsupported_cameras),
@@ -371,6 +390,24 @@ def _validate_lf_dataset(dataset_dir: Path, recon: colmap_model.Reconstruction) 
         "unique_camera_centers": summary.get("unique_camera_centers", 0),
         "warnings": warnings,
     }
+
+
+def _source_registration(recon: colmap_model.Reconstruction, spec: InputSpec) -> dict:
+    source_by_name = {image["name"]: image["source_id"] for image in spec.images}
+    source_metadata = {source["id"]: source for source in spec.sources}
+    result = {}
+    for source_id in sorted({image["source_id"] for image in spec.images}):
+        total = sum(image["source_id"] == source_id for image in spec.images)
+        registered = sum(source_by_name.get(image.name) == source_id for image in recon.images.values())
+        result[source_id] = {
+            "label": source_metadata[source_id]["label"],
+            "role": source_metadata[source_id]["role"],
+            "total": total,
+            "registered": registered,
+            "ratio": registered / max(1, total),
+            "connected": registered > 0,
+        }
+    return result
 
 
 def _safe_relative_path(name: str) -> Path | None:

@@ -257,6 +257,12 @@ body { margin: 0; background: var(--bg); color: var(--fg); }
 .stage-statistics-toggle { width: 100%; padding: 4px 0; border: 0; background: transparent;
   color: var(--fg-mute); text-align: left; font: inherit; font-size: 11px; cursor: pointer; }
 .stage-statistics-toggle:hover { color: var(--fg); }
+.source-list { display: grid; gap: 8px; margin-bottom: 12px; }
+.source-card { min-width: 0; padding: 8px; border: 1px solid var(--border); border-radius: 6px;
+  background: color-mix(in srgb, var(--bg-elev) 80%, transparent); }
+.source-role { padding: 2px 6px; border-radius: 999px; font-size: 9px;
+  color: var(--fg-mute); background: rgba(128,128,128,.14); }
+.source-role.primary { color: var(--accent); background: color-mix(in srgb, var(--accent) 15%, transparent); }
 .inspector-section { margin: 12px 0; }
 .inspector-section-title { margin-bottom: 4px; color: var(--fg-mute); font-size: 11px; }
 

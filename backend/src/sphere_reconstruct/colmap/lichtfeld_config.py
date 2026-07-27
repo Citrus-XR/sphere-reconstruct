@@ -192,10 +192,10 @@ def _camera_class(models: list[str]) -> str:
         return "equirect"
     if any("FISHEYE" in m for m in models):
         return "fisheye"
-    if any(m in ("PINHOLE", "SIMPLE_PINHOLE") for m in models):
-        return "pinhole"
     if any(("OPENCV" in m) or ("RADIAL" in m) or ("THIN_PRISM" in m) for m in models):
         return "distorted_pinhole"  # gut/undistort が要る歪み pinhole 系.
+    if any(m in ("PINHOLE", "SIMPLE_PINHOLE") for m in models):
+        return "pinhole"
     return "other"
 
 
@@ -263,8 +263,7 @@ def build_configs(profile: dict, *, has_masks: bool = False) -> tuple[dict[str, 
         "recommended_config": "train_config.mrnf.json",
         "recommended_strategy": "mrnf",
         "usage": (
-            "LichtFeld-Studio --config train_configs/train_config.mrnf.json "
-            "--data-path <export_dataset>"
+            "LichtFeld-Studio --config train_configs/train_config.mrnf.json --data-path <export_dataset>"
         ),
     }
     return configs, info

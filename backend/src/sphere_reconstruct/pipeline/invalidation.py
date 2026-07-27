@@ -60,9 +60,7 @@ def clear_pipeline(project_dir: Path) -> None:
 
 def derive_pipeline_state(project_dir: Path) -> PipelineState:
     """分岐 artifact を考慮して project の要約 state を導出する。"""
-    present = {
-        stage for stage in STAGE_ORDER if manifest_path(project_dir, stage.value).is_file()
-    }
+    present = {stage for stage in STAGE_ORDER if manifest_path(project_dir, stage.value).is_file()}
     if StageName.EXPORT_DATASET in present:
         return PipelineState.EXPORTED
     if StageName.ALIGN_RECONSTRUCTION in present:

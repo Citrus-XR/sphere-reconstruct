@@ -18,11 +18,33 @@ CREATE TABLE IF NOT EXISTS project (
     name         TEXT NOT NULL,
     created_at   TEXT NOT NULL,
     updated_at   TEXT NOT NULL,
-    source_kind  TEXT,          -- 'insv' | 'erp_video' | 'erp_images' | NULL
-    source_path  TEXT,          -- ソースへの絶対パス. 大きなファイルは複製しない.
+    source_kind  TEXT,          -- migration 専用旧列. runtime は project_source を使う.
+    source_path  TEXT,          -- migration 専用旧列.
     state        TEXT NOT NULL, -- pipeline_state.PipelineState の value
     metadata_json TEXT NOT NULL DEFAULT '{}'
 );
+
+CREATE TABLE IF NOT EXISTS project_source (
+    id           TEXT PRIMARY KEY,
+    project_id   TEXT NOT NULL REFERENCES project(id) ON DELETE CASCADE,
+    label        TEXT NOT NULL,
+    role         TEXT NOT NULL,
+    adapter      TEXT NOT NULL,
+    media_kind   TEXT NOT NULL,
+    projection   TEXT NOT NULL,
+    path         TEXT NOT NULL,
+    ordinal      INTEGER NOT NULL,
+    enabled      INTEGER NOT NULL DEFAULT 1,
+    created_at   TEXT NOT NULL,
+    updated_at   TEXT NOT NULL,
+    UNIQUE(project_id, path)
+);
+
+CREATE INDEX IF NOT EXISTS idx_project_source_project
+ON project_source(project_id, ordinal);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_project_source_primary
+ON project_source(project_id) WHERE role='primary';
 
 CREATE TABLE IF NOT EXISTS job (
     id           TEXT PRIMARY KEY,
@@ -97,6 +119,39 @@ class Database:
         # 廃止済みの独立画像処理 branch は camera solve を変更しなかったため、旧要約状態は
         # main branch の最終成果である aligned へ一度だけ正規化する。
         await self._conn.execute("UPDATE project SET state='aligned' WHERE state='denoised'")
+        await self._conn.execute("UPDATE project SET state='prepared' WHERE state='reprojected'")
+        # 単一 source 列を正規化 table へ移し、以後は project_source だけを正とする。
+        await self._conn.execute(
+            """
+            INSERT OR IGNORE INTO project_source
+                (id, project_id, label, role, adapter, media_kind, projection, path,
+                 ordinal, enabled, created_at, updated_at)
+            SELECT
+                'legacy-' || id,
+                id,
+                CASE
+                    WHEN instr(replace(source_path, '\\', '/'), '/') > 0
+                    THEN replace(source_path, '\\', '/')
+                    ELSE source_path
+                END,
+                'primary',
+                CASE source_kind
+                    WHEN 'insv' THEN 'insta360_insv'
+                    WHEN 'erp_video' THEN 'generic_video'
+                    ELSE 'generic_images'
+                END,
+                CASE WHEN source_kind='erp_images' THEN 'images' ELSE 'video' END,
+                CASE WHEN source_kind='insv' THEN 'dual_fisheye' ELSE 'equirectangular' END,
+                source_path,
+                0,
+                1,
+                created_at,
+                updated_at
+            FROM project
+            WHERE source_path IS NOT NULL AND source_kind IS NOT NULL
+            """
+        )
+        await self._conn.execute("UPDATE project SET source_kind=NULL, source_path=NULL")
         await self._conn.commit()
 
     async def close(self) -> None:

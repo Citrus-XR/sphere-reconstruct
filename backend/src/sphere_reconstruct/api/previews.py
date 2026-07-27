@@ -45,15 +45,34 @@ async def list_frames(project_id: str) -> dict:
         raise HTTPException(status_code=404, detail="extract_frames not run yet")
     data = json.loads(mf.read_text())
     return {
-        "kind": data.get("kind"),
         "count": data.get("count", len(data.get("frames", []))),
-        "width": data.get("width"),
-        "height": data.get("height"),
-        "fps": data.get("fps"),
-        "selection": data.get("selection"),
+        "sources": [
+            {
+                key: source.get(key)
+                for key in (
+                    "id",
+                    "label",
+                    "role",
+                    "projection",
+                    "kind",
+                    "count",
+                    "width",
+                    "height",
+                    "fps",
+                    "selection",
+                )
+            }
+            for source in data.get("sources", [])
+        ],
         "frames": [
-            {"index": f["index"], "timestamp_sec": f.get("timestamp_sec"), "score": f.get("score")}
-            for f in data.get("frames", [])
+            {
+                "index": frame["index"],
+                "source_id": frame["source_id"],
+                "source_index": frame["source_index"],
+                "timestamp_sec": frame.get("timestamp_sec"),
+                "score": frame.get("score"),
+            }
+            for frame in data.get("frames", [])
         ],
     }
 
@@ -69,7 +88,12 @@ async def frame_image(project_id: str, index: int, lens: int = 0) -> FileRespons
     frame = next((f for f in data["frames"] if f["index"] == index), None)
     if frame is None:
         raise HTTPException(status_code=404, detail="frame not found")
-    key = f"lens{lens}" if f"lens{lens}" in frame else "erp"
+    key = f"lens{lens}" if f"lens{lens}" in frame else "image"
+    if key not in frame and "image_source" in frame:
+        path = Path(frame["image_source"])
+        if not path.is_file():
+            raise HTTPException(status_code=404, detail="source image file missing")
+        return FileResponse(path, media_type="image/jpeg")
     if key not in frame:
         raise HTTPException(status_code=404, detail=f"no {key} for this frame")
     path = _safe(project_dir, frame[key])
@@ -78,22 +102,29 @@ async def frame_image(project_id: str, index: int, lens: int = 0) -> FileRespons
     return FileResponse(path, media_type="image/jpeg")
 
 
-@router.get("/api/projects/{project_id}/pinhole/{index}/{view}")
-async def pinhole_view(
-    project_id: str, index: int, view: str, lens: int = 0, mask: bool = False
-) -> FileResponse:
-    """reproject_views の pinhole 画像, または generate_masks の mask を返す."""
+@router.get("/api/projects/{project_id}/prepared-image")
+async def prepared_image(project_id: str, name: str) -> FileResponse:
     project_dir = await _project_dir(project_id)
-    if mask:
-        rel = f"generate_masks/frame_{index:06d}/{view}_lens{lens}.png"
-        media = "image/png"
-    else:
-        rel = f"reproject_views/frame_{index:06d}/{view}_lens{lens}.jpg"
-        media = "image/jpeg"
-    path = _safe(project_dir, rel)
-    if not path.exists():
-        raise HTTPException(status_code=404, detail=f"{'mask' if mask else 'pinhole'} not found")
-    return FileResponse(path, media_type=media)
+    record = _catalog_image(project_dir, name)
+    path = _safe(project_dir, record["path"])
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="prepared image not found")
+    return FileResponse(path, media_type="image/jpeg")
+
+
+@router.get("/api/projects/{project_id}/prepared-mask")
+async def prepared_mask(project_id: str, name: str) -> FileResponse:
+    project_dir = await _project_dir(project_id)
+    manifest = project_dir / "generate_masks" / "manifest_masks.json"
+    if not manifest.is_file():
+        raise HTTPException(status_code=404, detail="generate_masks not run yet")
+    record = next(
+        (item for item in json.loads(manifest.read_text(encoding="utf-8"))["images"] if item["name"] == name),
+        None,
+    )
+    if record is None:
+        raise HTTPException(status_code=404, detail="mask not found")
+    return FileResponse(_safe(project_dir, record["path"]), media_type="image/png")
 
 
 @router.get("/api/projects/{project_id}/masks")
@@ -131,24 +162,26 @@ class FisheyeRegion(BaseModel):
 
 
 @router.get("/api/projects/{project_id}/fisheye-region")
-async def get_fisheye_region(project_id: str) -> dict:
+async def get_fisheye_region(project_id: str, source_id: str) -> dict:
     """魚眼有効領域 (円) の保存値を返す. 未保存なら既定 (中心, r=0.485).
 
-    saved: UI から明示的に保存済みか (fisheye_region.json が存在するか). 魚眼モードでは
+    saved: UI から source ごとに保存済みか (fisheye_regions.json に key が存在するか).
     有効領域の設定を必須にするため, フロントはこのフラグでゲートする.
     """
     project_dir = await _project_dir(project_id)
-    saved = fisheye_region.region_path(project_dir).exists()
-    region = fisheye_region.load_region(project_dir) if saved else fisheye_region.detect_region(project_dir)
+    document_path = fisheye_region.region_path(project_dir)
+    document = json.loads(document_path.read_text(encoding="utf-8")) if document_path.exists() else {}
+    saved = source_id in (document.get("sources") or {})
+    region = fisheye_region.load_region(project_dir, source_id)
     return {**region, "saved": saved, "detected": not saved}
 
 
 @router.put("/api/projects/{project_id}/fisheye-region")
-async def put_fisheye_region(project_id: str, region: FisheyeRegion) -> dict:
+async def put_fisheye_region(project_id: str, region: FisheyeRegion, source_id: str) -> dict:
     """魚眼有効領域を保存する. 検証して正規化した内容を返す."""
     project_dir = await _project_dir(project_id)
     project_dir.mkdir(parents=True, exist_ok=True)
-    return fisheye_region.save_region(project_dir, region.model_dump())
+    return fisheye_region.save_region(project_dir, source_id, region.model_dump())
 
 
 @router.get("/api/projects/{project_id}/source-info")
@@ -166,34 +199,36 @@ async def source_info(project_id: str) -> dict:
     p = await project_domain.get_project(db, project_id)
     if p is None:
         raise HTTPException(status_code=404, detail="project not found")
-    if not p.source_path:
+    if not p.sources:
         raise HTTPException(status_code=400, detail="source not set")
-    src = Path(p.source_path)
-    if not src.exists() or src.is_dir():
-        # 画像フォルダ等は尺が無い.
-        return {"kind": p.source_kind.value if p.source_kind else None, "duration_sec": None}
-
-    probe = await run_in_threadpool(ffprobe.probe, src, ffprobe_bin=get_settings().binaries.ffprobe or None)
-    vs = probe.video_streams[0] if probe.video_streams else None
+    source_records = []
+    for source in p.sources:
+        if source.media_kind.value == "video":
+            probe = await run_in_threadpool(
+                ffprobe.probe,
+                source.filesystem_path,
+                ffprobe_bin=get_settings().binaries.ffprobe or None,
+            )
+            stream = probe.video_streams[0] if probe.video_streams else None
+            source_records.append(
+                {
+                    "id": source.id,
+                    "duration_sec": probe.duration,
+                    "fps": stream.fps if stream else None,
+                    "width": stream.width if stream else None,
+                    "height": stream.height if stream else None,
+                    "nb_frames": stream.nb_frames if stream else None,
+                }
+            )
+        else:
+            source_records.append({"id": source.id, "duration_sec": None})
+    primary = p.primary_source
+    primary_info = next((record for record in source_records if primary and record["id"] == primary.id), {})
     return {
-        "kind": p.source_kind.value if p.source_kind else None,
-        "duration_sec": probe.duration,
-        "fps": vs.fps if vs else None,
-        "width": vs.width if vs else None,
-        "height": vs.height if vs else None,
-        "nb_frames": vs.nb_frames if vs else None,
+        **primary_info,
+        "sources": source_records,
+        "duration_sec_total": sum(record.get("duration_sec") or 0.0 for record in source_records),
     }
-
-
-@router.get("/api/projects/{project_id}/fisheye-mask/{index}")
-async def fisheye_mask(project_id: str, index: int, lens: int = 0) -> FileResponse:
-    """native fisheye の生成マスク (generate_masks/lensN/frame_XXXXXX.png) を返す."""
-    project_dir = await _project_dir(project_id)
-    rel = f"generate_masks/lens{lens}/frame_{index:06d}.png"
-    path = _safe(project_dir, rel)
-    if not path.exists():
-        raise HTTPException(status_code=404, detail="mask not found")
-    return FileResponse(path, media_type="image/png")
 
 
 @router.get("/api/projects/{project_id}/reconstruction")
@@ -212,3 +247,16 @@ async def reconstruction_points(project_id: str) -> FileResponse:
     if not path.exists():
         raise HTTPException(status_code=404, detail="reconstruction not aligned yet")
     return FileResponse(path, media_type="application/octet-stream")
+
+
+def _catalog_image(project_dir: Path, name: str) -> dict:
+    catalog = project_dir / "prepare_images" / "image_catalog.json"
+    if not catalog.is_file():
+        raise HTTPException(status_code=404, detail="prepare_images not run yet")
+    record = next(
+        (item for item in json.loads(catalog.read_text(encoding="utf-8"))["images"] if item["name"] == name),
+        None,
+    )
+    if record is None:
+        raise HTTPException(status_code=404, detail="prepared image not found")
+    return record

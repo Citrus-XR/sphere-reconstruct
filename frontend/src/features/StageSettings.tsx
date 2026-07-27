@@ -1,10 +1,28 @@
 import { useEffect, useId, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { api, type FrameSelection, type SourceInfo, type StageStatus } from '../api/client'
+import {
+  api,
+  type FrameSelection,
+  type ProjectSource,
+  type Projection,
+  type SourceCreate,
+  type SourceInfo,
+  type StageStatus,
+} from '../api/client'
 import { paramsForStage, QUALITY_PRESETS, type ReconMode, type StageParams } from './stageParams'
 import { ProgressRing } from '../components/ProgressRing'
 import { PathText } from '../components/PathText'
 import { useSettings } from '../ui/settings'
+
+type SourcePreset = 'insv' | 'erp_video' | 'erp_images' | 'perspective_video' | 'perspective_images'
+
+const SOURCE_PRESETS: Record<SourcePreset, Omit<SourceCreate, 'path' | 'label' | 'role'>> = {
+  insv: { adapter: 'insta360_insv', media_kind: 'video', projection: 'dual_fisheye' },
+  erp_video: { adapter: 'generic_video', media_kind: 'video', projection: 'equirectangular' },
+  erp_images: { adapter: 'generic_images', media_kind: 'images', projection: 'equirectangular' },
+  perspective_video: { adapter: 'generic_video', media_kind: 'video', projection: 'perspective' },
+  perspective_images: { adapter: 'generic_images', media_kind: 'images', projection: 'perspective' },
+}
 
 // 経過秒を mm:ss (1h 以上は h:mm:ss) に整形.
 const fmtDur = (sec: number): string => {
@@ -17,7 +35,8 @@ const fmtDur = (sec: number): string => {
 // 右パネル「生成設定」: 選択中工程のパラメータ + 再生成 / クリア. 各コントロール下に説明.
 export const StageSettings = ({
   projectId, stage, status, sourceInfo, reconMode, setReconMode, params, setParams, onJob, hasSource,
-  sourcePath, resultMode, sourceKind, processing, stageIsRunning, onStop, stageDisabled, onToggleStage, onSelectSource, frameSelection,
+  sources, resultMode, primaryProjection, processing, stageIsRunning, onStop, stageDisabled, onToggleStage,
+  onSelectSource, onDeleteSource, onMakePrimarySource, sourceMutationError, frameSelection,
   stageProgress, stageStartedAt, stageProgressMsg, blockedReason,
 }: {
   projectId: string
@@ -30,15 +49,18 @@ export const StageSettings = ({
   setParams: (p: Partial<StageParams>) => void
   onJob: (jobId: string) => void
   hasSource: boolean
-  sourcePath: string | null
-  resultMode: 'native' | 'pinhole' | 'equirect' | null
-  sourceKind: string | null
+  sources: ProjectSource[]
+  resultMode: 'native' | 'pinhole' | 'equirect' | 'mixed' | null
+  primaryProjection: Projection | null
   processing: boolean
   stageIsRunning: boolean
   onStop: () => void
   stageDisabled: boolean
   onToggleStage: () => void
-  onSelectSource: () => void
+  onSelectSource: (source: Omit<SourceCreate, 'path'>) => void
+  onDeleteSource: (sourceId: string) => void
+  onMakePrimarySource: (sourceId: string) => void
+  sourceMutationError: unknown
   frameSelection: FrameSelection | null | undefined
   stageProgress: number
   stageStartedAt: string | null
@@ -50,6 +72,7 @@ export const StageSettings = ({
   const { data: doctor } = useQuery({ queryKey: ['doctor'], queryFn: api.getDoctor, staleTime: 30_000 })
   const [advOpen, setAdvOpen] = useState(false)
   const [colmapAdvOpen, setColmapAdvOpen] = useState(false)
+  const [sourcePreset, setSourcePreset] = useState<SourcePreset>('insv')
   // 実行中は 1s 毎に now を進めて経過/予測終了を更新する.
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
@@ -313,6 +336,7 @@ export const StageSettings = ({
             <label>{t('lbl_pairing')}</label>
             <select className="input" value={params.pairing}
               onChange={e => setParams({ pairing: e.target.value as StageParams['pairing'] })}>
+              <option value="auto">{t('matcher_auto')}</option>
               <option value="sequential">{t('matcher_sequential')}</option>
               <option value="exhaustive">{t('matcher_exhaustive')}</option>
               <option value="vocab_tree">{t('matcher_vocab')}</option>
@@ -414,31 +438,60 @@ export const StageSettings = ({
         </div>
       )}
 
-      {stage === 'reproject_views' && (
-        <Slider label={t('lblPinholeSize')} hint="" min={512} max={2048} step={128}
-          value={params.size} onChange={v => setParams({ size: Math.round(v) })} fmt={v => `${v}px`} />
+      {stage === 'prepare_images' && reconMode === 'pinhole_rig' && (
+        <Slider label={t('lblPinholeSize')} hint={t('hintPinholeSize')} min={512} max={2048} step={128}
+          value={params.size} onChange={value => setParams({ size: Math.round(value) })} fmt={value => `${value}px`} />
       )}
 
       {stage === 'inspect_source' && (
-        <div className="ctl">
-          <button className="btn" onClick={onSelectSource}>{t('selectSource')}</button>
-          <div className="hint">{t('hint_selectsource')}</div>
-          <div style={{ marginTop: 8 }}>
-            <div className="hint">{t('source')}</div>
-            {sourcePath
-              ? <PathText path={sourcePath} />
-              : <div className="mono">{t('noSource')}</div>}
-            {sourceInfo?.duration_sec != null && (
-              <div className="mono" style={{ fontSize: 11 }}>
-                {sourceInfo.width}×{sourceInfo.height} · {sourceInfo.duration_sec.toFixed(0)}s
-                {sourceInfo.fps ? ` · ${sourceInfo.fps.toFixed(2)}fps` : ''}
-              </div>
-            )}
+        <>
+          <div className="ctl">
+            <label>{t('addSource')}</label>
+            <select className="input" value={sourcePreset}
+              onChange={event => setSourcePreset(event.target.value as SourcePreset)}>
+              <option value="insv">{t('sourceTypeInsv')}</option>
+              <option value="perspective_images">{t('sourceTypePhoneImages')}</option>
+              <option value="perspective_video">{t('sourceTypePerspectiveVideo')}</option>
+              <option value="erp_video">{t('sourceTypeErpVideo')}</option>
+              <option value="erp_images">{t('sourceTypeErpImages')}</option>
+            </select>
+            <button className="btn" style={{ marginTop: 6 }} disabled={processing} onClick={() => onSelectSource({
+              ...SOURCE_PRESETS[sourcePreset],
+              role: sources.length ? 'supplemental' : 'primary',
+            })}>{t('choosePath')}</button>
+            <div className="hint">{t('hint_addSource')}</div>
           </div>
+          <div className="source-list">
+            {sources.map(source => (
+              <div className="source-card" key={source.id}>
+                <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                  <strong style={{ flex: 1 }}>{source.label}</strong>
+                  <span className={`source-role ${source.role}`}>{source.role === 'primary'
+                    ? t('primarySource') : t('supplementalSource')}</span>
+                </div>
+                <div className="hint">{t(`projection_${source.projection}`)} · {t(`media_${source.media_kind}`)}</div>
+                <PathText path={source.path} compact />
+                <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
+                  {source.role !== 'primary' && (
+                    <button className="btn btn-secondary" disabled={processing}
+                      onClick={() => onMakePrimarySource(source.id)}>
+                      {t('makePrimary')}
+                    </button>
+                  )}
+                  <button className="btn btn-secondary" style={{ color: 'var(--error)' }} disabled={processing}
+                    onClick={() => {
+                      if (window.confirm(t('removeSourceConfirm'))) onDeleteSource(source.id)
+                    }}>{t('removeSource')}</button>
+                </div>
+              </div>
+            ))}
+            {!sources.length && <div className="hint">{t('noSource')}</div>}
+          </div>
+          {sourceMutationError != null && <div className="error">{String(sourceMutationError)}</div>}
           <div style={{ marginTop: 12 }}>
             <label>{t('lbl_mode')}</label>
             <select className="input" value={reconMode} onChange={e => setReconMode(e.target.value as ReconMode)}>
-              {sourceKind === 'erp_video' || sourceKind === 'erp_images'
+              {primaryProjection === 'equirectangular'
                 ? (<>
                     <option value="equirectangular">{t('modeEquirect')}</option>
                     <option value="pinhole_rig">{t('modePinhole')}</option>
@@ -454,10 +507,16 @@ export const StageSettings = ({
             <div className="mono" style={{ fontSize: 11, marginTop: 6 }}>
               {t('resultMode')}: {resultMode === 'native' ? t('modeNative')
                 : resultMode === 'equirect' ? t('modeEquirect')
-                : resultMode === 'pinhole' ? t('modePinhole') : t('modeNone')}
+                : resultMode === 'pinhole' ? t('modePinhole')
+                : resultMode === 'mixed' ? t('modeMixed') : t('modeNone')}
             </div>
           </div>
-        </div>
+          {sourceInfo?.duration_sec_total != null && (
+            <div className="mono" style={{ fontSize: 11, marginTop: 8 }}>
+              {t('totalVideoDuration')}: {sourceInfo.duration_sec_total.toFixed(1)}s
+            </div>
+          )}
+        </>
       )}
       {stage === 'export_dataset' && (
         <>

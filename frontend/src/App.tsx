@@ -1,7 +1,7 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Actions, Layout, Model, TabNode, type IJsonModel } from 'flexlayout-react'
-import { api, openEventStream, type EventEnvelope } from './api/client'
+import { api, openEventStream, type EventEnvelope, type SourceCreate } from './api/client'
 import { SystemStatsBar } from './components/SystemStatsBar'
 import { SettingsMenu } from './components/SettingsMenu'
 import { FileBrowser } from './components/FileBrowser'
@@ -74,6 +74,7 @@ export const App = () => {
   const setParams = (patch: Partial<StageParams>) => setParamsState(prev => ({ ...prev, ...patch }))
   const [disabled, setDisabled] = useState<Set<string>>(new Set())
   const [browsing, setBrowsing] = useState(false)
+  const [pendingSource, setPendingSource] = useState<Omit<SourceCreate, 'path'> | null>(null)
   const [managerOpen, setManagerOpen] = useState(false)
   const [activeJobId, setActiveJobId] = useState<string | null>(null)
   const [events, setEvents] = useState<EventEnvelope[]>([])
@@ -89,7 +90,7 @@ export const App = () => {
     if (mode === reconMode) return
     setReconMode(mode)
     if (!projectId) return
-    api.clearStage(projectId, 'generate_masks').then(() => {
+    api.clearStage(projectId, 'prepare_images').then(() => {
       qc.invalidateQueries({ queryKey: ['stages', projectId] })
       for (const key of ['reconstruction', 'masks', 'export-info']) {
         qc.removeQueries({ queryKey: [key, projectId] })
@@ -140,14 +141,15 @@ export const App = () => {
 
   useEffect(() => { if (!projectId && projects?.length) setProjectId(projects[0].id) }, [projects, projectId])
   const project = projects?.find(p => p.id === projectId) ?? null
-  const isFisheye = reconMode === 'native_fisheye' && project?.source_kind === 'insv'
+  const primarySource = project?.sources.find(source => source.role === 'primary') ?? null
+  const isFisheye = reconMode === 'native_fisheye' && primarySource?.projection === 'dual_fisheye'
   // ソース種別で無効なモードだけ既定へ戻す (ERP は equirect/pinhole, INSV は native/pinhole が有効).
   useEffect(() => {
-    const k = project?.source_kind
-    if (!k) return
-    if (k !== 'insv' && reconMode === 'native_fisheye') setReconMode('equirectangular')
-    if (k === 'insv' && reconMode === 'equirectangular') setReconMode('native_fisheye')
-  }, [project?.source_kind, reconMode]) // eslint-disable-line react-hooks/exhaustive-deps
+    const projection = primarySource?.projection
+    if (!projection) return
+    if (projection === 'equirectangular' && reconMode === 'native_fisheye') setReconMode('equirectangular')
+    if (projection !== 'equirectangular' && reconMode === 'equirectangular') setReconMode('native_fisheye')
+  }, [primarySource?.projection, reconMode]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // 工程に保存された UI 設定を復元 (工程ごと 1 回). 復元後の変更は debounce して保存する.
   const hydratedRef = useRef<string | null>(null)
@@ -167,9 +169,9 @@ export const App = () => {
       ...knownParams,
     })
     setReconMode((ui?.reconMode as ReconMode | undefined)
-      ?? (project.source_kind === 'insv' || !project.source_kind ? 'native_fisheye' : 'equirectangular'))
+      ?? (primarySource?.projection === 'equirectangular' ? 'equirectangular' : 'native_fisheye'))
     setDisabled(new Set(Array.isArray(ui?.disabled) ? ui.disabled : []))
-    setSelectedStage('extract_frames')
+    setSelectedStage(project.sources.length ? 'extract_frames' : 'inspect_source')
     setSelectedCameraId(null)
     setSelectedFrameIndex(null)
     setActiveJobId(null)
@@ -194,7 +196,7 @@ export const App = () => {
   })
   const { data: sourceInfo } = useQuery({
     queryKey: ['source-info', projectId], queryFn: () => api.getSourceInfo(projectId as string),
-    enabled: !!projectId && !!project?.source_path, retry: false,
+    enabled: !!projectId && !!project?.sources.length, retry: false,
   })
   const { data: recon } = useQuery({
     queryKey: ['reconstruction', projectId], queryFn: () => api.getReconstruction(projectId as string),
@@ -205,15 +207,16 @@ export const App = () => {
     enabled: !!projectId, retry: false,
   })
   const { data: regionData } = useQuery({
-    queryKey: ['fisheye-region', projectId], queryFn: () => api.getFisheyeRegion(projectId as string),
-    enabled: !!projectId && isFisheye, retry: false,
+    queryKey: ['fisheye-region', projectId, primarySource?.id],
+    queryFn: () => api.getFisheyeRegion(projectId as string, primarySource!.id),
+    enabled: !!projectId && isFisheye && !!primarySource, retry: false,
   })
-  const firstFrame = framesData?.frames?.[0]?.index ?? null
+  const firstFrame = framesData?.frames?.find(frame => frame.source_id === primarySource?.id)?.index ?? null
   const route = [
     'inspect_source',
     'extract_frames',
     ...(isFisheye ? ['fisheye_region'] : []),
-    ...(reconMode === 'pinhole_rig' ? ['reproject_views'] : []),
+    'prepare_images',
     ...(!disabled.has('generate_masks') ? ['generate_masks'] : []),
     'extract_features',
     'match_features',
@@ -231,9 +234,9 @@ export const App = () => {
   // 次工程を開始できない構成を検出し, 理由をボタン tooltip に出す.
   // 魚眼有効領域は既定円で動くため必須ではない (未保存でも run-all は通る).
   const runReason: string | null =
-    !project?.source_path ? t('noSource')
-    : (project.source_kind !== 'insv' && reconMode === 'native_fisheye') ? t('modeMismatch')
-    : (project.source_kind === 'insv' && reconMode === 'equirectangular') ? t('modeMismatch')
+    !project?.sources.length ? t('noSource')
+    : (primarySource?.projection === 'equirectangular' && reconMode === 'native_fisheye') ? t('modeMismatch')
+    : (primarySource?.projection !== 'equirectangular' && reconMode === 'equirectangular') ? t('modeMismatch')
     : null
 
   // 実行中ジョブの追跡 (停止ボタン用).
@@ -279,20 +282,29 @@ export const App = () => {
     return () => ws.close()
   }, [projectId])
 
-  const setSource = useMutation({
-    mutationFn: (path: string) =>
-      api.setSource(projectId as string, path.toLowerCase().endsWith('.insv') ? 'insv'
-        : /\.(mp4|mov|mkv|avi)$/i.test(path) ? 'erp_video' : 'erp_images', path),
+  const refreshAfterSourceMutation = () => {
+    qc.invalidateQueries({ queryKey: ['projects'] })
+    qc.invalidateQueries({ queryKey: ['source-info', projectId] })
+    qc.invalidateQueries({ queryKey: ['stages', projectId] })
+    for (const key of ['reconstruction', 'frames', 'fisheye-region', 'masks', 'export-info'])
+      qc.removeQueries({ queryKey: [key, projectId] })
+    setSelectedFrameIndex(null)
+    setSelectedCameraId(null)
+  }
+  const addSource = useMutation({
+    mutationFn: (source: SourceCreate) => api.addSource(projectId as string, source),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['projects'] })
-      qc.invalidateQueries({ queryKey: ['source-info', projectId] })
-      qc.invalidateQueries({ queryKey: ['stages', projectId] })
-      for (const key of ['reconstruction', 'frames', 'fisheye-region', 'masks', 'export-info']) {
-        qc.removeQueries({ queryKey: [key, projectId] })
-      }
-      setSelectedFrameIndex(null)
-      setSelectedCameraId(null)
+      refreshAfterSourceMutation()
+      setPendingSource(null)
     },
+  })
+  const deleteSource = useMutation({
+    mutationFn: (sourceId: string) => api.deleteSource(projectId as string, sourceId),
+    onSuccess: refreshAfterSourceMutation,
+  })
+  const makePrimarySource = useMutation({
+    mutationFn: (sourceId: string) => api.makePrimarySource(projectId as string, sourceId),
+    onSuccess: refreshAfterSourceMutation,
   })
   const runNextMutation = useMutation({
     mutationFn: (stage: string) => api.rerunStage(projectId as string, stage, {
@@ -332,16 +344,16 @@ export const App = () => {
   const selectFrame = (index: number) => { setSelectedFrameIndex(index); setSelectedStage(''); setSelectedCameraId(null) }
   const selectedCamImage = selectedCameraId != null ? recon?.images.find(i => i.id === selectedCameraId) : undefined
   // 現在の再構成結果のカメラモデルからモード判定. EQUIRECTANGULAR を先に見る (FISHEYE を含まない).
-  const resultMode: 'native' | 'pinhole' | 'equirect' | null = recon?.cameras?.length
-    ? (recon.cameras[0].model.includes('EQUIRECTANGULAR') ? 'equirect'
-      : recon.cameras[0].model.includes('FISHEYE') ? 'native'
-      : recon.cameras[0].model.includes('PINHOLE') ? 'pinhole' : null)
+  const resultFamilies = new Set(recon?.cameras.map(camera =>
+    camera.model.includes('EQUIRECTANGULAR') ? 'equirect'
+      : camera.model.includes('FISHEYE') ? 'native' : 'pinhole') ?? [])
+  const resultMode: 'native' | 'pinhole' | 'equirect' | 'mixed' | null = resultFamilies.size > 1
+    ? 'mixed'
+    : resultFamilies.size === 1 ? [...resultFamilies][0] as 'native' | 'pinhole' | 'equirect'
     : null
 
   const items: HierItem[] = []
   for (const s of stagesData?.stages ?? []) {
-    // pinhole 再投影 (reproject_views) は pinhole_rig モードだけ必要. 他は「生成」不要で隠す.
-    if (s.stage === 'reproject_views' && reconMode !== 'pinhole_rig') continue
     const en = !disabled.has(s.stage)
     const done = stageIsFresh(s)
     const stale = s.status === 'stale' || (s.has_output && !done)
@@ -386,7 +398,8 @@ export const App = () => {
       case 'sceneHier':
         return (
           <div className="dock-content nopad">
-            <SceneHierarchy recon={recon} frames={framesData?.frames} showPoints={showPoints} setShowPoints={setShowPoints}
+            <SceneHierarchy recon={recon} frames={framesData?.frames} sources={framesData?.sources}
+              showPoints={showPoints} setShowPoints={setShowPoints}
               showCams={showCams} setShowCams={setShowCams} selectedCameraId={selectedCameraId} onSelectCamera={selectCamera}
               selectedFrameIndex={selectedFrameIndex} onSelectFrame={selectFrame} />
           </div>
@@ -419,22 +432,29 @@ export const App = () => {
         return (
           <div className="dock-content">
             {selectedCamImage
-              ? <CameraInspector projectId={projectId as string} image={selectedCamImage} />
+              ? <CameraInspector projectId={projectId as string} image={selectedCamImage}
+                  sources={project?.sources ?? []} />
               : selectedFrameIndex != null
               ? <FrameInspector projectId={projectId as string} frameIndex={selectedFrameIndex}
-                  frames={framesData?.frames} recon={recon} sourceKind={project?.source_kind ?? null} />
+                  frames={framesData?.frames} recon={recon} sources={project?.sources ?? []} />
               : selectedStage === 'fisheye_region'
               ? (firstFrame !== null
-                  ? <FisheyeRegionEditor projectId={projectId as string} frameIndex={firstFrame}
-                      onSaved={() => qc.invalidateQueries({ queryKey: ['fisheye-region', projectId] })} />
+                  ? <FisheyeRegionEditor projectId={projectId as string} sourceId={primarySource!.id}
+                      frameIndex={firstFrame}
+                      onSaved={() => qc.invalidateQueries({ queryKey: ['fisheye-region', projectId, primarySource!.id] })} />
                   : <div className="hint">{t('needExtractFirst')}</div>)
               : selectedStage
               ? <StageSettings projectId={projectId as string} stage={selectedStage} status={stageStatus}
                   sourceInfo={sourceInfo} reconMode={reconMode} setReconMode={changeReconMode} params={params} setParams={setParams}
-                  onJob={onJob} hasSource={!!project?.source_path} sourcePath={project?.source_path ?? null} resultMode={resultMode}
-                  sourceKind={project?.source_kind ?? null} processing={processing} stageIsRunning={stageStatus?.status === 'running'} onStop={stopJob}
+                  onJob={onJob} hasSource={!!project?.sources.length} sources={project?.sources ?? []} resultMode={resultMode}
+                  primaryProjection={primarySource?.projection ?? null} processing={processing} stageIsRunning={stageStatus?.status === 'running'} onStop={stopJob}
                   stageDisabled={disabled.has(selectedStage)} onToggleStage={() => toggleStage(selectedStage)}
-                  onSelectSource={() => { setSource.reset(); setBrowsing(true) }} frameSelection={framesData?.selection}
+                  onSelectSource={source => { addSource.reset(); setPendingSource(source); setBrowsing(true) }}
+                  onDeleteSource={sourceId => deleteSource.mutate(sourceId)}
+                  onMakePrimarySource={sourceId => makePrimarySource.mutate(sourceId)}
+                  sourceMutationError={addSource.error ?? deleteSource.error ?? makePrimarySource.error}
+                  frameSelection={primarySource
+                    ? framesData?.sources.find(source => source.id === primarySource.id)?.selection : null}
                   stageProgress={progressByStage[selectedStage]?.progress ?? 0}
                   stageStartedAt={stageStatus?.started_at ?? null}
                   stageProgressMsg={progressByStage[selectedStage] ? renderMsg(progressByStage[selectedStage]) : ''}
@@ -477,8 +497,9 @@ export const App = () => {
       <div className="ide-top">
         <button className="btn" onClick={() => setManagerOpen(true)}>☰ {t('projects')}</button>
         <h1 style={{ margin: '0 4px' }}>{project?.name ?? 'sphere-reconstruct'}</h1>
-        {project?.source_path
-          ? <PathText path={project.source_path} compact className="ide-source-path" />
+        {primarySource
+          ? <><PathText path={primarySource.path} compact className="ide-source-path" />
+              {project && project.sources.length > 1 && <span className="mono">+{project.sources.length - 1}</span>}</>
           : <span className="mono ide-source-path">{t('noSource')}</span>}
         <button className="btn btn-secondary" disabled={!projectId || clearOutputs.isPending || processing}
           onClick={() => { if (window.confirm(t('clearOutputsConfirm'))) clearOutputs.mutate() }}>{t('clearOutputs')}</button>
@@ -503,8 +524,12 @@ export const App = () => {
       </div>
 
       {browsing && projectId && (
-        <FileBrowser selectionError={setSource.error} onClose={() => setBrowsing(false)}
-          onPick={path => setSource.mutate(path, { onSuccess: () => setBrowsing(false) })} />
+        <FileBrowser selectionError={addSource.error} onClose={() => { setBrowsing(false); setPendingSource(null) }}
+          selectionKind={pendingSource?.media_kind === 'images' ? 'directory' : 'file'}
+          onPick={path => {
+            if (!pendingSource) return
+            addSource.mutate({ ...pendingSource, path }, { onSuccess: () => setBrowsing(false) })
+          }} />
       )}
       {managerOpen && (
         <ProjectManager projects={projects} currentId={projectId} onSelect={setProjectId} onClose={() => setManagerOpen(false)} />

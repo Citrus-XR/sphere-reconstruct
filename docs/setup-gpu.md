@@ -1,17 +1,15 @@
 # GPU / native runtime setup
 
-本アプリケーションが利用する native runtime と GPU 機能を platform 別にまとめる。通常は start
-script に dependency 同期と診断を任せ、手作業で system Python と project environment を混在
-させない。
+Platform ごとの native runtime、GPU capability、mixed-source 入力の注意点をまとめる。通常は start
+script に dependency sync と Doctor を任せ、system Python と project venv を混在させない。
 
 ```text
 GET /api/system/doctor
 cd backend && uv run sphere-doctor
 ```
 
-Doctor は workspace、filesystem root、FFmpeg / FFprobe、COLMAP capability、optional SAM3、
-CUDA / cuDNN、cuDSS を個別に表示する。Optional capability が利用不能でも core pipeline の
-`ready` とは分離する。
+Doctor は workspace、filesystem roots、FFmpeg / FFprobe、COLMAP 4.1 capability、optional SAM3、
+CUDA / cuDNN、cuDSS を検査する。
 
 ## Windows
 
@@ -19,46 +17,34 @@ CUDA / cuDNN、cuDSS を個別に表示する。Optional capability が利用不
 .\scripts\start-windows.ps1
 ```
 
-この script は frontend build、backend extra 同期、COLMAP 検出または導入、Doctor、FastAPI
-起動を順に行う。`imaging` と `aliked` extra を同期し、SAM3 だけを環境変数で追加する。
-`filesystem.allowed_roots` が未指定なら、検出した filesystem drive を file browser root として
-process environment に設定する。
+Frontend build、`imaging` / `aliked` extra、COLMAP 検出/導入、Doctor、FastAPI を順に実行する。
+SAM3 は明示的に追加する。
 
 ```powershell
 $env:SPHERE_WITH_SAM3="1"
 .\scripts\start-windows.ps1
 ```
 
-COLMAP が無ければ `nvidia-smi` の有無から CUDA / CPU package を選び、公式 4.1.1 archive を固定
-SHA-256 で検証して `.runtime/tools/` へ atomic install する。自動導入を禁止する場合:
+COLMAP が無ければ `nvidia-smi` に応じて official CUDA / CPU archive を選び、固定 SHA-256 で
+`.runtime/tools/` へ atomic install する。禁止する場合:
 
 ```powershell
 $env:SPHERE_SKIP_AUTO_INSTALL_COLMAP="1"
 .\scripts\start-windows.ps1
 ```
 
-CPU package を明示導入する場合:
-
-```powershell
-backend\.venv\Scripts\python.exe scripts\install_colmap.py --variant cpu
-```
-
-独立した `glomap.exe` は使用しない。Global Mapper は COLMAP 4.1 の `global_mapper` command として
-同梱される。
+独立 `glomap.exe` は使わず、COLMAP 4.1 `global_mapper` を使う。
 
 ## Linux
 
-Distribution package または source build の COLMAP 4.1+ と FFmpeg を用意する。
+COLMAP 4.1+ と FFmpeg を用意する。
 
 ```bash
 ./scripts/start-linux.sh
 ```
 
-`filesystem.allowed_roots` が未指定なら user home を file browser root とする。外付け drive や
-mount point は config または `SPHERE_FILESYSTEM__ALLOWED_ROOTS` で明示する。
-
-NVIDIA 環境では uv が CUDA 12.8 build の Torch を SAM3 用に選ぶ。ALIKED CUDA provider と
-cuDNN の整合は Doctor で確認する。
+`filesystem.allowed_roots` が空なら user home を file browser root にする。Mount / external drive は
+config または `SPHERE_FILESYSTEM__ALLOWED_ROOTS` で指定する。
 
 ## macOS
 
@@ -67,32 +53,50 @@ brew install colmap ffmpeg
 ./scripts/start-macos.sh
 ```
 
-macOS は CUDA を前提にしない。SIFT、CPU Mapper、CPU BA を基本経路とし、SAM3 は利用する
-runtime に合わせて optional に導入する。
+CUDA を前提にせず SIFT、CPU Mapper、CPU BA を基本経路とする。SAM3 は利用 runtime に合わせて
+optional install する。
 
-## COLMAP CUDA と Bundle Adjustment
+## COLMAP camera / rig requirements
 
-Bundle Adjustment は、全 camera pose、camera intrinsics、3D point を同時に調整し、観測した 2D
-keypoint への reprojection error を最小化する最終最適化である。CPU / GPU の選択は主に速度と
-memory の違いで、目的関数は同じ。
+Mixed source は 1 database 内で複数 camera model を使う。必要 capability:
 
-`COLMAP ... with CUDA` は feature extraction や ONNX CUDA support を示すが、Ceres の
-CUDA / cuDSS Bundle Adjustment を保証しない。公式 Windows 4.1.1 package が次を出す環境では
-BA を CPU のまま使う。
+- `OPENCV_FISHEYE`、`SIMPLE_RADIAL`、`PINHOLE`、`EQUIRECTANGULAR`
+- `feature_extractor --image_list_path`
+- Multiple rig config
+- Global Mapper
+
+Feature extraction は camera group ごとに別 invocation を行い、同じ database に追記する。Phone
+still は EXIF orientation を pixel へ適用し、model / resolution / 35mm focal signature で grouping
+する。Extracted phone video は 1 calibration group。
+
+Raw dual-fisheye は calibration adapter が必要。現在は Insta360 INSV。別 camera は stitched ERP
+または新 adapter で追加する。
+
+## Matching and scale
+
+Mixed source では temporal adjacency だけでは cross-source edge が作れない。500 images 以下の
+Auto は Exhaustive。大規模 SIFT dataset は `binaries.vocab_tree` を指定する。
+
+Global Mapper は悪い focal prior / outlier match に敏感。Phone EXIF focal を維持し、動画に EXIF
+が無い場合は初期 focal を refinement する。Primary physical rig があっても SfM world scale は
+gauge freedom を持つため、alignment stage は primary reference trajectory を 1 に正規化する。
+
+## Bundle Adjustment
+
+BA は pose、intrinsics、3D points の reprojection error を同時最適化する。`COLMAP ... with CUDA`
+は Ceres CUDA/cuDSS BA を保証しない。次の build は CPU BA を使う。
 
 ```text
 Requested to use GPU for bundle adjustment, but Ceres was compiled without CUDA support.
 Requested to use GPU for bundle adjustment, but Ceres was compiled without cuDSS support.
 ```
 
-Doctor の `colmap.capabilities.gpu_bundle_adjustment=false` に連動して UI の BA GPU option は無効に
-なる。SIFT / ALIKED feature GPU とは別 capability。
+Doctor の `colmap.capabilities.gpu_bundle_adjustment` と UI option が連動する。
 
 ## Native ALIKED
 
-COLMAP 4.1.1 は `ALIKED_N16ROT`、`ALIKED_N32`、ALIKED Brute-force、LightGlue を内蔵する。
-既定 option に model URL、filename、SHA-256 が含まれるため、未配置なら COLMAP が取得・検証
-する。任意の model を固定する場合だけ config を使う。
+COLMAP 4.1.1 は ALIKED N16ROT / N32、Brute-force、LightGlue を内蔵する。Model URL と SHA-256
+が option に含まれるため、通常は自動 download/cache される。固定 model を使う場合:
 
 ```toml
 [aliked]
@@ -100,14 +104,12 @@ extractor_path = "D:/models/aliked-n16rot.onnx"
 matcher_path = "D:/models/aliked-lightglue.onnx"
 ```
 
-Windows の ONNX CUDA provider は cuDNN 9 を必要とする。Runner は Torch が存在する場合、その
-`site-packages/torch/lib` を COLMAP subprocess の `PATH` に加える。Doctor の
-`cuda_runtime.cudnn` が空なら feature GPU を無効にするか対応 runtime を導入する。CUDA 失敗を
-黙って CPU 成功として扱わない。
+Windows ONNX CUDA provider は cuDNN 9 を必要とする。Doctor の `cuda_runtime.cudnn` を確認する。
 
 ## SAM3
 
-SAM3 は optional。Repository と checkpoint を runtime config に指定する。
+SAM3 は prepared canonical image 全てに同じ処理を行う。Video frame、phone still、ERP、pinhole
+view は full-image valid region、native fisheye は source-specific circle と dynamic mask を合成する。
 
 ```toml
 [sam3]
@@ -118,12 +120,12 @@ dtype = "bfloat16"
 max_inference_size = 1024
 ```
 
-SAM3 / Torch は worker process だけで import する。単一 GPU の `cuda:0` は upstream builder の
-制約に合わせ内部で `cuda` へ正規化する。Inference 前の既定長辺は 1024 px。
+Mask は image relative path を mirror し、white=keep / black=ignore。Prepared image と同じ pixel
+orientation / dimensions を保証する。
 
 ## FFmpeg
 
-INSV 内の 2 本の HEVC stream と `select` filter を利用できる build が必要。
+INSV dual HEVC stream と通常 video を sequential decode できる build が必要。
 
 ```toml
 [binaries]
@@ -131,45 +133,45 @@ ffmpeg = "D:/tools/ffmpeg/bin/ffmpeg.exe"
 ffprobe = "D:/tools/ffmpeg/bin/ffprobe.exe"
 ```
 
-Frame extraction は stream ごとに一度だけ decode する。長い selection 式は複数の小さな filter
-branch に分け、同じ FFmpeg filter graph 内で時系列順に連結する。1 frame ごとの process 起動、
-random seek、chunk ごとの先頭からの再 decode は行わない。
+各 video は同じ frame-selection parameter を使う。長い selection は 1 filter graph 内で bounded
+branch に分け、frame ごとの random seek を行わない。
 
-## LFStudio
+## LichtFeld Studio
 
-LFStudio は本アプリケーションの dependency ではなく、export 後の外部 trainer。Export Inspector
-に表示される `export_dataset/` を dataset root として選ぶ。
+Mixed camera COLMAP loader は image ごとに projection を読む。Supported path:
+
+- PINHOLE / SIMPLE_PINHOLE
+- SIMPLE_RADIAL / RADIAL / OPENCV / FULL_OPENCV
+- OPENCV_FISHEYE / supported fisheye variants
+- EQUIRECTANGULAR
+
+Distorted / fisheye / equirectangular を含む mixed dataset は MRNF/MCMC + GUT を使う。IGS+ は GUT
+と併用できず、equirectangular を扱えない。最も conservative な fallback は 360° source を
+pinhole cubemap にし、phone camera を undistort する。
 
 ```text
 LichtFeld-Studio --config <dataset>/train_configs/train_config.mrnf.json --data-path <dataset>
 ```
 
-Training output directory は LFStudio 側で選択する。本アプリケーションは output path を生成、
-表示、変更、移動しない。Dataset root 内に管理外 item がある状態で export を再生成または消去
-すると、その item を保護するため stage は error で停止する。
-
-LFStudio v0.5.3 の folder import は `train_configs/` を自動適用しない。GUI だけで開く場合は MRNF、
-GUT、Segment mask を手動設定する。Training loss / PSNR / SSIM は外部 process の statistic なので
-本 UI では取得不可と表示する。
+Training output directory は LFStudio 側で選ぶ。本 application は管理しない。Mixed-camera training
+は loader / GUT 上は対応するが upstream end-to-end test が無いため experimental とする。
 
 ## Service deployment
-
-Service manager から起動するときは先に config を指定する。
 
 ```text
 SPHERE_CONFIG=D:/path/to/config.remote.toml
 ```
 
-更新時は listener PID とその親 process だけを終了し、machine 上の Python process を一括停止
-しない。Running worker を止めると atomic publish 前の temporary output だけが破棄される。
+更新時は listener の scheduled service とその worker tree だけを停止し、machine の Python process
+を一括停止しない。Source mutation は active job 中 409 を返す。
 
-## 検証
+## Verification
 
 ```bash
 cd backend
 uv sync --extra dev --extra imaging
-uv run pytest -q
 uv run ruff check src tests
+uv run pytest -q
 uv run sphere-doctor
 ```
 
@@ -177,5 +179,5 @@ uv run sphere-doctor
 cd frontend
 pnpm install --frozen-lockfile
 pnpm build
-PLAYWRIGHT_BASE_URL=http://127.0.0.1:8787 pnpm test:e2e
+pnpm test:e2e
 ```

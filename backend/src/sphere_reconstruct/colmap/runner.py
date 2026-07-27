@@ -133,6 +133,7 @@ def feature_extractor(
     feature_type: str = "SIFT",
     mask_path: Path | None = None,
     camera_mask_path: Path | None = None,
+    image_list_path: Path | None = None,
     extra_args: list[str] | None = None,
     log_path: Path | None = None,
     on_line: Callable[[str], None] | None = None,
@@ -165,6 +166,8 @@ def feature_extractor(
     if camera_mask_path is not None:
         # 全画像に共通の 1 枚マスク (native fisheye の円形有効領域など). 黒画素を無視する.
         args += ["--ImageReader.camera_mask_path", str(camera_mask_path)]
+    if image_list_path is not None:
+        args += ["--image_list_path", str(image_list_path)]
     if extra_args:
         args += extra_args
     return run_command(colmap_bin, args, log_path=log_path, on_line=on_line)

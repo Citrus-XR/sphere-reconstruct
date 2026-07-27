@@ -162,6 +162,7 @@ def compute_timed_align_rotation(
     offset_max: float = 0.5,
     offset_step: float = 0.02,
     window_seconds: float = 0.025,
+    image_prefix: str | None = None,
 ) -> tuple[np.ndarray | None, dict]:
     """時刻同期した加速度列から world up と IMU mounting を同時推定する.
 
@@ -173,7 +174,10 @@ def compute_timed_align_rotation(
         return None, {"reason": "no_timed_imu"}
     pairs = []
     for image in recon.images.values():
-        match = _FRONT_FRAME.search(image.name.replace("\\", "/"))
+        normalized_name = image.name.replace("\\", "/")
+        if image_prefix is not None and not normalized_name.startswith(image_prefix):
+            continue
+        match = _FRONT_FRAME.search(normalized_name)
         if match is None:
             continue
         frame_index = int(match.group(1))
@@ -237,15 +241,17 @@ def compute_timed_align_rotation(
     return _rotation_aligning(best["up_world"], TARGET_UP), _public_estimate(best, len(pairs))
 
 
-def reference_trajectory_diameter(recon: Reconstruction) -> float:
-    centers = reference_camera_centers(recon)
+def reference_trajectory_diameter(recon: Reconstruction, image_prefix: str | None = None) -> float:
+    centers = reference_camera_centers(recon, image_prefix)
     if len(centers) < 2:
         return 0.0
     points = np.asarray(centers, dtype=float)
     return float(np.linalg.norm(np.ptp(points, axis=0)))
 
 
-def reference_camera_centers(recon: Reconstruction) -> list[tuple[float, float, float]]:
+def reference_camera_centers(
+    recon: Reconstruction, image_prefix: str | None = None
+) -> list[tuple[float, float, float]]:
     """Rig の reference sensor だけの camera center を返す。
 
     Native / pinhole rig は ``front`` / ``front_lens0`` を reference として生成する。未知の naming
@@ -254,19 +260,21 @@ def reference_camera_centers(recon: Reconstruction) -> list[tuple[float, float, 
     centers = [
         image.camera_center
         for image in recon.images.values()
-        if _FRONT_FRAME.search(image.name.replace("\\", "/"))
+        if (image_prefix is None or image.name.replace("\\", "/").startswith(image_prefix))
+        and _FRONT_FRAME.search(image.name.replace("\\", "/"))
     ]
     if centers:
         return centers
-    if not recon.images:
-        return []
-    counts = Counter(image.camera_id for image in recon.images.values())
-    reference_camera_id = min(counts, key=lambda camera_id: (-counts[camera_id], camera_id))
-    return [
-        image.camera_center
+    eligible_images = [
+        image
         for image in recon.images.values()
-        if image.camera_id == reference_camera_id
+        if image_prefix is None or image.name.replace("\\", "/").startswith(image_prefix)
     ]
+    if not eligible_images:
+        return []
+    counts = Counter(image.camera_id for image in eligible_images)
+    reference_camera_id = min(counts, key=lambda camera_id: (-counts[camera_id], camera_id))
+    return [image.camera_center for image in eligible_images if image.camera_id == reference_camera_id]
 
 
 def _estimate_at_offset(

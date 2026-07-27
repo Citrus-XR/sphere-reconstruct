@@ -26,7 +26,7 @@ from .colmap_progress import global_mapper_progress, hidden_log, mapper_progress
 @register
 class Reconstruct(Stage):
     name = StageName.RECONSTRUCT
-    impl_version = "1.1"
+    impl_version = "2.2"
 
     def normalize_params(self, raw: dict) -> dict:
         mapper = str(raw.get("mapper", "global")).lower()
@@ -107,17 +107,14 @@ class Reconstruct(Stage):
                     log_path=logs_dir / "view_graph_calibrator.log",
                     on_line=hidden_log(ctx, "view-graph"),
                 )
-            colmap_runner.global_mapper(
-                colmap_bin,
+            model_dir, summary, mapper_attempts = _run_global_mapper_with_retries(
+                ctx,
+                spec,
+                colmap_bin=colmap_bin,
                 database_path=database_path,
                 image_path=image_path,
-                output_path=sparse_dir,
-                refine_intrinsics=spec.refine_intrinsics,
-                refine_rig=spec.refine_rig,
-                use_gpu=ctx.params["ba_use_gpu"],
-                extra_args=colmap_quality.global_mapper_extra_args(ctx.params),
-                log_path=logs_dir / "global_mapper.log",
-                on_line=global_mapper_progress(ctx),
+                sparse_dir=sparse_dir,
+                logs_dir=logs_dir,
             )
         else:
             colmap_runner.mapper(
@@ -132,15 +129,16 @@ class Reconstruct(Stage):
                 log_path=logs_dir / "mapper.log",
                 on_line=mapper_progress(ctx, spec.image_count),
             )
-
-        model_dir, summary = _select_largest_model(sparse_dir)
-        summary["registered_ratio"] = summary["num_images"] / max(1, spec.image_count)
+            model_dir, summary = _select_largest_model(sparse_dir, spec)
+            mapper_attempts = []
+        primary = summary["source_registration"][spec.primary_source_id]
+        summary["registered_ratio"] = primary["registered"] / max(1, primary["total"])
+        summary["registered_total_ratio"] = summary["num_images"] / max(1, spec.image_count)
         summary["mapper"] = mapper
         summary["input_images"] = spec.image_count
-        summary["view_graph_calibration"] = bool(
-            mapper == "global" and ctx.params["view_graph_calibration"]
-        )
+        summary["view_graph_calibration"] = bool(mapper == "global" and ctx.params["view_graph_calibration"])
         summary["ba_gpu_enabled"] = ctx.params["ba_use_gpu"]
+        summary["mapper_attempts"] = mapper_attempts
         _validate_summary(summary, ctx.params)
         summary_path = ctx.stage_out_dir / "model_summary.json"
         summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -175,6 +173,90 @@ def _incremental_args(params: dict) -> list[str]:
     return args
 
 
+def _run_global_mapper_with_retries(
+    ctx: StageContext,
+    spec: InputSpec,
+    *,
+    colmap_bin: str,
+    database_path: Path,
+    image_path: Path,
+    sparse_dir: Path,
+    logs_dir: Path,
+) -> tuple[Path, dict, list[dict]]:
+    initial_seed = int(ctx.params["random_seed"])
+    seeds = list(dict.fromkeys((initial_seed, initial_seed + 1, initial_seed + 2)))
+    candidates: list[tuple[Path, dict]] = []
+    attempts = []
+    for attempt_index, seed in enumerate(seeds):
+        attempt_dir = sparse_dir / f"attempt_{attempt_index:02d}_seed_{seed}"
+        attempt_dir.mkdir(parents=True, exist_ok=True)
+        attempt_params = {**ctx.params, "random_seed": seed}
+        try:
+            colmap_runner.global_mapper(
+                colmap_bin,
+                database_path=database_path,
+                image_path=image_path,
+                output_path=attempt_dir,
+                refine_intrinsics=spec.refine_intrinsics,
+                refine_rig=spec.refine_rig,
+                use_gpu=ctx.params["ba_use_gpu"],
+                extra_args=colmap_quality.global_mapper_extra_args(attempt_params),
+                log_path=logs_dir / f"global_mapper_seed_{seed}.log",
+                on_line=global_mapper_progress(ctx),
+            )
+            model_dir, summary = _select_largest_model(attempt_dir, spec)
+            primary = summary["source_registration"][spec.primary_source_id]
+            registered_ratio = primary["registered"] / max(1, primary["total"])
+            attempt = {
+                "seed": seed,
+                "registered_primary": primary["registered"],
+                "registered_total": summary["num_images"],
+                "points3D": summary["num_points3D"],
+                "mean_reprojection_error": summary["mean_reprojection_error"],
+            }
+            attempts.append(attempt)
+            candidates.append((model_dir, summary))
+            if (
+                registered_ratio >= ctx.params["min_registered_ratio"]
+                and summary["num_points3D"] >= ctx.params["min_points3D"]
+            ):
+                break
+            ctx.progress.warn(
+                f"Global Mapper seed={seed} は quality gate 未達。別 seed で再試行します",
+                key="log.recon_retry_seed",
+                args={"seed": seed, "images": primary["registered"], "points": summary["num_points3D"]},
+            )
+        except RuntimeError as error:
+            attempts.append({"seed": seed, "error": str(error)})
+            ctx.progress.warn(
+                f"Global Mapper seed={seed} failed: {error}",
+                key="log.recon_retry_error",
+                args={"seed": seed, "error": str(error)},
+            )
+    if not candidates:
+        raise RuntimeError(f"Global Mapper produced no model after seeds {seeds}")
+    best_model, best_summary = max(
+        candidates,
+        key=lambda candidate: (
+            (
+                candidate[1]["source_registration"][spec.primary_source_id]["registered"]
+                / max(1, candidate[1]["source_registration"][spec.primary_source_id]["total"])
+                >= ctx.params["min_registered_ratio"]
+                and candidate[1]["num_points3D"] >= ctx.params["min_points3D"]
+            ),
+            candidate[1]["source_registration"][spec.primary_source_id]["registered"],
+            candidate[1]["num_points3D"],
+            candidate[1]["num_images"],
+        ),
+    )
+    canonical = sparse_dir / "0"
+    shutil.copytree(best_model, canonical)
+    for path in sparse_dir.iterdir():
+        if path != canonical and path.is_dir():
+            shutil.rmtree(path)
+    return canonical, best_summary, attempts
+
+
 def _validate_summary(summary: dict, params: dict) -> None:
     if summary["registered_ratio"] < params["min_registered_ratio"]:
         raise RuntimeError(
@@ -188,7 +270,7 @@ def _validate_summary(summary: dict, params: dict) -> None:
         )
 
 
-def _select_largest_model(sparse_dir: Path) -> tuple[Path, dict]:
+def _select_largest_model(sparse_dir: Path, spec: InputSpec) -> tuple[Path, dict]:
     models = [
         path for path in sorted(sparse_dir.iterdir()) if path.is_dir() and (path / "cameras.bin").is_file()
     ]
@@ -204,9 +286,36 @@ def _select_largest_model(sparse_dir: Path) -> tuple[Path, dict]:
         raise RuntimeError("mapper produced no sparse model")
 
     reconstructions = {path: colmap_model.read_model(path) for path in models}
-    best = max(models, key=lambda path: len(reconstructions[path].images))
+    source_by_name = {image["name"]: image["source_id"] for image in spec.images}
+    best = max(
+        models,
+        key=lambda path: (
+            sum(
+                source_by_name.get(image.name) == spec.primary_source_id
+                for image in reconstructions[path].images.values()
+            ),
+            len(reconstructions[path].images),
+            len(reconstructions[path].points3D),
+        ),
+    )
     summary = reconstructions[best].summary()
     summary["num_models"] = len(models)
+    registration = {}
+    source_metadata = {source["id"]: source for source in spec.sources}
+    for source_id in sorted({image["source_id"] for image in spec.images}):
+        total = sum(image["source_id"] == source_id for image in spec.images)
+        registered = sum(
+            source_by_name.get(image.name) == source_id for image in reconstructions[best].images.values()
+        )
+        registration[source_id] = {
+            "label": source_metadata[source_id]["label"],
+            "role": source_metadata[source_id]["role"],
+            "total": total,
+            "registered": registered,
+            "ratio": registered / max(1, total),
+            "connected": registered > 0,
+        }
+    summary["source_registration"] = registration
     canonical = sparse_dir / "0"
     if best != canonical:
         temporary = sparse_dir / "_best"

@@ -2,10 +2,10 @@ import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import {
   api,
-  fisheyeMaskUrl,
-  frameImageUrl,
   parseImageName,
-  pinholeImageUrl,
+  preparedImageUrl,
+  preparedMaskUrl,
+  type ProjectSource,
   type ReconstructionImage,
 } from '../api/client'
 import { useSettings } from '../ui/settings'
@@ -19,13 +19,15 @@ import {
 } from './CaptureInspectorParts'
 
 // カメラ選択時に Inspector に表示: 対応フレーム画像 + 適用マスクの重ね表示トグル.
-export const CameraInspector = ({ projectId, image }: {
+export const CameraInspector = ({ projectId, image, sources }: {
   projectId: string
   image: ReconstructionImage
+  sources: ProjectSource[]
 }) => {
   const { t } = useSettings()
   const [view, setView] = useState<CaptureView>('orig')
   const parsed = parseImageName(image.name)
+  const source = sources.find(item => item.id === parsed?.sourceId)
   const frameMatch = image.name.match(/frame_(\d+)/)
   const frameIndex = parsed?.index ?? (frameMatch ? Number(frameMatch[1]) : null)
   const namedLens = image.name.match(/lens(\d+)/)
@@ -33,18 +35,9 @@ export const CameraInspector = ({ projectId, image }: {
   const { data: masks } = useQuery({
     queryKey: ['masks', projectId], queryFn: () => api.getMasks(projectId), retry: false,
   })
-  const maskFrame = parsed ? masks?.frames.find(frame => frame.index === parsed.index) : undefined
-  const maskRec = parsed?.kind === 'native' && masks?.kind === 'sam3_fisheye_masks'
-    ? maskFrame?.lenses?.find(item => item.lens === parsed.lens)
-    : parsed?.kind === 'pinhole' && masks?.kind === 'sam3_pinhole_masks'
-    ? maskFrame?.views?.find(item => item.lens === parsed.lens && item.view === parsed.view)
-    : undefined
-  const originalUrl = parsed?.kind === 'pinhole'
-    ? pinholeImageUrl(projectId, parsed.index, parsed.view, parsed.lens)
-    : parsed ? frameImageUrl(projectId, parsed.index, parsed.lens) : null
-  const maskUrl = parsed?.kind === 'pinhole' && maskRec
-    ? pinholeImageUrl(projectId, parsed.index, parsed.view, parsed.lens, true)
-    : parsed?.kind === 'native' && maskRec ? fisheyeMaskUrl(projectId, parsed.index, parsed.lens) : null
+  const maskRec = masks?.images.find(record => record.name === image.name)
+  const originalUrl = parsed ? preparedImageUrl(projectId, image.name) : null
+  const maskUrl = maskRec ? preparedMaskUrl(projectId, image.name) : null
 
   return (
     <div>
@@ -61,6 +54,7 @@ export const CameraInspector = ({ projectId, image }: {
           registration={{ registered: true, points: image.num_points }} />
       )}
       <InspectorFields>
+        {source && <InspectorField label={t('sourceLabel')}>{source.label}</InspectorField>}
         <InspectorField label={t('datasetImage')}>{image.name}</InspectorField>
         <InspectorField label={t('cameraPosition')}>
           [{image.position.map(value => value.toFixed(3)).join(', ')}]

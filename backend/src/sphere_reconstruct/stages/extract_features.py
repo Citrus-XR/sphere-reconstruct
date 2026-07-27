@@ -10,7 +10,6 @@ from ..colmap import input_workspace
 from ..colmap import runner as colmap_runner
 from ..domain.artifacts import FileRef, StageManifest
 from ..domain.pipeline_state import StageName
-from ..imaging import fisheye_region
 from ..infrastructure.filesystem import sha256_file
 from ..pipeline.manifest import register
 from ..pipeline.stage import Stage, StageContext, new_manifest
@@ -23,7 +22,7 @@ _FEATURE_TYPES = {"SIFT", "ALIKED_N16ROT", "ALIKED_N32"}
 @register
 class ExtractFeatures(Stage):
     name = StageName.EXTRACT_FEATURES
-    impl_version = "1.1"
+    impl_version = "2.1"
 
     def normalize_params(self, raw: dict) -> dict:
         feature_type = str(raw.get("feature_type", "SIFT")).upper()
@@ -42,21 +41,11 @@ class ExtractFeatures(Stage):
         }
 
     def collect_inputs(self, ctx: StageContext) -> list[FileRef]:
-        mode = ctx.params["reconstruction_mode"]
-        candidates = [ctx.project_dir / "manifests" / "extract_frames.json"]
-        if mode == "native_fisheye":
-            candidates += [
-                ctx.project_dir / "inspect_source" / "source.json",
-                fisheye_region.region_path(ctx.project_dir),
-                ctx.project_dir / "manifests" / "generate_masks.json",
-            ]
-        elif mode == "pinhole_rig":
-            candidates += [
-                ctx.project_dir / "manifests" / "reproject_views.json",
-                ctx.project_dir / "manifests" / "generate_masks.json",
-            ]
-        else:
-            candidates += [ctx.project_dir / "manifests" / "generate_masks.json"]
+        candidates = [
+            ctx.project_dir / "manifests" / "prepare_images.json",
+            ctx.project_dir / "prepare_images" / "image_catalog.json",
+            ctx.project_dir / "manifests" / "generate_masks.json",
+        ]
         return [
             FileRef(
                 path=str(path.relative_to(ctx.project_dir)),
@@ -71,12 +60,7 @@ class ExtractFeatures(Stage):
         manifest = new_manifest(self.name, self.impl_version)
         manifest.inputs = self.collect_inputs(ctx)
         manifest.params = ctx.params
-        spec = input_workspace.build(
-            ctx.project_dir,
-            ctx.stage_out_dir,
-            ctx.params["reconstruction_mode"],
-            ctx.params["use_masks"],
-        )
+        spec = input_workspace.build(ctx.project_dir, ctx.stage_out_dir, ctx.params["use_masks"])
         logs_dir = ctx.stage_out_dir / "logs"
         logs_dir.mkdir(parents=True, exist_ok=True)
         database_path = ctx.stage_out_dir / "database.db"
@@ -89,27 +73,31 @@ class ExtractFeatures(Stage):
             key="log.features_start",
             args={"type": ctx.params["feature_type"], "images": spec.image_count},
         )
-        colmap_runner.feature_extractor(
-            colmap_bin,
-            database_path=database_path,
-            image_path=ctx.stage_out_dir / spec.image_path,
-            camera_model=spec.camera_model,
-            single_camera=spec.single_camera,
-            single_camera_per_folder=spec.single_camera_per_folder,
-            camera_params=",".join(str(value) for value in spec.camera_params),
-            use_gpu=ctx.params["use_gpu"],
-            feature_type=ctx.params["feature_type"],
-            mask_path=ctx.stage_out_dir / spec.mask_path if spec.mask_path else None,
-            extra_args=self._feature_args(ctx.params, settings),
-            log_path=logs_dir / "feature_extractor.log",
-            on_line=counted_progress(
-                ctx,
-                "features",
-                r"Processed file \[(\d+)/(\d+)\]",
-                low=0.05,
-                high=0.9,
-            ),
-        )
+        for index, batch in enumerate(spec.feature_batches):
+            low = 0.05 + 0.85 * index / len(spec.feature_batches)
+            high = 0.05 + 0.85 * (index + 1) / len(spec.feature_batches)
+            colmap_runner.feature_extractor(
+                colmap_bin,
+                database_path=database_path,
+                image_path=ctx.stage_out_dir / spec.image_path,
+                camera_model=batch.camera_model,
+                single_camera=batch.single_camera,
+                single_camera_per_folder=batch.single_camera_per_folder,
+                camera_params=",".join(str(value) for value in batch.camera_params),
+                use_gpu=ctx.params["use_gpu"],
+                feature_type=ctx.params["feature_type"],
+                mask_path=ctx.stage_out_dir / spec.mask_path if spec.mask_path else None,
+                image_list_path=ctx.stage_out_dir / batch.image_list_path,
+                extra_args=self._feature_args(ctx.params, settings),
+                log_path=logs_dir / f"feature_extractor_{index:03d}.log",
+                on_line=counted_progress(
+                    ctx,
+                    f"features:{batch.id}",
+                    r"Processed file \[(\d+)/(\d+)\]",
+                    low=low,
+                    high=high,
+                ),
+            )
         if spec.rig_config_path:
             colmap_runner.rig_configurator(
                 colmap_bin,
@@ -125,6 +113,9 @@ class ExtractFeatures(Stage):
                 "feature_type": ctx.params["feature_type"],
                 "gpu_enabled": ctx.params["use_gpu"],
                 "masks_enabled": bool(spec.mask_path),
+                "sources": spec.source_count,
+                "camera_groups": len(spec.feature_batches),
+                "camera_models": sorted({batch.camera_model for batch in spec.feature_batches}),
             }
         )
         summary_path = ctx.stage_out_dir / "feature_summary.json"

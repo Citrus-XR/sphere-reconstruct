@@ -15,6 +15,7 @@ from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel
 
 from ..domain import project as project_domain
+from ..domain import source as source_domain
 from ..domain.pipeline_state import PipelineState
 from ..infrastructure.database import get_db
 from ..infrastructure.filesystem import PathNotAllowedError, ensure_within_any
@@ -28,20 +29,39 @@ class ProjectCreate(BaseModel):
     name: str
 
 
+class SourceRead(BaseModel):
+    id: str
+    label: str
+    role: source_domain.SourceRole
+    adapter: source_domain.SourceAdapter
+    media_kind: source_domain.MediaKind
+    projection: source_domain.Projection
+    path: str
+    ordinal: int
+    enabled: bool
+
+
 class ProjectRead(BaseModel):
     id: str
     name: str
     created_at: datetime
     updated_at: datetime
-    source_kind: str | None
-    source_path: str | None
+    sources: list[SourceRead]
     state: PipelineState
     ui_state: dict | None
 
 
-class SetSourceBody(BaseModel):
-    kind: project_domain.SourceKind
-    path: str  # 絶対パス. サーバサイドで allowed_roots チェック.
+class SourceCreateBody(BaseModel):
+    label: str = ""
+    role: source_domain.SourceRole = source_domain.SourceRole.SUPPLEMENTAL
+    adapter: source_domain.SourceAdapter
+    media_kind: source_domain.MediaKind
+    projection: source_domain.Projection
+    path: str
+
+
+def _to_source_read(source: source_domain.ProjectSource) -> SourceRead:
+    return SourceRead(**source.model_dump(exclude={"project_id"}))
 
 
 def _to_read(p: project_domain.Project) -> ProjectRead:
@@ -50,8 +70,7 @@ def _to_read(p: project_domain.Project) -> ProjectRead:
         name=p.name,
         created_at=p.created_at,
         updated_at=p.updated_at,
-        source_kind=p.source_kind.value if p.source_kind else None,
-        source_path=p.source_path,
+        sources=[_to_source_read(source) for source in p.sources],
         state=p.state,
         ui_state=p.metadata.get("ui"),
     )
@@ -79,27 +98,121 @@ async def get_project(project_id: str) -> ProjectRead:
     return _to_read(p)
 
 
-@router.post("/{project_id}/source", response_model=ProjectRead)
-async def set_source(project_id: str, body: SetSourceBody) -> ProjectRead:
+async def _prepare_source_mutation(project_id: str) -> project_domain.Project:
     db = get_db()
     existing = await project_domain.get_project(db, project_id)
     if existing is None:
         raise HTTPException(status_code=404, detail="project not found")
 
+    cursor = await db.conn.execute(
+        "SELECT 1 FROM job WHERE project_id=? AND status IN ('queued', 'running') LIMIT 1",
+        (project_id,),
+    )
+    if await cursor.fetchone() is not None:
+        raise HTTPException(status_code=409, detail="project has a running job")
+    return existing
+
+
+async def _invalidate_for_source_mutation(project: project_domain.Project) -> None:
+    await run_in_threadpool(clear_pipeline, project.workspace_dir)
+
+
+def _resolve_source_path(path: str) -> Path:
     settings = get_settings()
     try:
-        resolved = ensure_within_any(settings.filesystem.allowed_roots, Path(body.path))
-    except PathNotAllowedError as e:
-        raise HTTPException(status_code=403, detail=str(e)) from e
+        resolved = ensure_within_any(settings.filesystem.allowed_roots, Path(path))
+    except PathNotAllowedError as error:
+        raise HTTPException(status_code=403, detail=str(error)) from error
     if not resolved.exists():
         raise HTTPException(status_code=404, detail=f"source not found: {resolved}")
+    return resolved
 
-    p = await project_domain.set_source(db, project_id, kind=body.kind, path=str(resolved))
-    await run_in_threadpool(clear_pipeline, p.workspace_dir)
-    region = p.workspace_dir / "fisheye_region.json"
-    if region.exists():
-        region.unlink()
-    return _to_read(p)
+
+@router.post("/{project_id}/sources", response_model=ProjectRead)
+async def add_source(project_id: str, body: SourceCreateBody) -> ProjectRead:
+    resolved = _resolve_source_path(body.path)
+    if body.media_kind == source_domain.MediaKind.IMAGES and not resolved.is_dir():
+        raise HTTPException(status_code=400, detail="image source must be a directory")
+    if body.media_kind == source_domain.MediaKind.VIDEO and not resolved.is_file():
+        raise HTTPException(status_code=400, detail="video source must be a file")
+    existing = await _prepare_source_mutation(project_id)
+    if any(Path(source.path) == resolved for source in existing.sources):
+        raise HTTPException(status_code=409, detail="source path is already registered")
+    if body.role == source_domain.SourceRole.PRIMARY and any(
+        source.role == source_domain.SourceRole.PRIMARY for source in existing.sources
+    ):
+        raise HTTPException(status_code=409, detail="project already has a primary source")
+    try:
+        source_domain.ProjectSource(
+            id="validation",
+            project_id=project_id,
+            label=body.label or resolved.name,
+            role=body.role,
+            adapter=body.adapter,
+            media_kind=body.media_kind,
+            projection=body.projection,
+            path=str(resolved),
+            ordinal=len(existing.sources),
+            enabled=True,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    await _invalidate_for_source_mutation(existing)
+
+    try:
+        await source_domain.add_source(
+            get_db(),
+            project_id,
+            label=body.label,
+            role=body.role,
+            adapter=body.adapter,
+            media_kind=body.media_kind,
+            projection=body.projection,
+            path=str(resolved),
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    project = await project_domain.get_project(get_db(), project_id)
+    assert project is not None
+    return _to_read(project)
+
+
+@router.delete("/{project_id}/sources/{source_id}", response_model=ProjectRead)
+async def delete_source(project_id: str, source_id: str) -> ProjectRead:
+    existing = await _prepare_source_mutation(project_id)
+    target = next((source for source in existing.sources if source.id == source_id), None)
+    if target is None:
+        raise HTTPException(status_code=404, detail="source not found")
+    if target.role == source_domain.SourceRole.PRIMARY and len(existing.sources) > 1:
+        raise HTTPException(
+            status_code=409,
+            detail="primary source を削除する前に別の source を primary にしてください",
+        )
+    await _invalidate_for_source_mutation(existing)
+    try:
+        await source_domain.remove_source(get_db(), project_id, source_id)
+    except LookupError as error:
+        raise HTTPException(status_code=404, detail="source not found") from error
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    project = await project_domain.get_project(get_db(), project_id)
+    assert project is not None
+    return _to_read(project)
+
+
+@router.post("/{project_id}/sources/{source_id}/make-primary", response_model=ProjectRead)
+async def make_primary_source(project_id: str, source_id: str) -> ProjectRead:
+    existing = await _prepare_source_mutation(project_id)
+    if not any(source.id == source_id for source in existing.sources):
+        raise HTTPException(status_code=404, detail="source not found")
+    await _invalidate_for_source_mutation(existing)
+    try:
+        await source_domain.make_primary(get_db(), project_id, source_id)
+    except LookupError as error:
+        raise HTTPException(status_code=404, detail="source not found") from error
+    project = await project_domain.get_project(get_db(), project_id)
+    assert project is not None
+    return _to_read(project)
 
 
 class UiStateBody(BaseModel):

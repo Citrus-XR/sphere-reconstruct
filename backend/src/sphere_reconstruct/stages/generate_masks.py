@@ -1,34 +1,4 @@
-"""generate_masks ステージ.
-
-再構成モードに応じて 3 レイアウトの SAM3 mask を作る:
-
-- **fisheye** (native_fisheye 用): extract_frames の生前後魚眼 (lens0/lens1) に SAM3 を
-  かけ, 動体 (人 / 自撮り棒 / 三脚 / 影) を膨張させて除外し, さらに魚眼の円形有効領域
-  (fisheye_region) の外側も除外した COLMAP mask を作る.
-- **pinhole** (pinhole_rig 用): reproject_views の pinhole rig 画像に SAM3 をかけ, 動体を
-  除外する.
-- **erp** (equirectangular 用): extract_frames の ERP 全天球フレームに SAM3 をかけ, 動体を
-  除外する. 円形有効領域は無く, フレーム全面から動体だけを引く.
-
-8K 由来の大きい画像に備え, SAM3 には縮小画像を渡し, 得た mask を元解像度へ bilinear
-拡大する (imaging/masks). 縮小は無効化もできる (max_inference_size=0).
-
-出力 (fisheye):
-  <project>/generate_masks/lens0/frame_XXXXXX.png   COLMAP 用 (使う所=255)
-  <project>/generate_masks/lens1/frame_XXXXXX.png
-出力 (pinhole):
-  <project>/generate_masks/frame_XXXXXX/<view>_lens<idx>.png
-共通:
-  <project>/generate_masks/manifest_masks.json
-
-パラメータ:
-  layout: "auto" | "pinhole" | "fisheye" | "erp"  auto は入力形式で判定.
-  prompt: str            comma 区切り. 未指定なら settings.sam3.default_prompt.
-  max_inference_size: int  SAM3 前の縮小長辺. 0 で縮小しない.
-  dilate_px: int         動体 mask の膨張画素 (縁漏れ防止). default 0.
-  coverage_warn: float   除外面積比の警告閾値 (default 0.5).
-  max_frames: int        0 = 全部.
-"""
+"""Canonical image catalog の全画像へ SAM3 / valid-region mask を生成する。"""
 
 from __future__ import annotations
 
@@ -39,7 +9,6 @@ import numpy as np
 
 from ..domain.artifacts import FileRef, StageManifest
 from ..domain.pipeline_state import StageName
-from ..imaging import fisheye_region
 from ..imaging import masks as mask_utils
 from ..infrastructure.filesystem import sha256_file
 from ..pipeline.manifest import register
@@ -50,426 +19,167 @@ from ..settings import get_settings
 @register
 class GenerateMasks(Stage):
     name = StageName.GENERATE_MASKS
-    impl_version = "0.3"
-
-    def _resolve_layout(self, ctx: StageContext) -> str:
-        layout = ctx.params["layout"]
-        if layout != "auto":
-            return layout
-        # reproject_views の出力があれば pinhole (INSV/ERP どちらの pinhole モードでも再投影像に掛ける).
-        if (ctx.project_dir / "reproject_views" / "manifest_rig.json").exists():
-            return "pinhole"
-        # 再投影が無い ERP は生 ERP フレームに, それ以外は生魚眼に掛ける.
-        frames_json = ctx.project_dir / "extract_frames" / "manifest_frames.json"
-        if frames_json.exists():
-            kind = json.loads(frames_json.read_text()).get("kind")
-            if kind in ("erp_video", "erp_images"):
-                return "erp"
-        return "fisheye"
-
-    def collect_inputs(self, ctx: StageContext) -> list[FileRef]:
-        layout = self._resolve_layout(ctx)
-        if layout == "fisheye":
-            cands = [
-                ctx.project_dir / "extract_frames" / "manifest_frames.json",
-                fisheye_region.region_path(ctx.project_dir),
-            ]
-        elif layout == "erp":
-            cands = [ctx.project_dir / "extract_frames" / "manifest_frames.json"]
-        else:
-            cands = [ctx.project_dir / "reproject_views" / "manifest_rig.json"]
-        return [
-            FileRef(path=str(p.relative_to(ctx.project_dir)), size=p.stat().st_size, sha256=sha256_file(p))
-            for p in cands
-            if p.exists()
-        ]
+    impl_version = "1.0"
 
     def normalize_params(self, raw: dict) -> dict:
-        s = get_settings().sam3
+        settings = get_settings().sam3
         return {
-            "layout": str(raw.get("layout", "auto")),
-            "prompt": str(raw.get("prompt", s.default_prompt)),
-            "max_inference_size": int(raw.get("max_inference_size", s.max_inference_size)),
-            "dilate_px": int(raw.get("dilate_px", 0)),
+            "prompt": str(raw.get("prompt", settings.default_prompt)),
+            "max_inference_size": int(raw.get("max_inference_size", settings.max_inference_size)),
+            "dilate_px": int(raw.get("dilate_px", 8)),
             "coverage_warn": float(raw.get("coverage_warn", 0.5)),
-            "max_frames": int(raw.get("max_frames", 0)),
+            "max_images": int(raw.get("max_images", 0)),
         }
 
+    def collect_inputs(self, ctx: StageContext) -> list[FileRef]:
+        candidates = [
+            ctx.project_dir / "manifests" / "prepare_images.json",
+            ctx.project_dir / "prepare_images" / "image_catalog.json",
+        ]
+        return [
+            FileRef(
+                path=str(path.relative_to(ctx.project_dir)),
+                size=path.stat().st_size,
+                sha256=sha256_file(path),
+            )
+            for path in candidates
+            if path.is_file()
+        ]
+
     def execute(self, ctx: StageContext) -> StageManifest:
-        # Torch/SAM3 の import・モデル読み込みは数十秒かかることがある. その間ログが
-        # 途絶えて見えないよう, 重い import の前に開始を必ず 1 件流す.
-        ctx.progress.info(
-            "generate_masks 開始: SAM3 準備中 (初回はモデル読み込みに時間がかかる)",
-            progress=0.01,
-            key="log.mask_start",
-        )
-        from ..sam3.engine import Sam3Engine  # 遅延 import (torch を引きずるため).
+        import cv2  # noqa: PLC0415
 
-        manifest = new_manifest(self.name, self.impl_version)
-        manifest.inputs = self.collect_inputs(ctx)
-        manifest.params = ctx.params
+        catalog_path = ctx.project_dir / "prepare_images" / "image_catalog.json"
+        if not catalog_path.is_file():
+            raise RuntimeError("prepare_images must run before generate_masks")
+        catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
+        images = catalog["images"]
+        if ctx.params["max_images"] > 0:
+            images = images[: ctx.params["max_images"]]
+        prompts = [term.strip() for term in ctx.params["prompt"].split(",") if term.strip()]
 
-        prompts = [t.strip() for t in ctx.params["prompt"].split(",") if t.strip()]
-        # prompt が空なら SAM3 を読み込まず, 動体マスク無し (fisheye は円のみ, pinhole は全面使用).
         engine = None
         if prompts:
-            ctx.progress.info(
-                f"loading SAM3 model (device={get_settings().sam3.device})",
-                progress=0.02,
-                key="log.mask_loading_model",
-                args={"device": get_settings().sam3.device},
-            )
+            from ..sam3.engine import Sam3Engine  # noqa: PLC0415
+
+            ctx.progress.info("SAM3 model を読み込み中", progress=0.01, key="log.mask_loading_model")
             engine = Sam3Engine.from_settings()
             engine.load()
-            ctx.progress.info("SAM3 model loaded", progress=0.08, key="log.mask_model_loaded")
         else:
             ctx.progress.info(
-                "prompt 空: SAM3 をスキップ (円マスクのみ)",
-                progress=0.08,
+                "prompt 空: SAM3 をスキップし valid-region mask だけを生成",
+                progress=0.02,
                 key="log.mask_prompt_empty",
             )
+
+        records = []
+        outputs = []
         try:
-            layout = self._resolve_layout(ctx)
-            if layout == "fisheye":
-                outputs, mask_manifest = self._run_fisheye(ctx, engine, prompts)
-            elif layout == "erp":
-                outputs, mask_manifest = self._run_erp(ctx, engine, prompts)
-            else:
-                outputs, mask_manifest = self._run_pinhole(ctx, engine, prompts)
+            for number, image_record in enumerate(images, 1):
+                source_path = ctx.project_dir / image_record["path"]
+                bgr = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
+                if bgr is None:
+                    raise RuntimeError(f"cannot read prepared image: {source_path}")
+                height, width = bgr.shape[:2]
+                plan = mask_utils.plan_downsample(width, height, ctx.params["max_inference_size"])
+                small_rgb = cv2.cvtColor(mask_utils.downsample_image(bgr, plan), cv2.COLOR_BGR2RGB)
+                detections = engine.detect(small_rgb, prompts) if engine is not None else []
+                union = mask_utils.union_masks([mask for detection in detections for mask in detection.masks])
+                dynamic = (
+                    np.zeros((height, width), np.uint8)
+                    if union is None
+                    else mask_utils.upscale_mask(union, width, height)
+                )
+                dynamic = mask_utils.dilate_mask(dynamic, ctx.params["dilate_px"])
+                region = image_record["valid_region"]
+                if region["kind"] == "circle":
+                    circle = (
+                        region["cx"] * width,
+                        region["cy"] * height,
+                        region["r"] * width,
+                    )
+                    valid = mask_utils.valid_region_mask(width, height, circle, exclude=dynamic)
+                    circle_mask = mask_utils.circle_mask(width, height, *circle)
+                    valid_area = int(circle_mask.sum()) or 1
+                    coverage = float(((circle_mask > 0) & (dynamic > 0)).sum()) / valid_area
+                else:
+                    valid = np.where(dynamic > 0, 0, 255).astype(np.uint8)
+                    coverage = mask_utils.coverage_ratio(dynamic)
+                output_path = ctx.stage_out_dir / f"{image_record['name']}.png"
+                mask_utils.write_mask_png(valid, output_path, invert=False)
+                warning = coverage > ctx.params["coverage_warn"]
+                if warning:
+                    ctx.progress.warn(
+                        f"{image_record['name']}: dynamic coverage {coverage:.2f}",
+                        key="log.mask_coverage_warn_image",
+                        args={"name": image_record["name"], "cov": round(coverage, 2)},
+                    )
+                records.append(
+                    {
+                        "name": image_record["name"],
+                        "source_id": image_record["source_id"],
+                        "capture_index": image_record["capture_index"],
+                        "path": _final_relpath(output_path, ctx),
+                        "coverage": coverage,
+                        "coverage_warning": warning,
+                        "detections": {detection.prompt: len(detection.masks) for detection in detections},
+                    }
+                )
+                outputs.append(_file_ref(output_path, ctx, "image/png"))
+                ctx.progress.tick(
+                    progress=0.02 + 0.96 * number / max(1, len(images)),
+                    message=f"mask {number}/{len(images)}",
+                    key="log.mask_progress_image",
+                    args={"cur": number, "tot": len(images), "name": image_record["name"]},
+                )
         finally:
             if engine is not None:
                 engine.unload()
 
-        mm_path = ctx.stage_out_dir / "manifest_masks.json"
-        mm_path.write_text(json.dumps(mask_manifest, indent=2, ensure_ascii=False), encoding="utf-8")
-        outputs.append(
-            FileRef(
-                path=_final_relpath(mm_path, ctx),
-                size=mm_path.stat().st_size,
-                sha256=sha256_file(mm_path),
-                mime="application/json",
-            )
-        )
+        mask_manifest = {
+            "version": 2,
+            "prompt": prompts,
+            "max_inference_size": ctx.params["max_inference_size"],
+            "dilate_px": ctx.params["dilate_px"],
+            "images": records,
+        }
+        manifest_path = ctx.stage_out_dir / "manifest_masks.json"
+        manifest_path.write_text(json.dumps(mask_manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+        outputs.append(_file_ref(manifest_path, ctx, "application/json"))
+        manifest = new_manifest(self.name, self.impl_version)
+        manifest.inputs = self.collect_inputs(ctx)
+        manifest.params = ctx.params
         manifest.outputs = outputs
         manifest.extra = _mask_statistics(mask_manifest)
         ctx.progress.info("generate_masks done", progress=1.0, key="log.mask_done")
         return manifest
 
-    # -- fisheye (native) --------------------------------------------------------
-    def _run_fisheye(self, ctx, engine, prompts) -> tuple[list[FileRef], dict]:
-        import cv2  # noqa: PLC0415
-
-        frames_json = ctx.project_dir / "extract_frames" / "manifest_frames.json"
-        if not frames_json.exists():
-            raise RuntimeError("extract_frames must run first")
-        frames_mf = json.loads(frames_json.read_text())
-        if frames_mf.get("kind") != "insv_dual":
-            raise RuntimeError(f"fisheye masks require dual-lens INSV, got {frames_mf.get('kind')}")
-
-        region = fisheye_region.load_region(ctx.project_dir)
-        max_size = ctx.params["max_inference_size"]
-        dilate_px = ctx.params["dilate_px"]
-        coverage_warn = ctx.params["coverage_warn"]
-
-        frames = frames_mf["frames"]
-        if ctx.params["max_frames"] > 0:
-            frames = frames[: ctx.params["max_frames"]]
-        total = len(frames) * 2
-        outputs: list[FileRef] = []
-        recs = []
-
-        for done, fr in enumerate(frames, 1):
-            frec = {"index": fr["index"], "lenses": []}
-            for lens in (0, 1):
-                src = ctx.project_dir / fr[f"lens{lens}"]
-                bgr = cv2.imread(str(src), cv2.IMREAD_COLOR)
-                if bgr is None:
-                    raise RuntimeError(f"cannot read fisheye frame: {src}")
-                h, w = bgr.shape[:2]
-
-                plan = mask_utils.plan_downsample(w, h, max_size)
-                small_rgb = cv2.cvtColor(mask_utils.downsample_image(bgr, plan), cv2.COLOR_BGR2RGB)
-                detections = engine.detect(small_rgb, prompts) if engine is not None else []
-                union_small = mask_utils.union_masks([m for d in detections for m in d.masks])
-                dynamic = (
-                    np.zeros((h, w), np.uint8)
-                    if union_small is None
-                    else mask_utils.upscale_mask(union_small, w, h)
-                )
-                dynamic = mask_utils.dilate_mask(dynamic, dilate_px)
-
-                circle = fisheye_region.circle_px(region[f"lens{lens}"], w, h)
-                valid = mask_utils.valid_region_mask(w, h, circle, exclude=dynamic)
-
-                out_path = ctx.stage_out_dir / f"lens{lens}" / f"frame_{fr['index']:06d}.png"
-                # 使う所=255, 除外 (動体 or 円外)=0.
-                mask_utils.write_mask_png(valid, out_path, invert=False)
-
-                # coverage = 円内で除外された動体の割合 (円外は元々無効なので除く).
-                circ = mask_utils.circle_mask(w, h, *circle)
-                circ_area = int(circ.sum()) or 1
-                cov = float(((circ > 0) & (dynamic > 0)).sum()) / circ_area
-                rec = {
-                    "lens": lens,
-                    "path": _final_relpath(out_path, ctx),
-                    "coverage": cov,
-                    "detections": {d.prompt: len(d.masks) for d in detections},
-                }
-                if cov > coverage_warn:
-                    ctx.progress.warn(
-                        f"frame {fr['index']} lens{lens}: dynamic coverage {cov:.2f} > {coverage_warn}",
-                        key="log.mask_coverage_warn_lens",
-                        args={
-                            "frame": fr["index"],
-                            "lens": lens,
-                            "cov": round(cov, 2),
-                            "warn": coverage_warn,
-                        },
-                    )
-                    rec["coverage_warning"] = True
-                frec["lenses"].append(rec)
-                outputs.append(
-                    FileRef(
-                        path=_final_relpath(out_path, ctx),
-                        size=out_path.stat().st_size,
-                        sha256="",
-                        mime="image/png",
-                    )
-                )
-                done += 1
-                ctx.progress.tick(
-                    progress=0.08 + 0.9 * (done / max(1, total)),
-                    message=f"mask {done}/{total} (frame {fr['index']} lens{lens}, dyn={cov:.2f})",
-                    key="log.mask_progress_lens",
-                    args={
-                        "done": done,
-                        "total": total,
-                        "frame": fr["index"],
-                        "lens": lens,
-                        "cov": round(cov, 2),
-                    },
-                )
-            recs.append(frec)
-
-        manifest = {
-            "kind": "sam3_fisheye_masks",
-            "prompt": prompts,
-            "max_inference_size": max_size,
-            "dilate_px": dilate_px,
-            "frames": recs,
-        }
-        return outputs, manifest
-
-    # -- pinhole (fallback) ------------------------------------------------------
-    def _run_pinhole(self, ctx, engine, prompts) -> tuple[list[FileRef], dict]:
-        import cv2  # noqa: PLC0415
-
-        rig_path = ctx.project_dir / "reproject_views" / "manifest_rig.json"
-        if not rig_path.exists():
-            raise RuntimeError("reproject_views must run first")
-        rig = json.loads(rig_path.read_text())
-        max_size = ctx.params["max_inference_size"]
-        dilate_px = ctx.params["dilate_px"]
-        coverage_warn = ctx.params["coverage_warn"]
-
-        frames = rig["frames"]
-        if ctx.params["max_frames"] > 0:
-            frames = frames[: ctx.params["max_frames"]]
-        total = sum(len(f["views"]) for f in frames)
-        done = 0
-        outputs: list[FileRef] = []
-        recs = []
-
-        for fr in frames:
-            frame_dir = ctx.stage_out_dir / f"frame_{fr['index']:06d}"
-            frame_dir.mkdir(parents=True, exist_ok=True)
-            view_records = []
-            for v in fr["views"]:
-                src_path = ctx.project_dir / v["path"]
-                bgr = cv2.imread(str(src_path), cv2.IMREAD_COLOR)
-                if bgr is None:
-                    raise RuntimeError(f"cannot read pinhole view: {src_path}")
-                h, w = bgr.shape[:2]
-                plan = mask_utils.plan_downsample(w, h, max_size)
-                small_rgb = cv2.cvtColor(mask_utils.downsample_image(bgr, plan), cv2.COLOR_BGR2RGB)
-                detections = engine.detect(small_rgb, prompts) if engine is not None else []
-                union_small = mask_utils.union_masks([m for d in detections for m in d.masks])
-                dynamic = (
-                    np.zeros((h, w), np.uint8)
-                    if union_small is None
-                    else mask_utils.upscale_mask(union_small, w, h)
-                )
-                dynamic = mask_utils.dilate_mask(dynamic, dilate_px)
-
-                out_path = frame_dir / f"{v['view']}_lens{v['lens']}.png"
-                # 動体=0 (無視), それ以外=255.
-                mask_utils.write_mask_png(dynamic, out_path, invert=True)
-
-                cov = mask_utils.coverage_ratio(dynamic)
-                rec = {
-                    "view": v["view"],
-                    "lens": v["lens"],
-                    "path": _final_relpath(out_path, ctx),
-                    "coverage": cov,
-                    "detections": {d.prompt: len(d.masks) for d in detections},
-                }
-                if cov > coverage_warn:
-                    ctx.progress.warn(
-                        f"frame {fr['index']} {out_path.name}: coverage {cov:.2f} > {coverage_warn}",
-                        key="log.mask_coverage_warn_view",
-                        args={
-                            "frame": fr["index"],
-                            "name": out_path.name,
-                            "cov": round(cov, 2),
-                            "warn": coverage_warn,
-                        },
-                    )
-                    rec["coverage_warning"] = True
-                view_records.append(rec)
-                outputs.append(
-                    FileRef(
-                        path=_final_relpath(out_path, ctx),
-                        size=out_path.stat().st_size,
-                        sha256="",
-                        mime="image/png",
-                    )
-                )
-                done += 1
-                ctx.progress.tick(
-                    progress=0.08 + 0.9 * (done / max(1, total)),
-                    message=f"mask {done}/{total} (frame {fr['index']} {out_path.name}, cov={cov:.2f})",
-                    key="log.mask_progress_view",
-                    args={
-                        "done": done,
-                        "total": total,
-                        "frame": fr["index"],
-                        "name": out_path.name,
-                        "cov": round(cov, 2),
-                    },
-                )
-            recs.append({"index": fr["index"], "views": view_records})
-
-        manifest = {
-            "kind": "sam3_pinhole_masks",
-            "prompt": prompts,
-            "max_inference_size": max_size,
-            "dilate_px": dilate_px,
-            "frames": recs,
-        }
-        return outputs, manifest
-
-    # -- erp (equirectangular) ---------------------------------------------------
-    def _run_erp(self, ctx, engine, prompts) -> tuple[list[FileRef], dict]:
-        import cv2  # noqa: PLC0415
-
-        frames_json = ctx.project_dir / "extract_frames" / "manifest_frames.json"
-        if not frames_json.exists():
-            raise RuntimeError("extract_frames must run first")
-        frames_mf = json.loads(frames_json.read_text())
-        if frames_mf.get("kind") not in ("erp_video", "erp_images"):
-            raise RuntimeError(f"erp masks require ERP frames, got {frames_mf.get('kind')}")
-
-        max_size = ctx.params["max_inference_size"]
-        dilate_px = ctx.params["dilate_px"]
-        coverage_warn = ctx.params["coverage_warn"]
-
-        frames = frames_mf["frames"]
-        if ctx.params["max_frames"] > 0:
-            frames = frames[: ctx.params["max_frames"]]
-        total = len(frames)
-        done = 0
-        outputs: list[FileRef] = []
-        recs = []
-
-        for fr in frames:
-            src = ctx.project_dir / fr["erp"] if "erp" in fr else Path(fr["erp_source"])
-            bgr = cv2.imread(str(src), cv2.IMREAD_COLOR)
-            if bgr is None:
-                raise RuntimeError(f"cannot read ERP frame: {src}")
-            h, w = bgr.shape[:2]
-            plan = mask_utils.plan_downsample(w, h, max_size)
-            small_rgb = cv2.cvtColor(mask_utils.downsample_image(bgr, plan), cv2.COLOR_BGR2RGB)
-            detections = engine.detect(small_rgb, prompts) if engine is not None else []
-            union_small = mask_utils.union_masks([m for d in detections for m in d.masks])
-            dynamic = (
-                np.zeros((h, w), np.uint8)
-                if union_small is None
-                else mask_utils.upscale_mask(union_small, w, h)
-            )
-            dynamic = mask_utils.dilate_mask(dynamic, dilate_px)
-
-            out_path = ctx.stage_out_dir / f"frame_{fr['index']:06d}.png"
-            # 動体=0 (無視), それ以外=255. ERP は円形有効領域が無く全面が有効.
-            mask_utils.write_mask_png(dynamic, out_path, invert=True)
-
-            cov = mask_utils.coverage_ratio(dynamic)
-            rec = {
-                "index": fr["index"],
-                "path": _final_relpath(out_path, ctx),
-                "coverage": cov,
-                "detections": {d.prompt: len(d.masks) for d in detections},
-            }
-            if cov > coverage_warn:
-                ctx.progress.warn(
-                    f"frame {fr['index']}: dynamic coverage {cov:.2f} > {coverage_warn}",
-                    key="log.mask_coverage_warn_erp",
-                    args={"frame": fr["index"], "cov": round(cov, 2), "warn": coverage_warn},
-                )
-                rec["coverage_warning"] = True
-            recs.append(rec)
-            outputs.append(
-                FileRef(
-                    path=_final_relpath(out_path, ctx),
-                    size=out_path.stat().st_size,
-                    sha256="",
-                    mime="image/png",
-                )
-            )
-            ctx.progress.tick(
-                progress=0.08 + 0.9 * (done / max(1, total)),
-                message=f"mask {done}/{total} (frame {fr['index']}, cov={cov:.2f})",
-                key="log.mask_progress_erp",
-                args={"done": done, "total": total, "frame": fr["index"], "cov": round(cov, 2)},
-            )
-
-        manifest = {
-            "kind": "sam3_erp_masks",
-            "prompt": prompts,
-            "max_inference_size": max_size,
-            "dilate_px": dilate_px,
-            "frames": recs,
-        }
-        return outputs, manifest
-
-
-def _final_relpath(p: Path, ctx: StageContext) -> str:
-    rel = p.relative_to(ctx.stage_out_dir)
-    final_stage_dir_name = ctx.stage_out_dir.name.lstrip(".").removesuffix(".tmp")
-    return str(Path(final_stage_dir_name) / rel)
-
 
 def _mask_statistics(manifest: dict) -> dict:
-    records = []
-    for frame in manifest.get("frames", []):
-        if "lenses" in frame:
-            records.extend(frame["lenses"])
-        elif "views" in frame:
-            records.extend(frame["views"])
-        else:
-            records.append(frame)
-    coverages = [float(record.get("coverage", 0.0)) for record in records]
-    detections = sum(
-        sum(int(count) for count in record.get("detections", {}).values()) for record in records
-    )
+    records = manifest["images"]
+    coverages = [float(record["coverage"]) for record in records]
     return {
-        "kind": manifest.get("kind"),
-        "frames": len(manifest.get("frames", [])),
         "images": len(records),
-        "prompt_terms": len(manifest.get("prompt", [])),
-        "detections": detections,
+        "sources": len({record["source_id"] for record in records}),
+        "prompt_terms": len(manifest["prompt"]),
+        "detections": sum(sum(int(count) for count in record["detections"].values()) for record in records),
         "average_dynamic_coverage": sum(coverages) / len(coverages) if coverages else 0.0,
         "maximum_dynamic_coverage": max(coverages) if coverages else 0.0,
-        "coverage_warnings": sum(bool(record.get("coverage_warning")) for record in records),
-        "max_inference_size": manifest.get("max_inference_size"),
-        "dilate_px": manifest.get("dilate_px"),
+        "coverage_warnings": sum(record["coverage_warning"] for record in records),
+        "max_inference_size": manifest["max_inference_size"],
+        "dilate_px": manifest["dilate_px"],
     }
+
+
+def _final_relpath(path: Path, ctx: StageContext) -> str:
+    final_name = ctx.stage_out_dir.name.lstrip(".").removesuffix(".tmp")
+    return str(Path(final_name) / path.relative_to(ctx.stage_out_dir))
+
+
+def _file_ref(path: Path, ctx: StageContext, mime: str) -> FileRef:
+    return FileRef(
+        path=_final_relpath(path, ctx),
+        size=path.stat().st_size,
+        sha256=sha256_file(path) if path.suffix == ".json" else "",
+        mime=mime,
+    )

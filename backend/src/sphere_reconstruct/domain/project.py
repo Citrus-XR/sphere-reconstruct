@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
-from enum import StrEnum
 from pathlib import Path
 
 from pydantic import BaseModel, Field
@@ -15,12 +14,7 @@ from pydantic import BaseModel, Field
 from ..infrastructure.database import Database
 from ..settings import workspace_root
 from .pipeline_state import PipelineState
-
-
-class SourceKind(StrEnum):
-    INSV = "insv"
-    ERP_VIDEO = "erp_video"
-    ERP_IMAGES = "erp_images"
+from .source import ProjectSource, SourceRole, list_sources
 
 
 class Project(BaseModel):
@@ -28,8 +22,7 @@ class Project(BaseModel):
     name: str
     created_at: datetime
     updated_at: datetime
-    source_kind: SourceKind | None = None
-    source_path: str | None = None
+    sources: list[ProjectSource] = Field(default_factory=list)
     state: PipelineState = PipelineState.CREATED
     metadata: dict = Field(default_factory=dict)
 
@@ -37,12 +30,16 @@ class Project(BaseModel):
     def workspace_dir(self) -> Path:
         return workspace_root() / "projects" / self.id
 
+    @property
+    def primary_source(self) -> ProjectSource | None:
+        return next((source for source in self.sources if source.role == SourceRole.PRIMARY), None)
+
 
 def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
-def _project_from_row(row) -> Project:
+def _project_from_row(row, sources: list[ProjectSource]) -> Project:
     import json
 
     return Project(
@@ -50,8 +47,7 @@ def _project_from_row(row) -> Project:
         name=row["name"],
         created_at=datetime.fromisoformat(row["created_at"]),
         updated_at=datetime.fromisoformat(row["updated_at"]),
-        source_kind=SourceKind(row["source_kind"]) if row["source_kind"] else None,
-        source_path=row["source_path"],
+        sources=sources,
         state=PipelineState(row["state"]),
         metadata=json.loads(row["metadata_json"] or "{}"),
     )
@@ -79,29 +75,13 @@ async def create_project(db: Database, name: str) -> Project:
 async def list_projects(db: Database) -> list[Project]:
     cur = await db.conn.execute("SELECT * FROM project ORDER BY created_at DESC")
     rows = await cur.fetchall()
-    return [_project_from_row(r) for r in rows]
+    return [_project_from_row(row, await list_sources(db, row["id"])) for row in rows]
 
 
 async def get_project(db: Database, project_id: str) -> Project | None:
     cur = await db.conn.execute("SELECT * FROM project WHERE id = ?", (project_id,))
     row = await cur.fetchone()
-    return _project_from_row(row) if row else None
-
-
-async def set_source(db: Database, project_id: str, *, kind: SourceKind, path: str) -> Project:
-    """ソースを差し替えた時点で以降のパイプライン結果は無効化される (呼び出し側で state を戻す)."""
-    async with db.transaction() as conn:
-        await conn.execute(
-            """
-            UPDATE project SET source_kind=?, source_path=?, updated_at=?, state=?
-            WHERE id = ?
-            """,
-            (kind.value, path, _now_iso(), PipelineState.CREATED.value, project_id),
-        )
-    project = await get_project(db, project_id)
-    if project is None:
-        raise LookupError(f"project {project_id} disappeared during set_source")
-    return project
+    return _project_from_row(row, await list_sources(db, project_id)) if row else None
 
 
 async def update_state(db: Database, project_id: str, state: PipelineState) -> None:

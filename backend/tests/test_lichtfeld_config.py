@@ -38,6 +38,13 @@ def test_pinhole_needs_neither():
         assert c["gut"] is False and c["undistort"] is False
 
 
+def test_mixed_pinhole_and_radial_uses_distortion_capable_renderer():
+    configs, info = lc.build_configs(_profile(["PINHOLE", "SIMPLE_RADIAL"]))
+    assert info["camera_class"] == "distorted_pinhole"
+    assert configs["mrnf"]["gut"] is True
+    assert configs["igsplus"]["undistort"] is True
+
+
 def test_equirect_trains_via_gut_except_igsplus():
     configs, info = lc.build_configs(_profile(["EQUIRECTANGULAR"]))
     assert info["camera_class"] == "equirect"

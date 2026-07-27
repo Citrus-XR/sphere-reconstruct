@@ -12,15 +12,38 @@ export type PipelineState =
   | 'aligned'
   | 'exported'
 
-export type SourceKind = 'insv' | 'erp_video' | 'erp_images'
+export type SourceRole = 'primary' | 'supplemental'
+export type SourceAdapter = 'insta360_insv' | 'generic_video' | 'generic_images'
+export type MediaKind = 'video' | 'images'
+export type Projection = 'dual_fisheye' | 'equirectangular' | 'perspective'
+
+export interface ProjectSource {
+  id: string
+  label: string
+  role: SourceRole
+  adapter: SourceAdapter
+  media_kind: MediaKind
+  projection: Projection
+  path: string
+  ordinal: number
+  enabled: boolean
+}
+
+export interface SourceCreate {
+  label?: string
+  role?: SourceRole
+  adapter: SourceAdapter
+  media_kind: MediaKind
+  projection: Projection
+  path: string
+}
 
 export interface Project {
   id: string
   name: string
   created_at: string
   updated_at: string
-  source_kind: SourceKind | null
-  source_path: string | null
+  sources: ProjectSource[]
   state: PipelineState
   // 工程に保存された UI 設定 (step パラメータ / モード / 無効化). リロードで復元する.
   ui_state: { params?: Record<string, unknown>; reconMode?: string; disabled?: string[] } | null
@@ -120,12 +143,16 @@ export const api = {
       headers: jsonHeaders,
       body: JSON.stringify({ name }),
     }),
-  setSource: (id: string, kind: SourceKind, path: string) =>
-    req<Project>(`/api/projects/${id}/source`, {
+  addSource: (id: string, source: SourceCreate) =>
+    req<Project>(`/api/projects/${id}/sources`, {
       method: 'POST',
       headers: jsonHeaders,
-      body: JSON.stringify({ kind, path }),
+      body: JSON.stringify(source),
     }),
+  deleteSource: (id: string, sourceId: string) =>
+    req<Project>(`/api/projects/${id}/sources/${sourceId}`, { method: 'DELETE' }),
+  makePrimarySource: (id: string, sourceId: string) =>
+    req<Project>(`/api/projects/${id}/sources/${sourceId}/make-primary`, { method: 'POST' }),
   runPipeline: (id: string, paramsByStage?: Record<string, Record<string, unknown>>, skip?: string[]) =>
     req<{ job_id: string }>(`/api/projects/${id}/run`, {
       method: 'POST',
@@ -151,10 +178,10 @@ export const api = {
     req<Project>(`/api/projects/${id}/ui-state`, {
       method: 'PUT', headers: jsonHeaders, body: JSON.stringify({ ui }),
     }),
-  getFisheyeRegion: (id: string) =>
-    req<FisheyeRegion>(`/api/projects/${id}/fisheye-region`),
-  putFisheyeRegion: (id: string, region: FisheyeRegion) =>
-    req<FisheyeRegion>(`/api/projects/${id}/fisheye-region`, {
+  getFisheyeRegion: (id: string, sourceId: string) =>
+    req<FisheyeRegion>(`/api/projects/${id}/fisheye-region?source_id=${encodeURIComponent(sourceId)}`),
+  putFisheyeRegion: (id: string, sourceId: string, region: FisheyeRegion) =>
+    req<FisheyeRegion>(`/api/projects/${id}/fisheye-region?source_id=${encodeURIComponent(sourceId)}`, {
       method: 'PUT',
       headers: jsonHeaders,
       body: JSON.stringify(region),
@@ -216,12 +243,20 @@ export interface FsListing {
   files: FsEntry[]
 }
 export interface SourceInfo {
-  kind: string | null
   duration_sec: number | null
+  duration_sec_total?: number
   fps?: number | null
   width?: number | null
   height?: number | null
   nb_frames?: number | null
+  sources?: Array<{
+    id: string
+    duration_sec: number | null
+    fps?: number | null
+    width?: number | null
+    height?: number | null
+    nb_frames?: number | null
+  }>
 }
 export interface StageStatus {
   stage: string
@@ -262,36 +297,42 @@ export interface FrameSelection {
 
 export interface FrameInfo {
   index: number
+  source_id: string
+  source_index: number
   timestamp_sec: number | null
   score?: { sharpness: number; features?: number } | null
 }
 
 export interface FramesManifest {
-  kind: string
   count: number
-  width: number | null
-  height: number | null
-  fps: number | null
-  selection: FrameSelection | null
+  sources: Array<{
+    id: string
+    label: string
+    role: SourceRole
+    projection: Projection
+    kind: string
+    count: number
+    width: number | null
+    height: number | null
+    fps: number | null
+    selection: FrameSelection | null
+  }>
   frames: FrameInfo[]
 }
 
 // generate_masks の manifest. kind により frame ごとの構造が異なる (fisheye は lenses, pinhole/erp は views).
-export interface MaskLensRecord {
-  lens: number
+export interface MaskImageRecord {
+  name: string
+  source_id: string
+  capture_index: number
   path: string
   coverage: number
-  coverage_warning?: boolean
-}
-export interface MaskFrameRecord {
-  index: number
-  lenses?: MaskLensRecord[]
-  views?: Array<{ view: string; lens: number; path: string; coverage: number; coverage_warning?: boolean }>
+  coverage_warning: boolean
 }
 export interface MasksManifest {
-  kind: string
+  version: number
   prompt?: string[]
-  frames: MaskFrameRecord[]
+  images: MaskImageRecord[]
 }
 
 // export_dataset の出力ディレクトリ (絶対パス).
@@ -313,13 +354,14 @@ export interface ExportInfo {
 export const frameImageUrl = (id: string, index: number, lens: number) =>
   `/api/projects/${id}/frames/${index}/image?lens=${lens}`
 // native fisheye の生成マスク PNG の URL.
-export const fisheyeMaskUrl = (id: string, index: number, lens: number) =>
-  `/api/projects/${id}/fisheye-mask/${index}?lens=${lens}`
-export const pinholeImageUrl = (id: string, index: number, view: string, lens: number, mask = false) =>
-  `/api/projects/${id}/pinhole/${index}/${encodeURIComponent(view)}?lens=${lens}${mask ? '&mask=true' : ''}`
+export const preparedImageUrl = (id: string, name: string) =>
+  `/api/projects/${id}/prepared-image?name=${encodeURIComponent(name)}`
+export const preparedMaskUrl = (id: string, name: string) =>
+  `/api/projects/${id}/prepared-mask?name=${encodeURIComponent(name)}`
 
 export type ParsedImageName = {
-  kind: 'native' | 'pinhole' | 'erp'
+  kind: 'native' | 'pinhole' | 'erp' | 'perspective'
+  sourceId: string
   view: string
   lens: number
   index: number
@@ -327,16 +369,18 @@ export type ParsedImageName = {
 
 // COLMAP image name を入力 workspace の 3 layout に分解する.
 export const parseImageName = (name: string): ParsedImageName | null => {
-  const native = name.match(/^(front|back)\/frame_(\d+)\.(?:jpg|jpeg|png)$/i)
+  const native = name.match(/^sources\/([^/]+)\/(front|back)\/frame_(\d+)\.(?:jpg|jpeg|png)$/i)
   if (native) {
-    return { kind: 'native', view: native[1], lens: native[1] === 'front' ? 0 : 1, index: Number(native[2]) }
+    return { kind: 'native', sourceId: native[1], view: native[2], lens: native[2] === 'front' ? 0 : 1, index: Number(native[3]) }
   }
-  const pinhole = name.match(/^(.+)_lens(\d+)\/frame_(\d+)\.(?:jpg|jpeg|png)$/i)
+  const pinhole = name.match(/^sources\/([^/]+)\/(.+)_lens(\d+)\/frame_(\d+)\.(?:jpg|jpeg|png)$/i)
   if (pinhole) {
-    return { kind: 'pinhole', view: pinhole[1], lens: Number(pinhole[2]), index: Number(pinhole[3]) }
+    return { kind: 'pinhole', sourceId: pinhole[1], view: pinhole[2], lens: Number(pinhole[3]), index: Number(pinhole[4]) }
   }
-  const erp = name.match(/^frame_(\d+)\.(?:jpg|jpeg|png)$/i)
-  if (erp) return { kind: 'erp', view: 'erp', lens: 0, index: Number(erp[1]) }
+  const perspective = name.match(/^sources\/([^/]+)\/camera_\d+\/frame_(\d+)\.(?:jpg|jpeg|png)$/i)
+  if (perspective) return { kind: 'perspective', sourceId: perspective[1], view: 'main', lens: 0, index: Number(perspective[2]) }
+  const erp = name.match(/^sources\/([^/]+)\/frame_(\d+)\.(?:jpg|jpeg|png)$/i)
+  if (erp) return { kind: 'erp', sourceId: erp[1], view: 'erp', lens: 0, index: Number(erp[2]) }
   return null
 }
 

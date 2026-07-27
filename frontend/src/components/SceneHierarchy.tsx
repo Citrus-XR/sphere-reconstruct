@@ -1,14 +1,15 @@
 import { useState } from 'react'
-import { frameReconMap, type FrameInfo, type ReconstructionData } from '../api/client'
+import { frameReconMap, type FrameInfo, type FramesManifest, type ReconstructionData } from '../api/client'
 import { useSettings } from '../ui/settings'
 
 // 左 Hierarchy: 抽出済み写真リスト (再構成前から) + 再構成の点群/カメラを表示・選択する.
 export const SceneHierarchy = ({
-  recon, frames, showPoints, setShowPoints, showCams, setShowCams,
+  recon, frames, sources, showPoints, setShowPoints, showCams, setShowCams,
   selectedCameraId, onSelectCamera, selectedFrameIndex, onSelectFrame,
 }: {
   recon: ReconstructionData | undefined
   frames: FrameInfo[] | undefined
+  sources: FramesManifest['sources'] | undefined
   showPoints: boolean; setShowPoints: (v: boolean) => void
   showCams: boolean; setShowCams: (v: boolean) => void
   selectedCameraId: number | null; onSelectCamera: (id: number) => void
@@ -29,7 +30,12 @@ export const SceneHierarchy = ({
             <span style={{ flex: 1 }}>{expandPhotos ? '▾' : '▸'} {t('photos')}</span>
             <span className="mono" style={{ fontSize: 10, color: 'var(--fg-mute)' }}>{frames.length}</span>
           </button>
-          {expandPhotos && frames.map(f => {
+          {expandPhotos && (sources ?? []).map(source => <div key={source.id}>
+            <div className="hier-item" style={{ paddingLeft: 22, fontWeight: 600 }}>
+              <span style={{ flex: 1 }}>{source.label}</span>
+              <span className="mono" style={{ fontSize: 10 }}>{source.count}</span>
+            </div>
+            {frames.filter(frame => frame.source_id === source.id).map(f => {
             // 状態: 再構成前=灰, 登録済=緑, 未登録(失敗)=赤.
             const r = reg.get(f.index)
             const color = !recon ? 'var(--border)' : r ? '#3ad07a' : 'var(--error)'
@@ -39,11 +45,12 @@ export const SceneHierarchy = ({
                 style={{ paddingLeft: 28, fontSize: 12 }} onClick={() => onSelectFrame(f.index)}
                 aria-current={selectedFrameIndex === f.index ? 'true' : undefined}>
                 <span className="hier-badge" style={{ background: color }} />
-                <span style={{ flex: 1 }}>{t('frameLabel')} {f.index}</span>
+                <span style={{ flex: 1 }}>{t('frameLabel')} {f.source_index}</span>
                 {f.score && <span className="mono" style={{ fontSize: 10, color: 'var(--fg-mute)' }}>{f.score.sharpness.toFixed(0)}</span>}
               </button>
             )
-          })}
+            })}
+          </div>)}
         </>
       )}
 

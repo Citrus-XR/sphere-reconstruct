@@ -27,7 +27,7 @@ export interface StageParams {
   siftEdgeThreshold: number
   siftAffineDsp: boolean
   matcherType: 'bruteforce' | 'lightglue'
-  pairing: 'sequential' | 'exhaustive' | 'vocab_tree'
+  pairing: 'auto' | 'sequential' | 'exhaustive' | 'vocab_tree'
   matchingUseGpu: boolean
   overlap: number
   loopClosure: boolean
@@ -109,7 +109,7 @@ export const DEFAULT_PARAMS: StageParams = {
   siftEdgeThreshold: 0,
   siftAffineDsp: false,
   matcherType: 'bruteforce',
-  pairing: 'sequential',
+  pairing: 'auto',
   matchingUseGpu: true,
   overlap: 4,
   loopClosure: false,
@@ -166,14 +166,13 @@ export const paramsForStage = (
           : 1,
         max_frames: params.maxFrames,
       }
-    case 'reproject_views':
-      return { size: params.size, fov_deg: 90 }
+    case 'prepare_images':
+      return { reconstruction_mode: mode, size: params.size, fov_deg: 90 }
     case 'generate_masks':
       return {
         max_inference_size: params.downsampleOn ? params.maskSize : 0,
         dilate_px: params.dilateOn ? params.dilate : 0,
         prompt: params.prompt,
-        layout: mode === 'native_fisheye' ? 'fisheye' : mode === 'pinhole_rig' ? 'pinhole' : 'erp',
       }
     case 'extract_features':
       return {
@@ -235,7 +234,7 @@ export const allParams = (
 ): Record<string, Record<string, unknown>> => {
   const stages = [
     'extract_frames',
-    'reproject_views',
+    'prepare_images',
     'generate_masks',
     'extract_features',
     'match_features',

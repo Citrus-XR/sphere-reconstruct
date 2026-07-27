@@ -8,6 +8,7 @@ import sqlite3
 from pathlib import Path
 
 from ..colmap import runner as colmap_runner
+from ..colmap.input_workspace import InputSpec
 from ..domain.artifacts import FileRef, StageManifest
 from ..domain.pipeline_state import StageName
 from ..infrastructure.filesystem import sha256_file
@@ -20,15 +21,15 @@ from .colmap_progress import counted_progress
 @register
 class MatchFeatures(Stage):
     name = StageName.MATCH_FEATURES
-    impl_version = "1.1"
+    impl_version = "2.0"
 
     def normalize_params(self, raw: dict) -> dict:
         feature_type = str(raw.get("feature_type", "SIFT")).upper()
         matcher = str(raw.get("matcher_type", "bruteforce")).lower()
         if matcher not in {"bruteforce", "lightglue"}:
             raise ValueError(f"unsupported matcher type: {matcher}")
-        pairing = str(raw.get("pairing", "sequential")).lower()
-        if pairing not in {"sequential", "exhaustive", "vocab_tree"}:
+        pairing = str(raw.get("pairing", "auto")).lower()
+        if pairing not in {"auto", "sequential", "exhaustive", "vocab_tree"}:
             raise ValueError(f"unsupported pairing strategy: {pairing}")
         return {
             "feature_type": feature_type,
@@ -46,6 +47,7 @@ class MatchFeatures(Stage):
         candidates = [
             ctx.project_dir / "manifests" / "extract_features.json",
             ctx.project_dir / "extract_features" / "database.db",
+            ctx.project_dir / "extract_features" / "input_spec.json",
         ]
         return [
             FileRef(
@@ -70,6 +72,7 @@ class MatchFeatures(Stage):
         logs_dir.mkdir(parents=True, exist_ok=True)
 
         settings = get_settings()
+        spec = InputSpec.read(ctx.project_dir / "extract_features" / "input_spec.json")
         colmap_bin = colmap_runner.resolve_colmap_bin(settings.binaries.colmap or None)
         matching_type = _matching_type(ctx.params["feature_type"], ctx.params["matcher_type"])
         extra_args = [
@@ -103,7 +106,7 @@ class MatchFeatures(Stage):
                 high=0.95,
             ),
         }
-        pairing = ctx.params["pairing"]
+        pairing = _resolve_pairing(ctx.params["pairing"], spec, settings, ctx.params["feature_type"])
         if pairing == "exhaustive":
             colmap_runner.exhaustive_matcher(colmap_bin, **common)
         elif pairing == "vocab_tree":
@@ -128,11 +131,12 @@ class MatchFeatures(Stage):
                 **common,
             )
 
-        summary = _matching_summary(database_path)
+        summary = _matching_summary(database_path, spec)
         summary.update(
             {
                 "matching_type": matching_type,
                 "pairing": pairing,
+                "requested_pairing": ctx.params["pairing"],
                 "loop_closure": ctx.params["loop_closure"] if pairing == "sequential" else False,
                 "gpu_enabled": ctx.params["use_gpu"],
             }
@@ -156,13 +160,47 @@ def _matching_type(feature_type: str, matcher_type: str) -> str:
     return f"{family}_{suffix}"
 
 
-def _matching_summary(database_path: Path) -> dict:
+def _resolve_pairing(requested: str, spec: InputSpec, settings, feature_type: str) -> str:
+    if requested != "auto":
+        return requested
+    if spec.source_count <= 1:
+        return "sequential"
+    if spec.image_count <= 500:
+        return "exhaustive"
+    if feature_type.startswith("SIFT") and settings.binaries.vocab_tree:
+        return "vocab_tree"
+    raise RuntimeError(
+        "500 枚を超える mixed-source dataset には SIFT vocab tree を設定するか、"
+        "pairing strategy を明示してください"
+    )
+
+
+def _matching_summary(database_path: Path, spec: InputSpec) -> dict:
     with sqlite3.connect(database_path) as connection:
         raw_pairs = connection.execute("SELECT COUNT(*) FROM matches WHERE rows > 0").fetchone()[0]
         row = connection.execute(
             "SELECT COUNT(*), MIN(rows), AVG(rows), MAX(rows), SUM(rows) "
             "FROM two_view_geometries WHERE rows > 0"
         ).fetchone()
+        image_names = dict(connection.execute("SELECT image_id, name FROM images").fetchall())
+        verified_pair_ids = [
+            int(value[0])
+            for value in connection.execute(
+                "SELECT pair_id FROM two_view_geometries WHERE rows > 0"
+            ).fetchall()
+        ]
+    source_by_name = {image["name"]: image["source_id"] for image in spec.images}
+    source_edges: dict[str, int] = {}
+    cross_source_pairs = 0
+    for pair_id in verified_pair_ids:
+        first_id, second_id = _pair_ids(pair_id)
+        first_source = source_by_name.get(image_names.get(first_id, ""))
+        second_source = source_by_name.get(image_names.get(second_id, ""))
+        if first_source is None or second_source is None or first_source == second_source:
+            continue
+        cross_source_pairs += 1
+        key = "|".join(sorted((first_source, second_source)))
+        source_edges[key] = source_edges.get(key, 0) + 1
     return {
         "raw_pairs": int(raw_pairs),
         "verified_pairs": int(row[0]),
@@ -170,7 +208,16 @@ def _matching_summary(database_path: Path) -> dict:
         "average_inliers": float(row[2] or 0.0),
         "maximum_inliers": int(row[3] or 0),
         "total_inliers": int(row[4] or 0),
+        "cross_source_verified_pairs": cross_source_pairs,
+        "source_pair_counts": source_edges,
     }
+
+
+def _pair_ids(pair_id: int) -> tuple[int, int]:
+    maximum_image_id = 2_147_483_647
+    second = pair_id % maximum_image_id
+    first = (pair_id - second) // maximum_image_id
+    return first, second
 
 
 def _file_ref(path: Path, ctx: StageContext) -> FileRef:
