@@ -117,6 +117,7 @@ def select_spatial(
     candidates: list[Candidate],
     motion_fn: Callable[[int, int], float],
     config: SpatialConfig,
+    progress: Callable[[int, int], None] | None = None,
 ) -> SpatialResult:
     """2 層 + 貪欲な空間間隔でフレームを選ぶ.
 
@@ -152,8 +153,11 @@ def select_spatial(
     selected = [valid[0]]
     last = valid[0]
     window: list[tuple[Candidate, float]] = []  # (候補, last からの motion)
-    for c in valid[1:]:
+    motion_total = max(0, len(valid) - 1)
+    for motion_number, c in enumerate(valid[1:], 1):
         m = motion_fn(last.index, c.index)
+        if progress is not None:
+            progress(motion_number, motion_total)
         window.append((c, m))
         if m >= config.target_motion:
             # 最小間隔を満たす候補の中で quality 最大を選ぶ.

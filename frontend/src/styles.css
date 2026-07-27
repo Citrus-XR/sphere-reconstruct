@@ -115,6 +115,8 @@ body { margin: 0; background: var(--bg); color: var(--fg); }
 
 /* 環形ゲージ (下部バー): CPU / RAM / GPU util / VRAM を省スペースで. GPU 名はホバー時のみ. */
 .ring-gauge { display: inline-flex; align-items: center; gap: 5px; }
+.progress-ring-indeterminate { transform-origin: center; animation: progress-ring-spin 1s linear infinite; }
+@keyframes progress-ring-spin { to { transform: rotate(270deg); } }
 .ring-gauge svg { flex: none; display: block; }
 .ring-text { display: inline-flex; flex-direction: column; line-height: 1.15; white-space: nowrap; }
 .ring-text b { font-size: 9px; letter-spacing: .04em; color: var(--fg-mute); font-weight: 600; }

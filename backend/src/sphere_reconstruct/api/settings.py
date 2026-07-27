@@ -21,6 +21,7 @@ async def read_settings() -> dict[str, Any]:
         "workspace": {"root": str(s.workspace.root)},
         "filesystem": {"allowed_roots": [str(p) for p in s.filesystem.allowed_roots]},
         "binaries": s.binaries.model_dump(),
+        "frame_extraction": s.frame_extraction.model_dump(),
         "sam3": s.sam3.model_dump(),
         "aliked": s.aliked.model_dump(),
         "log": s.log.model_dump(),

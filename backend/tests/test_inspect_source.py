@@ -3,7 +3,7 @@
 from pathlib import Path
 
 from sphere_reconstruct.domain.source import MediaKind, Projection, SourceAdapter, SourceRole
-from sphere_reconstruct.pipeline.stage import SourceContext
+from sphere_reconstruct.pipeline.stage import ProgressReporter, SourceContext
 from sphere_reconstruct.stages.inspect_source import InspectSource
 
 
@@ -27,7 +27,8 @@ def test_erp_image_directory_is_fingerprinted_as_a_manifest(tmp_path):
                     ordinal=0,
                     enabled=True,
                 ),
-            )
+            ),
+            "progress": ProgressReporter(lambda *_args: None),
         },
     )()
     first = InspectSource().collect_inputs(context)

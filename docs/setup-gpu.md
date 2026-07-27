@@ -1,16 +1,17 @@
 # GPU / native runtime setup
 
-Platform ごとの native runtime、GPU capability、mixed-source input、SAM3、LichtFeld Studio training の
-要件をまとめる。通常は start script に dependency sync と Doctor を任せ、system Python と project
-venv を混在させない。
+Platform ごとの native runtime、FFmpeg hardware decode、COLMAP GPU capability、SAM3、LichtFeld Studio の
+要件をまとめる。通常は start script に dependency sync と Doctor を任せ、system Python と project venv
+を混在させない。
 
 ```text
 GET /api/system/doctor
 cd backend && uv run sphere-doctor
 ```
 
-Doctor は workspace、filesystem roots、FFmpeg / FFprobe、COLMAP 4.1 capability、optional SAM3、
-CUDA / cuDNN、cuDSS を検査する。
+Doctor は workspace、filesystem roots、FFmpeg / FFprobe、hardware acceleration method、COLMAP 4.1
+capability、optional SAM3、CUDA / cuDNN、cuDSS を検査する。FFmpeg の method list は build capability で、
+実 source の decode 可否は Frame extraction 開始時の 1-frame probe で確定する。
 
 ## Windows
 
@@ -47,6 +48,9 @@ COLMAP 4.1+ と FFmpeg を用意する。
 `filesystem.allowed_roots` が空なら user home を file browser root にする。Mount / external drive は
 config または `SPHERE_FILESYSTEM__ALLOWED_ROOTS` で指定する。
 
+NVIDIA は `cuda`、Intel は `qsv`、AMD / Intel Linux は `vaapi` を candidate にできる。VAAPI device
+selection が特殊な machine は `hwaccel="vaapi"` を明示し、Doctor と actual source probe の両方を確認する。
+
 ## macOS
 
 ```bash
@@ -54,10 +58,57 @@ brew install colmap ffmpeg
 ./scripts/start-macos.sh
 ```
 
-CUDA を前提にせず SIFT、CPU Mapper、CPU BA を基本経路とする。SAM3 は利用 runtime に合わせて
-optional install する。
+Frame extraction は `videotoolbox` を probe する。COLMAP は CUDA を前提にせず SIFT、CPU Mapper、CPU BA
+を基本経路とする。SAM3 は利用 runtime に合わせて optional install する。
 
-## COLMAP camera / rig requirements
+## FFmpeg hardware decode
+
+Default:
+
+```toml
+[frame_extraction]
+hwaccel = "auto"
+require_hwaccel = false
+score_workers = 0
+```
+
+`auto` の candidate priority は CUDA、VideoToolbox、QSV、D3D11VA、D3D12VA、DXVA2、VAAPI、VDPAU。
+FFmpeg が method を表示しても driver / codec / pixel format が使えない場合があるため、actual input の
+1 frame と software filter transfer を probe する。成功した method だけを本番 command の `-i` 前へ
+`-hwaccel <method>` として渡す。
+
+Dedicated NVIDIA machine:
+
+```toml
+[frame_extraction]
+hwaccel = "cuda"
+require_hwaccel = true
+score_workers = 0
+```
+
+`require_hwaccel=true` の時は probe failure を error にする。Optional mode の software fallback も Console
+へ理由を表示し、無表示では切り替えない。
+
+INSV spatial extraction は 2 video stream を 1 FFmpeg process / 1 demux pass で candidate JPEG pair にする。
+採用 pair は再 encode せず正式 output へ移す。Interval path も 2 stream を同じ process で出力し、巨大
+container を lens ごとに重複読みしない。
+
+RTX 4070 Ti、3840² HEVC sample の測定は CUDA 8.98× realtime、software 0.85× realtime。両 path の
+同一 frame JPEG は全 pixel 一致した。Hardware decoder は frame selection、JPEG quality、COLMAP input
+resolution を変更しない。
+
+## CPU saturation during frame selection
+
+`score_workers=0` は logical CPU 全数を sharpness / exposure / SIFT candidate scoring に使う。正数なら
+worker 数を固定できる。OpenCV の process-global internal threads は worker pool 中だけ 1 にし、各 worker
+が独立 SIFT instance を持つ。Pool 後に元の OpenCV thread count を復元するため、sequential optical flow
+は library の parallel path を利用できる。
+
+Optical flow selection 自体は前回採用 frame に依存するため、pair decision の外側 loop は sequential。
+候補 decode と quality scoring は並列 / hardware 化されるが、この dependency を壊す speculative selection
+は結果を変えるため行わない。
+
+## COLMAP camera and rig requirements
 
 Mixed source は 1 database 内で複数 camera model を使う。必要 capability:
 
@@ -66,21 +117,21 @@ Mixed source は 1 database 内で複数 camera model を使う。必要 capabil
 - Multiple rig configuration
 - Global Mapper
 
-Feature extraction は camera group ごとに別 invocation を行い、同じ database に追記する。Phone
-still は EXIF orientation を pixel へ適用し、model / resolution / 35 mm focal signature で grouping
-する。Extracted phone video は同一 lens/zoom を 1 calibration group にする。
+Feature extraction は camera group ごとに別 invocation を行い、同じ database に追記する。Phone still は
+EXIF orientation を pixel へ適用し、model / resolution / 35 mm focal signature で grouping する。Phone
+video は同一 lens/zoom を 1 calibration group にする。
 
-Raw dual-fisheye は calibration adapter が必要。現在は Insta360 INSV。別 camera は stitched ERP
-または新 adapter で追加する。
+Raw dual-fisheye は calibration adapter が必要。現在は Insta360 INSV。別 camera は stitched ERP または
+新 adapter で追加する。
 
 ## Matching and scale
 
-Mixed source では temporal adjacency だけでは cross-source edge を作れない。500 images 以下の Auto
-は Exhaustive。大規模 SIFT dataset は `binaries.vocab_tree` を指定する。
+Mixed source では temporal adjacency だけでは cross-source edge を作れない。500 images 以下の Auto は
+Exhaustive。大規模 SIFT dataset は `binaries.vocab_tree` を指定する。
 
 Global Mapper は悪い focal prior / outlier match に敏感。Phone EXIF focal を維持し、video に EXIF が
-無い場合は初期 focal を refinement する。SfM world scale は gauge freedom を持つため、alignment
-stage は primary reference trajectory diameter を 1 model unit に正規化する。
+無い場合は初期 focal を refinement する。SfM world scale は gauge freedom を持つため、alignment Step は
+primary reference trajectory diameter を 1 model unit に正規化する。
 
 ## Bundle Adjustment
 
@@ -123,33 +174,17 @@ training_prompt = "person,camera operator,selfie stick,tripod,person shadow,self
 feature_prompt = "person,camera operator,selfie stick,tripod,person shadow,selfie stick shadow,tripod shadow,animal,sky,tree,vehicle,airplane,water"
 ```
 
-Feature masks は COLMAP `ImageReader.mask_path` に渡す。Training masks は SfM に入れず、final export で
-優先する。Training が無効なら Feature を export fallback にし、両方無効なら mask directory を
-出力しない。
+Feature masks は COLMAP `ImageReader.mask_path` に渡す。Training masks は SfM に入れず final export で優先
+する。Training が無効なら Feature を export fallback にし、両方無効なら mask directory を出力しない。
 
-Native fisheye の circle は camera valid-region であり SAM3 channel ではない。Feature masks が無効でも
-feature extraction には circle を使うが、両 SAM3 channel が無効なら LFStudio export には mask を
-含めない。
+Native fisheye circle は camera valid-region であり SAM3 channel ではない。Feature masks が無効でも
+feature extraction には circle を使う。2 Step を同時に生成すると SAM3 model を各 process で 1 回ずつ
+load する。独立性を優先し、Training mask の再生成が feature / matching / reconstruction を invalidate
+しない。
 
-2 Step を同時に生成すると SAM3 model を各 process で 1 回ずつ load する。独立性を優先し、Training
-mask の再生成が高価な feature / matching / reconstruction を invalidation しない構成にしている。
-
-Mask は image relative path を mirror し、white=keep / black=ignore。Prepared image と同じ orientation /
-dimensions を保証する。Photo / Dataset Camera Inspector では両 channel が存在する場合に切り替えて
-preview できる。
-
-## FFmpeg
-
-INSV dual HEVC stream と通常 video を sequential decode できる build が必要。
-
-```toml
-[binaries]
-ffmpeg = "D:/tools/ffmpeg/bin/ffmpeg.exe"
-ffprobe = "D:/tools/ffmpeg/bin/ffprobe.exe"
-```
-
-各 video は同じ frame-selection parameter を使う。長い selection は 1 filter graph 内の bounded branch
-へ分け、frame ごとの random seek を行わない。
+各 mask PNG は write 完了後に running-stage preview index へ追加する。Photo Inspector はこの index を
+poll し、未完成 file を公開せずに生成済み画像だけを即時 preview する。Cancel / failure 時の temporary
+index と PNG は supervisor が削除し、以前の final artifact と混在させない。
 
 ## LichtFeld Studio
 
@@ -160,41 +195,17 @@ Mixed-camera COLMAP loader は image ごとに projection を読む。Supported 
 - `OPENCV_FISHEYE` と supported fisheye variants
 - `EQUIRECTANGULAR`
 
-Distorted / fisheye / equirectangular を含む dataset は MRNF/MCMC + GUT を使う。IGS+ は GUT と併用
-できず、equirectangular を扱えない。Conservative fallback は 360° source を pinhole cubemap にし、
-phone camera を undistort する。
+Distorted / fisheye / equirectangular dataset は MRNF/MCMC + GUT を使う。IGS+ は GUT と併用できず、
+equirectangular を扱えない。Conservative fallback は 360° source を pinhole cubemap にし、phone camera
+を undistort する。
 
 ```text
 LichtFeld-Studio --config <dataset>/train_configs/train_config.mrnf.json --data-path <dataset>
 ```
 
-Recommended MRNF は GUT、resolved segment masks、PPISP、novel-view controller を有効にする。Mask が
-無い export では `mask_mode=none`。PPISP controller は 30k run の step 25,000 で activation し、最後
-5,000 step は Gaussian を固定して distill する。PPISP は exposure / color / vignetting / CRF
-compensation であり denoiser ではない。
-
-Final model を開くときは `.ply` と同名 `.ppisp` sidecar の両方を load する。PLY 単体では appearance
-correction と controller が無い。Checkpoint は training resume 用。
-
-LichtFeld Studio v0.5.3 CLI の実効 dataset default:
-
-```text
-resize_factor = 1
-max_width = 3840
-```
-
-`Undistort: 3840x3840 -> 768x768` は distorted camera を読む際の optional target precompute log。
-`undistort=false + GUT` では camera intrinsics / image dimensions を 768 へ変更しない。Full-resolution を
-明示する場合は `-r 1 --max-width 0`。12 GB GPU では 3840² RGB float tensor だけで約 169 MiB なので、
-PPISP controller と GUT の buffers を含めた peak を実測で確認する。OOM の場合は `--max-width 2560`
-または `2048` を選び、precompute log だけを理由に resolution を変更しない。
-
-Measured mixed run は RTX 4070 Ti 12 GB で 30k / 3,773.552 s、8.0 iter/s、525,433 internal final
-Gaussians。Final PLY は 517,387 Gaussians、PPISP sidecar は 3 cameras / 80 frames / 3 controllers を
-metadata mapping 付きで reload できた。この計測は dual-mask 分離前の Training-mask 相当 artifact。
-
-Training output directory は LFStudio 側で選ぶ。本 application は管理しない。Mixed-camera training は
-loader / GUT 上は対応するが upstream end-to-end test が無いため experimental とする。
+Recommended MRNF は GUT、resolved segment mask、PPISP、novel-view controller を有効にする。PPISP は
+appearance compensation であり denoiser ではない。Final model は `.ply` と同名 `.ppisp` sidecar を
+一緒に load する。Training output directory は LFStudio 側で管理し、本 application は制御しない。
 
 ## Service deployment
 
@@ -202,14 +213,13 @@ loader / GUT 上は対応するが upstream end-to-end test が無いため expe
 SPHERE_CONFIG=D:/path/to/config.remote.toml
 ```
 
-更新時は listener の scheduled service とその worker tree だけを停止し、machine の Python process を
-一括停止しない。Source mutation は active job 中に 409 を返す。
+更新時は listener の scheduled service と worker tree だけを停止し、machine の Python process を一括
+停止しない。Active job 中は deployment を待ち、Source mutation は active job 中に 409 を返す。
 
 ## Verification
 
 ```bash
 cd backend
-uv sync --extra dev --extra imaging
 uv run ruff check src tests
 uv run pytest -q
 uv run sphere-doctor
@@ -217,7 +227,6 @@ uv run sphere-doctor
 
 ```bash
 cd frontend
-pnpm install --frozen-lockfile
 pnpm build
 pnpm test:e2e
 ```

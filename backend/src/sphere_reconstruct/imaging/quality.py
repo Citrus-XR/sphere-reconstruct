@@ -13,6 +13,7 @@ cv2 / numpy のみ. torch 不要なので単体テスト可能. ALIKED (学習�
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 
 import numpy as np
@@ -46,16 +47,17 @@ def exposure_stats(gray: np.ndarray, low: int = 8, high: int = 247) -> ExposureS
     return ExposureStats(under_ratio=under, over_ratio=over, mean=float(gray.mean()))
 
 
-# SIFT インスタンスは生成コストがあるのでモジュールレベルで遅延生成し使い回す.
-_sift = None
+# SIFT instance は thread 間で共有せず、candidate worker ごとに再利用する。
+_sift_by_thread = threading.local()
 
 
 def _get_sift(max_features: int = 4000):
-    global _sift
-    if _sift is None:
+    sift = getattr(_sift_by_thread, "value", None)
+    if sift is None:
         cv2 = _cv2()
-        _sift = cv2.SIFT_create(nfeatures=max_features)
-    return _sift
+        sift = cv2.SIFT_create(nfeatures=max_features)
+        _sift_by_thread.value = sift
+    return sift
 
 
 def sift_feature_count(gray: np.ndarray, downscale: int = 2) -> int:

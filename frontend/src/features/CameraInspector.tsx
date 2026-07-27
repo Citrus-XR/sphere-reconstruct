@@ -21,10 +21,14 @@ import {
 } from './CaptureInspectorParts'
 
 // カメラ選択時に Inspector に表示: 対応画像 + feature/training マスクの用途・重ね表示.
-export const CameraInspector = ({ projectId, image, sources }: {
+export const CameraInspector = ({
+  projectId, image, sources, featureMaskRunning, trainingMaskRunning,
+}: {
   projectId: string
   image: ReconstructionImage
   sources: ProjectSource[]
+  featureMaskRunning: boolean
+  trainingMaskRunning: boolean
 }) => {
   const { t } = useSettings()
   const [view, setView] = useState<CaptureView>('orig')
@@ -38,10 +42,12 @@ export const CameraInspector = ({ projectId, image, sources }: {
   const { data: featureMasks } = useQuery({
     queryKey: ['masks', projectId, 'feature'],
     queryFn: () => api.getMasks(projectId, 'feature'), retry: false,
+    refetchInterval: featureMaskRunning ? 1000 : false,
   })
   const { data: trainingMasks } = useQuery({
     queryKey: ['masks', projectId, 'training'],
     queryFn: () => api.getMasks(projectId, 'training'), retry: false,
+    refetchInterval: trainingMaskRunning ? 1000 : false,
   })
   const masksByPurpose = {
     feature: featureMasks?.images.find(record => record.name === image.name),
@@ -53,8 +59,11 @@ export const CameraInspector = ({ projectId, image, sources }: {
     ? maskPurpose
     : masksByPurpose.training ? 'training' : 'feature'
   const maskRec = masksByPurpose[effectivePurpose]
+  const maskManifest = effectivePurpose === 'feature' ? featureMasks : trainingMasks
   const originalUrl = parsed ? preparedImageUrl(projectId, image.name) : null
-  const maskUrl = maskRec ? preparedMaskUrl(projectId, image.name, effectivePurpose) : null
+  const maskUrl = maskRec
+    ? preparedMaskUrl(projectId, image.name, effectivePurpose, maskManifest?.revision)
+    : null
 
   return (
     <div>

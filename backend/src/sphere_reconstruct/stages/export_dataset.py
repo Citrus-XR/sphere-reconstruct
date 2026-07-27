@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+from collections.abc import Callable
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from PIL import Image as PilImage
@@ -40,13 +41,13 @@ from ..domain.mask_artifact import (
 from ..domain.pipeline_state import StageName
 from ..infrastructure.filesystem import sha256_file
 from ..pipeline.manifest import register
-from ..pipeline.stage import Stage, StageContext, new_manifest
+from ..pipeline.stage import ProgressSpan, Stage, StageContext, new_manifest
 
 
 @register
 class ExportDataset(Stage):
     name = StageName.EXPORT_DATASET
-    impl_version = "2.0"
+    impl_version = "2.1"
 
     def collect_inputs(self, ctx: StageContext) -> list[FileRef]:
         candidates = [
@@ -93,13 +94,14 @@ class ExportDataset(Stage):
 
     def execute(self, ctx: StageContext) -> StageManifest:
         manifest = new_manifest(self.name, self.impl_version)
-        manifest.inputs = self.collect_inputs(ctx)
+        manifest.inputs = ctx.inputs_for(self)
         manifest.params = ctx.params
 
         model_dir = ctx.project_dir / "align_reconstruction" / "sparse" / "0"
         if not (model_dir / "cameras.bin").exists():
             raise RuntimeError("align_reconstruction must run first (sparse/0 missing)")
 
+        ctx.progress.info("reading aligned reconstruction", progress=0.0, key="log.export_start")
         recon = colmap_model.read_model(model_dir)
         spec = InputSpec.read(ctx.project_dir / "extract_features" / "input_spec.json")
         out = ctx.stage_out_dir
@@ -111,19 +113,20 @@ class ExportDataset(Stage):
         )
         if mask_purpose is not None and not mask_manifest_path(ctx.project_dir, mask_purpose).is_file():
             raise RuntimeError(f"{stage_for(mask_purpose).value} must run before export_dataset")
+        ctx.progress.tick(0.1, message="export inputs loaded", key="log.export_inputs_loaded")
 
         # 1) alignment stage が作った viewer preview を同梱する.
         preview_dir = out / "preview"
         ctx.progress.info(
-            "building web preview (reconstruction.json + points.bin)",
-            progress=0.2,
+            "copying web preview (reconstruction.json + points.bin)",
+            progress=0.12,
             key="log.export_web_preview",
         )
         shutil.copytree(ctx.project_dir / "align_reconstruction" / "preview", preview_dir)
         preview_points = min(len(recon.points3D), ctx.params["max_preview_points"])
         ctx.progress.info(
             f"preview: {preview_points}/{len(recon.points3D)} points",
-            progress=0.5,
+            progress=0.2,
             key="log.export_preview_points",
             args={"written": preview_points, "total": len(recon.points3D)},
         )
@@ -134,7 +137,7 @@ class ExportDataset(Stage):
         # 2) export_dataset 自体を LFStudio が直接選択できるデータセット root にする.
         if ctx.params["include_dataset"]:
             ctx.progress.info(
-                "assembling standard COLMAP dataset", progress=0.6, key="log.export_assemble_dataset"
+                "assembling standard COLMAP dataset", progress=0.22, key="log.export_assemble_dataset"
             )
             ds = out
             ds_sparse = ds / "sparse" / "0"
@@ -147,24 +150,49 @@ class ExportDataset(Stage):
             # 画像名は images.bin の相対 path をそのまま保つ.
             recon_images = ctx.project_dir / "extract_features" / "images"
             registered_names = {image.name for image in recon.images.values()}
-            for name in sorted(registered_names):
+            sorted_names = sorted(registered_names)
+            image_copy_span = ProgressSpan(ctx.progress, 0.25, 0.45)
+            for image_number, name in enumerate(sorted_names, 1):
                 source = recon_images / name
                 if not source.is_file():
                     raise RuntimeError(f"registered training image is missing: {name}")
                 _link_or_copy(source, ds_images / name)
+                image_copy_span.tick(
+                    image_number / max(1, len(sorted_names)),
+                    message=f"copy training image {image_number}/{len(sorted_names)}",
+                    key="log.export_copy_images",
+                    args={"cur": image_number, "tot": len(sorted_names)},
+                )
+            mask_copy_span = ProgressSpan(ctx.progress, 0.45, 0.55)
             mask_files_copied = _copy_masks(
                 ctx.project_dir,
                 mask_purpose,
                 ds / "masks",
                 registered_names,
+                progress=lambda current, total: mask_copy_span.tick(
+                    current / max(1, total),
+                    message=f"copy training mask {current}/{total}",
+                    key="log.export_copy_masks",
+                    args={"cur": current, "tot": total},
+                ),
             )
             primary_prefix = f"sources/{spec.primary_source_id}/"
             if not any(name.startswith(primary_prefix) for name in registered_names):
                 primary_prefix = None
+            image_validation_span = ProgressSpan(ctx.progress, 0.55, 0.75)
+            mask_validation_span = ProgressSpan(ctx.progress, 0.75, 0.9)
             validation = _validate_lf_dataset(
                 ds,
                 recon,
                 reference_prefix=primary_prefix,
+                progress=lambda phase, current, total: (
+                    image_validation_span if phase == "images" else mask_validation_span
+                ).tick(
+                    current / max(1, total),
+                    message=f"validate {phase} {current}/{total}",
+                    key="log.export_validate_progress",
+                    args={"phase": phase, "cur": current, "tot": total},
+                ),
             )
             source_registration = _source_registration(recon, spec)
             if not validation["loadable"]:
@@ -253,7 +281,7 @@ class ExportDataset(Stage):
             ctx.progress.info(
                 f"train configs: cap_max={cfg_info['max_cap']}, camera={cfg_info['camera_class']}, "
                 f"warnings={cfg_info['warnings']}",
-                progress=0.9,
+                progress=0.95,
                 key="log.export_train_configs",
                 args={
                     "cap": cfg_info["max_cap"],
@@ -276,7 +304,7 @@ class ExportDataset(Stage):
             "lfstudio_training_metrics": "external",
             "source_registration": _source_registration(recon, spec),
         }
-        ctx.progress.info("export_dataset done", progress=1.0, key="log.export_done")
+        ctx.progress.info("export_dataset done", progress=0.99, key="log.export_done")
         return manifest
 
 
@@ -295,12 +323,16 @@ def _copy_masks(
     purpose: MaskPurpose | None,
     destination_dir: Path,
     image_names: set[str],
+    progress: Callable[[int, int], None] | None = None,
 ) -> int:
     if purpose is None:
         return 0
     records = records_by_name(load_mask_manifest(project_dir, purpose))
     count = 0
-    for image_name in sorted(image_names):
+    sorted_names = sorted(image_names)
+    for image_number, image_name in enumerate(sorted_names, 1):
+        if progress is not None:
+            progress(image_number, len(sorted_names))
         record = records.get(image_name)
         if record is None:
             continue
@@ -316,6 +348,7 @@ def _validate_lf_dataset(
     recon: colmap_model.Reconstruction,
     *,
     reference_prefix: str | None = None,
+    progress: Callable[[str, int, int], None] | None = None,
 ) -> dict:
     images_root = dataset_dir / "images"
     masks_root = dataset_dir / "masks"
@@ -326,7 +359,10 @@ def _validate_lf_dataset(
     missing_camera_references: list[dict] = []
     valid_images: list[tuple[colmap_model.Image, Path, tuple[int, int]]] = []
 
-    for image in recon.images.values():
+    reconstruction_images = list(recon.images.values())
+    for image_number, image in enumerate(reconstruction_images, 1):
+        if progress is not None:
+            progress("images", image_number, len(reconstruction_images))
         relative = _safe_relative_path(image.name)
         if relative is None:
             invalid_image_paths.append(image.name)
@@ -364,7 +400,9 @@ def _validate_lf_dataset(
     missing_masks: list[str] = []
     corrupt_masks: list[str] = []
     mask_size_mismatches: list[dict] = []
-    for image, relative, expected_size in valid_images:
+    for image_number, (image, relative, expected_size) in enumerate(valid_images, 1):
+        if progress is not None:
+            progress("masks", image_number, len(valid_images))
         mask_path = _find_mask_path(masks_root, relative)
         if mask_path is None:
             missing_masks.append(image.name)

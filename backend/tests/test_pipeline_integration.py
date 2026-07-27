@@ -105,6 +105,17 @@ async def _run_pipeline(tmp_workspace: Path, src: Path):
         st2, err2 = await _wait_job(db, j2, 60)
         assert st2 == "succeeded", f"extract failed: {err2}"
 
+        progress_rows = await (
+            await db.conn.execute(
+                "SELECT progress, msg_key FROM event WHERE job_id=? AND progress IS NOT NULL ORDER BY id",
+                (j2,),
+            )
+        ).fetchall()
+        progress_values = [float(row["progress"]) for row in progress_rows]
+        assert progress_values == sorted(progress_values)
+        assert progress_values[-1] == 1.0
+        assert progress_rows[-1]["msg_key"] == "log.stage_published"
+
         project_dir = tmp_workspace / "projects" / p.id
         assert (project_dir / "inspect_source" / "sources.json").exists()
         mf_path = project_dir / "extract_frames" / "manifest_frames.json"

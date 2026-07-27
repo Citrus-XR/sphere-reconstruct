@@ -110,12 +110,23 @@ def test_timed_alignment_handles_moving_camera_and_time_offset():
     samples.sort(key=lambda sample: sample.timestamp_us)
     reconstruction = Reconstruction(cameras={}, images=images, points3D={})
 
-    alignment, info = ga.compute_timed_align_rotation(reconstruction, frame_times, samples)
+    progress = []
+    alignment, info = ga.compute_timed_align_rotation(
+        reconstruction,
+        frame_times,
+        samples,
+        progress=lambda phase, current, total: progress.append((phase, current, total)),
+    )
 
     assert alignment is not None, info
     assert abs(info["time_offset_sec"] - 0.14) <= 0.05
     assert info["spread_deg"] < 2.5
     assert np.allclose(alignment @ world_up, ga.TARGET_UP, atol=1e-3)
+    assert progress[0] == ("coarse", 1, progress[0][2])
+    assert progress[-1] == ("fine", progress[-1][2], progress[-1][2])
+    for phase in ("coarse", "fine"):
+        values = [current for item_phase, current, _total in progress if item_phase == phase]
+        assert values == list(range(1, len(values) + 1))
 
 
 def test_reference_trajectory_diameter_uses_reference_sensor_only():

@@ -20,6 +20,14 @@ colmap = ""
 # SIFT sequential loop closure / vocab-tree pairing を使う場合だけ設定する.
 vocab_tree = ""
 
+[frame_extraction]
+# auto は CUDA / VideoToolbox / QSV / D3D11VA を実 source の 1 frame で検証して選ぶ.
+# hardware decode が必須の専用 machine では require_hwaccel=true にする.
+hwaccel = "auto"
+require_hwaccel = false
+# 0 は candidate score に logical CPU を全て使う.
+score_workers = 0
+
 [sam3]
 # SAM3 は任意. 使用しない場合は path を空にする.
 repo_path = ""

@@ -15,13 +15,13 @@ from ..infrastructure.filesystem import sha256_file
 from ..pipeline.manifest import register
 from ..pipeline.stage import Stage, StageContext, new_manifest
 from ..settings import get_settings
-from .colmap_progress import counted_progress
+from .colmap_progress import matching_progress
 
 
 @register
 class MatchFeatures(Stage):
     name = StageName.MATCH_FEATURES
-    impl_version = "2.0"
+    impl_version = "2.1"
 
     def normalize_params(self, raw: dict) -> dict:
         feature_type = str(raw.get("feature_type", "SIFT")).upper()
@@ -61,13 +61,15 @@ class MatchFeatures(Stage):
 
     def execute(self, ctx: StageContext) -> StageManifest:
         manifest = new_manifest(self.name, self.impl_version)
-        manifest.inputs = self.collect_inputs(ctx)
+        manifest.inputs = ctx.inputs_for(self)
         manifest.params = ctx.params
         source_database = ctx.project_dir / "extract_features" / "database.db"
         if not source_database.exists():
             raise RuntimeError("extract_features must run before matching")
+        ctx.progress.info("copying feature database", progress=0.0, key="log.matching_copy_database")
         database_path = ctx.stage_out_dir / "database.db"
         shutil.copy2(source_database, database_path)
+        ctx.progress.tick(0.03, message="feature database copied", key="log.matching_database_ready")
         logs_dir = ctx.stage_out_dir / "logs"
         logs_dir.mkdir(parents=True, exist_ok=True)
 
@@ -98,13 +100,7 @@ class MatchFeatures(Stage):
             "matching_type": matching_type,
             "extra_args": extra_args,
             "log_path": logs_dir / "matcher.log",
-            "on_line": counted_progress(
-                ctx,
-                "matching",
-                r"Processing image \[(\d+)/(\d+)\]",
-                low=0.05,
-                high=0.95,
-            ),
+            "on_line": matching_progress(ctx, low=0.05, high=0.9),
         }
         pairing = _resolve_pairing(ctx.params["pairing"], spec, settings, ctx.params["feature_type"])
         if pairing == "exhaustive":
@@ -131,6 +127,7 @@ class MatchFeatures(Stage):
                 **common,
             )
 
+        ctx.progress.tick(0.92, message="feature matching complete", key="log.matching_compute_done")
         summary = _matching_summary(database_path, spec)
         summary.update(
             {
@@ -147,7 +144,7 @@ class MatchFeatures(Stage):
         manifest.extra = summary
         ctx.progress.info(
             f"matching done: {summary['verified_pairs']} verified pairs",
-            progress=1.0,
+            progress=0.99,
             key="log.matching_done",
             args={"pairs": summary["verified_pairs"]},
         )

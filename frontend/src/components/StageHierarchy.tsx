@@ -12,7 +12,7 @@ export interface HierItem {
   enabled: boolean
   dim?: boolean
   running?: boolean
-  progress?: number  // 実行中の進捗 0..1 (環形表示用)
+  progress?: number | null  // null = 作業中だが総量不明.
 }
 
 export const StageHierarchy = ({
@@ -34,11 +34,13 @@ export const StageHierarchy = ({
           style={it.dim && !off ? { opacity: 0.4 } : undefined} onClick={() => onSelect(it.key)}
           aria-current={selected === it.key ? 'step' : undefined}>
           {it.running
-            ? <ProgressRing value={it.progress ?? 0} size={14} stroke={2.5} />
+            ? <ProgressRing value={it.progress ?? null} size={14} stroke={2.5} label={it.label} />
             : <span className="hier-badge" style={{ background: it.badgeColor }} />}
           <span style={{ flex: 1 }}>{it.label}</span>
           <span className="mono" style={{ fontSize: 10, color: 'var(--fg-mute)' }}>
-            {off ? t('skip') : it.running ? `${Math.round((it.progress ?? 0) * 100)}%` : it.statusLabel}
+            {off ? t('skip') : it.running
+              ? it.progress == null ? t('working') : `${Math.round(it.progress * 100)}%`
+              : it.statusLabel}
           </span>
         </button>
       )

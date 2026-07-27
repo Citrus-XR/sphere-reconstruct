@@ -60,7 +60,7 @@ export const StageSettings = ({
   onMakePrimarySource: (sourceId: string) => void
   sourceMutationError: unknown
   frameSelection: FrameSelection | null | undefined
-  stageProgress: number
+  stageProgress: number | null
   stageStartedAt: string | null
   stageProgressMsg: string
   blockedReason: string | null
@@ -136,7 +136,8 @@ export const StageSettings = ({
         return (
           <div style={{ marginBottom: 10 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-              <ProgressRing value={stageProgress} size={24} stroke={3} showLabel />
+              <ProgressRing value={stageProgress} size={24} stroke={3} showLabel
+                label={t(`st_${stage}`)} />
               <div className="mono" style={{ fontSize: 11, color: 'var(--fg-mute)' }}>
                 {t('elapsed')}: {fmtDur(elapsed)}
               </div>
@@ -154,6 +155,7 @@ export const StageSettings = ({
       {blockedReason && <div className="hint" style={{ color: '#d69a2a', marginBottom: 8 }}>{blockedReason}</div>}
       {run.error && <div className="error">{String(run.error)}</div>}
       {clear.error && <div className="error">{String(clear.error)}</div>}
+      {status?.status === 'failed' && status.error_text && <div className="error">{status.error_text}</div>}
       {status?.has_output && status.extra && <StageResult key={stage} stage={stage} extra={status.extra} />}
 
       {stage === 'extract_frames' && (

@@ -130,13 +130,14 @@ def test_native_fisheye_and_phone_create_separate_camera_groups(tmp_path):
     output = project / ".prepare_images.tmp"
     output.mkdir()
     stage = PrepareImages()
+    progress_calls = []
     context = StageContext(
         project_id="project",
         project_dir=project,
         stage_out_dir=output,
         params=stage.normalize_params({"reconstruction_mode": "native_fisheye"}),
         sources=(),
-        progress=ProgressReporter(lambda *_args: None),
+        progress=ProgressReporter(lambda *args: progress_calls.append(args)),
     )
 
     stage.execute(context)
@@ -148,6 +149,10 @@ def test_native_fisheye_and_phone_create_separate_camera_groups(tmp_path):
         "SIMPLE_RADIAL",
     }
     assert len(json.loads((output / "rig_config.json").read_text())) == 1
+    numeric = [call[1] for call in progress_calls if call[1] is not None]
+    assert numeric == sorted(numeric)
+    assert numeric[-1] == 0.99
+    assert any(call[3] == "log.prepare_source_progress" for call in progress_calls)
 
 
 def _write_documents(project, *, sources):

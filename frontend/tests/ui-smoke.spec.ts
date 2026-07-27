@@ -16,6 +16,12 @@ interface MockOptions {
   reconMode?: ReconMode
   secondProject?: boolean
   multipleFrameSources?: boolean
+  runningStage?: string
+  runningProgress?: number | null
+  runningMessageKey?: string
+  socketEvents?: Array<Record<string, unknown>>
+  incrementalFeatureMask?: boolean
+  frameCount?: number
 }
 
 const installUiMock = async (page: Page, options: MockOptions = {}) => {
@@ -27,6 +33,7 @@ const installUiMock = async (page: Page, options: MockOptions = {}) => {
   const reruns: Array<{ stage: string; body: Record<string, Record<string, unknown>> }> = []
   const sourceAdds: Array<Record<string, unknown>> = []
   const deletedProjects = new Set<string>()
+  const maskRequests = { feature: 0, training: 0 }
   const sourcesByProject: Record<string, Array<Record<string, unknown>>> = {
     p1: [{
       id: 's1', label: sourceKind === 'insv' ? 'Primary 360' : 'Primary ERP', role: 'primary',
@@ -40,7 +47,19 @@ const installUiMock = async (page: Page, options: MockOptions = {}) => {
     localStorage.clear()
     localStorage.setItem('lang', 'en')
   })
-  await page.routeWebSocket('**/api/events**', () => {})
+  await page.routeWebSocket('**/api/events**', socket => {
+    if (!options.socketEvents?.length) return
+    setTimeout(() => {
+      for (const event of options.socketEvents ?? []) {
+        const { msg_args: messageArgs, ...rest } = event
+        socket.send(JSON.stringify({
+          level: 'info', project_id: 'p1', kind: 'progress', ts: '2026-01-01T00:00:02Z',
+          ...rest,
+          msg_args: messageArgs ? JSON.stringify(messageArgs) : null,
+        }))
+      }
+    }, 200)
+  })
   await page.route('**/api/**', async route => {
     const url = new URL(route.request().url())
     const path = url.pathname
@@ -108,10 +127,19 @@ const installUiMock = async (page: Page, options: MockOptions = {}) => {
         export_dataset: { images: 2, total_points: 42, validation: { loadable: true, training_ready: true }, lfstudio_training_metrics: 'external' },
       }
       await route.fulfill({ json: { project_id: 'p1', state: 'exported', stages: names.map(stage => ({
-        stage, has_output: true, status: 'succeeded', error_text: null, job_id: null,
-        started_at: null, finished_at: null,
+        stage, has_output: stage !== options.runningStage,
+        status: stage === options.runningStage ? 'running' : 'succeeded', error_text: null,
+        job_id: stage === options.runningStage ? 'running-job' : null,
+        started_at: stage === options.runningStage ? '2026-01-01T00:00:00Z' : null,
+        finished_at: null,
         params: paramsForStage(stage, DEFAULT_PARAMS, reconMode),
         extra: extras[stage],
+        progress_event: stage === options.runningStage ? {
+          id: 999, job_id: 'running-job', project_id: 'p1', stage, level: 'info',
+          message: 'working', msg_key: options.runningMessageKey ?? null,
+          msg_args: options.runningMessageKey ? { source: 'Primary 360', cur: 42, tot: 100 } : null,
+          progress: options.runningProgress ?? null, kind: 'progress', ts: '2026-01-01T00:00:01Z',
+        } : null,
       })) } })
       return
     }
@@ -146,9 +174,11 @@ const installUiMock = async (page: Page, options: MockOptions = {}) => {
         count: 1, width: 100, height: 100, fps: 30,
         selection: { mode: 'interval', selected: 1 },
       }]
-      const frames = [
-        { index: 0, source_id: 's1', source_index: 0, timestamp_sec: 0, score: { sharpness: 12 } },
-      ]
+      const frames = Array.from({ length: options.frameCount ?? 1 }, (_, index) => ({
+        index, source_id: 's1', source_index: index, timestamp_sec: index / 30,
+        score: { sharpness: 12 + index },
+      }))
+      frameSources[0].count = frames.length
       if (options.multipleFrameSources) {
         frameSources.push({
           id: 's2', label: 'Phone photos', role: 'supplemental', projection: 'perspective',
@@ -163,14 +193,24 @@ const installUiMock = async (page: Page, options: MockOptions = {}) => {
     const masksMatch = projectId && path.match(new RegExp(`^/api/projects/${projectId}/masks/(feature|training)$`))
     if (masksMatch) {
       const purpose = masksMatch[1] as 'feature' | 'training'
+      maskRequests[purpose] += 1
+      if (options.incrementalFeatureMask && purpose === 'training') {
+        await route.fulfill({ status: 404, json: { detail: 'training masks not run yet' } })
+        return
+      }
       const maskNames = sourceKind === 'insv' && reconMode !== 'pinhole_rig'
         ? ['sources/s1/front/frame_000000.jpg', 'sources/s1/back/frame_000000.jpg']
         : [imageName]
+      const incrementalPending = options.incrementalFeatureMask
+        && purpose === 'feature' && maskRequests.feature === 1
       await route.fulfill({ json: {
-        version: 3, purpose,
+        version: 3, purpose, revision: options.incrementalFeatureMask ? 'live-run' : `${purpose}-run`,
+        complete: !options.incrementalFeatureMask,
+        total_images: maskNames.length,
+        generated_images: incrementalPending ? 0 : maskNames.length,
         prompt: (purpose === 'feature' ? FEATURE_MASK_PROMPT : TRAINING_MASK_PROMPT).split(','),
-        max_inference_size: 1024, dilate_px: 8,
-        images: maskNames.map((name, index) => ({
+        max_inference_size: 2048, dilate_px: 8,
+        images: (incrementalPending ? [] : maskNames).map((name, index) => ({
         name, source_id: 's1', capture_index: 0, path: `${purpose}-mask.png`,
         coverage: (purpose === 'feature' ? 0.2 : 0.1) + index * 0.1,
         coverage_warning: false,
@@ -253,7 +293,7 @@ const installUiMock = async (page: Page, options: MockOptions = {}) => {
     unexpectedRequests.push(`${route.request().method()} ${path}`)
     await route.fulfill({ status: 501, json: { detail: 'unexpected mocked request' } })
   })
-  return { unexpectedRequests, reruns, sourceAdds }
+  return { unexpectedRequests, reruns, sourceAdds, maskRequests }
 }
 
 test('IDE loads the split pipeline and environment diagnostics', async ({ page }) => {
@@ -279,6 +319,61 @@ test('IDE loads the split pipeline and environment diagnostics', async ({ page }
     element => element.scrollWidth > element.clientWidth,
   )).toBe(true)
   expect(errors).toEqual([])
+  expect(mock.unexpectedRequests).toEqual([])
+})
+
+test('running stage restores numeric progress and activity from the stage snapshot', async ({ page }) => {
+  const mock = await installUiMock(page, {
+    runningStage: 'extract_frames',
+    runningProgress: 0.42,
+    runningMessageKey: 'log.extract_candidates_progress',
+  })
+  await page.goto('/')
+
+  const stage = page.getByRole('button', { name: /Frame extraction 42%/ })
+  await expect(stage).toBeVisible()
+  await expect(stage.getByRole('progressbar', { name: 'Frame extraction' }))
+    .toHaveAttribute('aria-valuenow', '42')
+  await expect(page.getByText('Primary 360: candidate decode 42/100', { exact: true })).toBeVisible()
+  expect(mock.unexpectedRequests).toEqual([])
+})
+
+test('running stage shows indeterminate progress when only activity is known', async ({ page }) => {
+  const mock = await installUiMock(page, {
+    runningStage: 'extract_frames',
+    runningProgress: null,
+  })
+  await page.goto('/')
+
+  const stage = page.getByRole('button', { name: /Frame extraction working/ })
+  const progress = stage.getByRole('progressbar', { name: 'Frame extraction' })
+  await expect(progress).toBeVisible()
+  await expect(progress).not.toHaveAttribute('aria-valuenow')
+  expect(mock.unexpectedRequests).toEqual([])
+})
+
+test('activity-only events retain percentage and late events from an old job are ignored', async ({ page }) => {
+  const mock = await installUiMock(page, {
+    runningStage: 'extract_frames',
+    runningProgress: 0.42,
+    runningMessageKey: 'log.extract_candidates_progress',
+    socketEvents: [
+      {
+        id: 1000, job_id: 'running-job', stage: 'extract_frames', progress: null,
+        message: 'scoring', msg_key: 'log.extract_scoring_progress',
+        msg_args: { source: 'Primary 360', cur: 43, tot: 100 },
+      },
+      {
+        id: 1001, job_id: 'old-job', stage: 'extract_frames', progress: 0.9,
+        message: 'old', msg_key: null, msg_args: null,
+      },
+    ],
+  })
+  await page.goto('/')
+
+  await expect(page.getByRole('button', { name: /Frame extraction 42%/ })).toBeVisible()
+  await expect(page.getByText('Primary 360: candidate scoring 43/100', { exact: true })).toBeVisible()
+  await expect(page.getByText('old', { exact: true })).toHaveCount(0)
   expect(mock.unexpectedRequests).toEqual([])
 })
 
@@ -363,6 +458,18 @@ test('middle mouse drag activates Scene View panning', async ({ page }) => {
   expect(mock.unexpectedRequests).toEqual([])
 })
 
+test('fisheye valid-region editor can switch its preview frame', async ({ page }) => {
+  const mock = await installUiMock(page, { frameCount: 3 })
+  await page.goto('/')
+
+  await page.getByRole('button', { name: /Fisheye region/ }).click()
+  const previewFrame = page.getByRole('slider', { name: 'Preview frame' })
+  await expect(previewFrame).toHaveAttribute('max', '2')
+  await previewFrame.fill('2')
+  await expect(page.locator('img[alt="lens0"]')).toHaveAttribute('src', /frames\/2\/image/)
+  expect(mock.unexpectedRequests).toEqual([])
+})
+
 test('photo and dataset camera inspectors share capture summary fields', async ({ page }) => {
   test.setTimeout(60_000)
   const mock = await installUiMock(page)
@@ -433,6 +540,21 @@ test('photo and dataset camera previews switch between both mask steps', async (
   await page.getByRole('tab', { name: 'Mask' }).click()
   await purpose.getByRole('button', { name: 'Feature' }).click()
   await expect(page.locator('img[alt="Mask"]')).toHaveAttribute('src', /purpose=feature/)
+  expect(mock.unexpectedRequests).toEqual([])
+})
+
+test('a completed SAM3 image becomes previewable before the mask step finishes', async ({ page }) => {
+  const mock = await installUiMock(page, {
+    runningStage: 'generate_feature_masks',
+    incrementalFeatureMask: true,
+  })
+  await page.goto('/')
+
+  await page.getByText('Frame 0', { exact: true }).click()
+  await expect(page.getByText('Feature · Dynamic coverage', { exact: true })).toBeVisible({ timeout: 5_000 })
+  await page.getByRole('tab', { name: 'Mask' }).click()
+  await expect(page.locator('img[alt="Mask"]')).toHaveAttribute('src', /revision=live-run/)
+  expect(mock.maskRequests.feature).toBeGreaterThanOrEqual(2)
   expect(mock.unexpectedRequests).toEqual([])
 })
 
@@ -615,11 +737,13 @@ test('complete INSV flow can be driven from UI', async ({ page, request }) => {
   await sourceSet
   await expect(dialog).toHaveCount(0)
 
-  for (let step = 0; step < 10; step += 1) {
+  const pipelineDeadline = Date.now() + 30 * 60_000
+  while (true) {
     const statuses = await (await request.get(`/api/projects/${project!.id}/stages`)).json() as {
       stages: Array<{ stage: string; has_output: boolean }>
     }
     if (statuses.stages.find(item => item.stage === 'export_dataset')?.has_output) break
+    expect(Date.now(), 'UI pipeline did not reach export before the deadline').toBeLessThan(pipelineDeadline)
     const nextButton = page.getByRole('button', { name: 'Generate next' })
     await expect(nextButton).toBeEnabled()
     const jobResponse = page.waitForResponse(response => (

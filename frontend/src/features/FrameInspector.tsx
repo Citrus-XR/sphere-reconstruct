@@ -25,13 +25,15 @@ import {
 // Hierarchy で写真を選んだときの Inspector: フレーム画像 + 抽出スコア + 処理結果 (再構成の
 // 登録可否 / 3D 点数) + feature/training SAM3 マスクの用途・重ね表示を揃える.
 export const FrameInspector = ({
-  projectId, frameIndex, frames, recon, sources,
+  projectId, frameIndex, frames, recon, sources, featureMaskRunning, trainingMaskRunning,
 }: {
   projectId: string
   frameIndex: number
   frames: FrameInfo[] | undefined
   recon: ReconstructionData | undefined
   sources: ProjectSource[]
+  featureMaskRunning: boolean
+  trainingMaskRunning: boolean
 }) => {
   const { t } = useSettings()
   const [lens, setLens] = useState(0)
@@ -45,10 +47,12 @@ export const FrameInspector = ({
   const { data: featureMasks } = useQuery({
     queryKey: ['masks', projectId, 'feature'],
     queryFn: () => api.getMasks(projectId, 'feature'), retry: false,
+    refetchInterval: featureMaskRunning ? 1000 : false,
   })
   const { data: trainingMasks } = useQuery({
     queryKey: ['masks', projectId, 'training'],
     queryFn: () => api.getMasks(projectId, 'training'), retry: false,
+    refetchInterval: trainingMaskRunning ? 1000 : false,
   })
   const findMask = (manifest: MasksManifest | undefined) => {
     const candidates = manifest?.images.filter(
@@ -68,6 +72,7 @@ export const FrameInspector = ({
     ? maskPurpose
     : masksByPurpose.training ? 'training' : 'feature'
   const maskRec = masksByPurpose[effectivePurpose]
+  const maskManifest = effectivePurpose === 'feature' ? featureMasks : trainingMasks
   const eff = maskRec ? view : 'orig'
   const actions = isInsv || availablePurposes.length > 1 ? (
     <span style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
@@ -91,7 +96,9 @@ export const FrameInspector = ({
         actions={actions} />
 
       <CapturePreview originalUrl={frameImageUrl(projectId, frameIndex, lens)}
-        maskUrl={maskRec ? preparedMaskUrl(projectId, maskRec.name, effectivePurpose) : null}
+        maskUrl={maskRec
+          ? preparedMaskUrl(projectId, maskRec.name, effectivePurpose, maskManifest?.revision)
+          : null}
         view={eff} onViewChange={setView} alt={`${t('frameLabel')} ${frameIndex}`} />
 
       <CaptureSummary frameIndex={info?.source_index ?? frameIndex} lens={isInsv ? lens : null}

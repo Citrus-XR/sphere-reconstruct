@@ -12,7 +12,7 @@ from ..domain.artifacts import FileRef, StageManifest
 from ..domain.pipeline_state import StageName
 from ..infrastructure.filesystem import sha256_file
 from ..pipeline.manifest import register
-from ..pipeline.stage import Stage, StageContext, new_manifest
+from ..pipeline.stage import ProgressSpan, Stage, StageContext, new_manifest
 from ..settings import get_settings
 from .colmap_progress import counted_progress, hidden_log
 
@@ -22,7 +22,7 @@ _FEATURE_TYPES = {"SIFT", "ALIKED_N16ROT", "ALIKED_N32"}
 @register
 class ExtractFeatures(Stage):
     name = StageName.EXTRACT_FEATURES
-    impl_version = "3.0"
+    impl_version = "3.1"
 
     def normalize_params(self, raw: dict) -> dict:
         feature_type = str(raw.get("feature_type", "SIFT")).upper()
@@ -64,10 +64,25 @@ class ExtractFeatures(Stage):
 
     def execute(self, ctx: StageContext) -> StageManifest:
         manifest = new_manifest(self.name, self.impl_version)
-        manifest.inputs = self.collect_inputs(ctx)
+        manifest.inputs = ctx.inputs_for(self)
         manifest.params = ctx.params
+        ctx.progress.info(
+            f"materializing feature workspace: {ctx.params['feature_type']}",
+            progress=0.0,
+            key="log.features_workspace_start",
+            args={"type": ctx.params["feature_type"]},
+        )
+        workspace_span = ProgressSpan(ctx.progress, 0.0, 0.1)
         spec = input_workspace.build(
-            ctx.project_dir, ctx.stage_out_dir, ctx.params["use_feature_masks"]
+            ctx.project_dir,
+            ctx.stage_out_dir,
+            ctx.params["use_feature_masks"],
+            progress=lambda current, total: workspace_span.tick(
+                current / max(1, total),
+                message=f"feature workspace image {current}/{total}",
+                key="log.features_workspace_progress",
+                args={"cur": current, "tot": total},
+            ),
         )
         logs_dir = ctx.stage_out_dir / "logs"
         logs_dir.mkdir(parents=True, exist_ok=True)
@@ -77,13 +92,16 @@ class ExtractFeatures(Stage):
 
         ctx.progress.info(
             f"feature extraction: {ctx.params['feature_type']}, {spec.image_count} images",
-            progress=0.05,
+            progress=0.1,
             key="log.features_start",
             args={"type": ctx.params["feature_type"], "images": spec.image_count},
         )
+        total_batch_images = sum(batch.image_count for batch in spec.feature_batches)
+        completed_batch_images = 0
         for index, batch in enumerate(spec.feature_batches):
-            low = 0.05 + 0.85 * index / len(spec.feature_batches)
-            high = 0.05 + 0.85 * (index + 1) / len(spec.feature_batches)
+            low = 0.1 + 0.82 * completed_batch_images / max(1, total_batch_images)
+            completed_batch_images += batch.image_count
+            high = 0.1 + 0.82 * completed_batch_images / max(1, total_batch_images)
             colmap_runner.feature_extractor(
                 colmap_bin,
                 database_path=database_path,
@@ -114,6 +132,7 @@ class ExtractFeatures(Stage):
                 log_path=logs_dir / "rig_configurator.log",
                 on_line=hidden_log(ctx, "rig"),
             )
+        ctx.progress.tick(0.96, message="feature extraction complete", key="log.features_extract_done")
 
         summary = _feature_summary(database_path)
         summary.update(
@@ -143,7 +162,7 @@ class ExtractFeatures(Stage):
         manifest.extra = summary
         ctx.progress.info(
             f"features done: avg={summary['average_keypoints']:.0f}/image",
-            progress=1.0,
+            progress=0.99,
             key="log.features_done",
             args={"average": round(summary["average_keypoints"]), "images": summary["images"]},
         )

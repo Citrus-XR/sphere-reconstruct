@@ -17,6 +17,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from threading import Lock
+from time import monotonic
 from typing import Any
 
 from ..domain.artifacts import FileRef, StageManifest
@@ -40,21 +42,73 @@ class ProgressReporter:
     """
 
     _emit: Any  # Callable[[str, float|None, str, str|None, dict|None, str], None]
+    tick_min_interval: float = 0.1
+    tick_min_progress: float = 0.0025
+
+    def __post_init__(self) -> None:
+        self._last_seen_progress: float | None = None
+        self._last_emitted_progress: float | None = None
+        self._last_activity_tick_at = float("-inf")
+        self._last_numeric_tick_at = float("-inf")
+        self._progress_lock = Lock()
+
+    def _send(
+        self,
+        level: str,
+        progress: float | None,
+        message: str,
+        key: str | None,
+        args: dict | None,
+        kind: str,
+    ) -> None:
+        now = monotonic()
+        with self._progress_lock:
+            if progress is not None:
+                if not 0.0 <= progress <= 1.0:
+                    raise ValueError(f"stage progress must be within 0..1: {progress}")
+                if self._last_seen_progress is not None and progress < self._last_seen_progress - 1e-9:
+                    raise ValueError(
+                        f"stage progress moved backwards: {self._last_seen_progress} -> {progress}"
+                    )
+                self._last_seen_progress = progress
+
+            if kind == "progress":
+                if progress is None:
+                    interval_ready = now - self._last_activity_tick_at >= self.tick_min_interval
+                    if not interval_ready:
+                        return
+                elif progress < 1.0:
+                    interval_ready = now - self._last_numeric_tick_at >= self.tick_min_interval
+                    progress_ready = (
+                        self._last_emitted_progress is None
+                        or progress - self._last_emitted_progress >= self.tick_min_progress
+                    )
+                    if not interval_ready or not progress_ready:
+                        return
+
+            self._emit(level, progress, message, key, args, kind)
+            if progress is not None:
+                self._last_emitted_progress = progress
+            if kind == "progress":
+                if progress is None:
+                    self._last_activity_tick_at = now
+                else:
+                    self._last_numeric_tick_at = now
 
     def info(
         self, message: str, progress: float | None = None, *, key: str | None = None, args: dict | None = None
     ) -> None:
-        self._emit("info", progress, message, key, args, "log")
+        self._send("info", progress, message, key, args, "log")
 
     def warn(
         self, message: str, progress: float | None = None, *, key: str | None = None, args: dict | None = None
     ) -> None:
-        self._emit("warn", progress, message, key, args, "log")
+        self._send("warn", progress, message, key, args, "log")
 
     def error(
         self, message: str, progress: float | None = None, *, key: str | None = None, args: dict | None = None
     ) -> None:
-        self._emit("error", progress, message, key, args, "log")
+        self._send("error", progress, message, key, args, "log")
 
     def tick(
         self,
@@ -65,7 +119,38 @@ class ProgressReporter:
         args: dict | None = None,
     ) -> None:
         """進捗のみの一時イベント (kind=progress). Console には出さず, 環形インジケータだけ更新する."""
-        self._emit("info", progress, message, key, args, "progress")
+        self._send("info", progress, message, key, args, "progress")
+
+
+@dataclass(frozen=True)
+class ProgressSpan:
+    """Stage 全体の一部へ local 0..1 progress を単調な絶対値として写像する。"""
+
+    reporter: ProgressReporter
+    low: float
+    high: float
+
+    def __post_init__(self) -> None:
+        if not 0.0 <= self.low <= self.high <= 1.0:
+            raise ValueError(f"invalid progress span: {self.low}..{self.high}")
+
+    def value(self, fraction: float) -> float:
+        if not 0.0 <= fraction <= 1.0:
+            raise ValueError(f"progress fraction must be within 0..1: {fraction}")
+        return self.low + (self.high - self.low) * fraction
+
+    def child(self, low: float, high: float) -> ProgressSpan:
+        return ProgressSpan(self.reporter, self.value(low), self.value(high))
+
+    def tick(
+        self,
+        fraction: float,
+        *,
+        message: str,
+        key: str | None = None,
+        args: dict | None = None,
+    ) -> None:
+        self.reporter.tick(self.value(fraction), message=message, key=key, args=args)
 
 
 @dataclass
@@ -89,10 +174,16 @@ class StageContext:
     params: dict[str, Any]
     sources: tuple[SourceContext, ...]
     progress: ProgressReporter
+    resolved_inputs: list[FileRef] | None = None
 
     @property
     def primary_source(self) -> SourceContext | None:
         return next((source for source in self.sources if source.role == SourceRole.PRIMARY), None)
+
+    def inputs_for(self, stage: Stage) -> list[FileRef]:
+        if self.resolved_inputs is None:
+            self.resolved_inputs = stage.collect_inputs(self)
+        return self.resolved_inputs
 
 
 class Stage(ABC):

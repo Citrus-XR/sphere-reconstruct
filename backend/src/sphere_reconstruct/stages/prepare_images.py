@@ -19,7 +19,7 @@ from ..imaging import fisheye_region, projection, rendering
 from ..infrastructure.filesystem import sha256_file
 from ..insta360 import calibration as calib
 from ..pipeline.manifest import register
-from ..pipeline.stage import Stage, StageContext, new_manifest
+from ..pipeline.stage import ProgressSpan, Stage, StageContext, new_manifest
 
 EXIF_MAKE = 271
 EXIF_MODEL = 272
@@ -30,7 +30,7 @@ FULL_FRAME_DIAGONAL_MM = math.hypot(36.0, 24.0)
 @register
 class PrepareImages(Stage):
     name = StageName.PREPARE_IMAGES
-    impl_version = "1.0"
+    impl_version = "1.1"
 
     def collect_inputs(self, ctx: StageContext) -> list[FileRef]:
         candidates = [
@@ -72,27 +72,47 @@ class PrepareImages(Stage):
         }
 
         manifest = new_manifest(self.name, self.impl_version)
-        manifest.inputs = self.collect_inputs(ctx)
+        manifest.inputs = ctx.inputs_for(self)
         manifest.params = ctx.params
         images: list[dict] = []
         groups: list[dict] = []
         rigs: list[dict] = []
         outputs: list[FileRef] = []
-        for source in frames_document["sources"]:
+        source_documents = frames_document["sources"]
+        for source_number, source in enumerate(source_documents):
+            source_span = ProgressSpan(
+                ctx.progress,
+                0.98 * source_number / max(1, len(source_documents)),
+                0.98 * (source_number + 1) / max(1, len(source_documents)),
+            )
+            ctx.progress.info(
+                f"preparing images: {source['label']}",
+                progress=source_span.low,
+                key="log.prepare_source_start",
+                args={
+                    "source": source["label"],
+                    "cur": source_number + 1,
+                    "tot": len(source_documents),
+                },
+            )
             inspection = inspections[source["id"]]
             projection_name = Projection(source["projection"])
             if projection_name == Projection.DUAL_FISHEYE:
                 if ctx.params["reconstruction_mode"] == "pinhole_rig":
-                    result = self._prepare_dual_fisheye_pinhole(ctx, source, inspection)
+                    result = self._prepare_dual_fisheye_pinhole(
+                        ctx, source, inspection, source_span
+                    )
                 else:
-                    result = self._prepare_dual_fisheye_native(ctx, source, inspection)
+                    result = self._prepare_dual_fisheye_native(
+                        ctx, source, inspection, source_span
+                    )
             elif projection_name == Projection.EQUIRECTANGULAR:
                 if ctx.params["reconstruction_mode"] == "pinhole_rig":
-                    result = self._prepare_equirectangular_pinhole(ctx, source)
+                    result = self._prepare_equirectangular_pinhole(ctx, source, source_span)
                 else:
-                    result = self._prepare_equirectangular_native(ctx, source)
+                    result = self._prepare_equirectangular_native(ctx, source, source_span)
             else:
-                result = self._prepare_perspective(ctx, source)
+                result = self._prepare_perspective(ctx, source, source_span)
             images.extend(result["images"])
             groups.extend(result["camera_groups"])
             rigs.extend(result["rigs"])
@@ -140,13 +160,19 @@ class PrepareImages(Stage):
         }
         ctx.progress.info(
             f"prepare_images done: {len(images)} images, {len(groups)} camera groups",
-            progress=1.0,
+            progress=0.99,
             key="log.prepare_done",
             args={"images": len(images), "cameras": len(groups)},
         )
         return manifest
 
-    def _prepare_dual_fisheye_native(self, ctx: StageContext, source: dict, inspection: dict) -> dict:
+    def _prepare_dual_fisheye_native(
+        self,
+        ctx: StageContext,
+        source: dict,
+        inspection: dict,
+        progress_span: ProgressSpan,
+    ) -> dict:
         width, height = int(source["width"]), int(source["height"])
         focal = width / 2.0 / 1.75
         params = [focal, focal, width / 2.0, height / 2.0, 0.0, 0.0, 0.0, 0.0]
@@ -177,6 +203,12 @@ class PrepareImages(Stage):
         baseline = native_rig.DEFAULT_BASELINE_M
         if calibration.get("valid") and calibration.get("lenses"):
             baseline = native_rig.baseline_from_lens_centers(calibration["lenses"])
+        progress_span.tick(
+            1.0,
+            message=f"{source['label']}: {len(images)} native fisheye images catalogued",
+            key="log.prepare_source_progress",
+            args={"source": source["label"], "cur": len(images), "tot": len(images)},
+        )
         return {
             "images": images,
             "camera_groups": [
@@ -195,7 +227,13 @@ class PrepareImages(Stage):
             "outputs": [],
         }
 
-    def _prepare_dual_fisheye_pinhole(self, ctx: StageContext, source: dict, inspection: dict) -> dict:
+    def _prepare_dual_fisheye_pinhole(
+        self,
+        ctx: StageContext,
+        source: dict,
+        inspection: dict,
+        progress_span: ProgressSpan,
+    ) -> dict:
         calibration = inspection.get("offset_v3") or {}
         if not calibration.get("valid") or not calibration.get("lenses"):
             raise RuntimeError(f"source {source['label']}: valid dual-fisheye calibration is required")
@@ -225,13 +263,16 @@ class PrepareImages(Stage):
                 intrinsics[lens],
                 extra_rotation=rotations[lens],
             ),
+            progress_span=progress_span,
         )
 
-    def _prepare_equirectangular_native(self, ctx: StageContext, source: dict) -> dict:
+    def _prepare_equirectangular_native(
+        self, ctx: StageContext, source: dict, progress_span: ProgressSpan
+    ) -> dict:
         group_id = f"{source['id']}:equirectangular"
         images = []
         names = []
-        for frame in source["frames"]:
+        for frame_number, frame in enumerate(source["frames"], 1):
             input_path = _frame_image_path(ctx.project_dir, frame)
             output_path = ctx.stage_out_dir / "sources" / source["id"] / f"frame_{frame['index']:06d}.jpg"
             width, height, _metadata = _write_prepared_jpeg(
@@ -255,6 +296,12 @@ class PrepareImages(Stage):
                     valid_region={"kind": "full"},
                 )
             )
+            progress_span.tick(
+                frame_number / max(1, len(source["frames"])),
+                message=f"{source['label']}: prepared image {frame_number}/{len(source['frames'])}",
+                key="log.prepare_source_progress",
+                args={"source": source["label"], "cur": frame_number, "tot": len(source["frames"])},
+            )
         width, height = images[0]["width"], images[0]["height"]
         return {
             "images": images,
@@ -277,7 +324,9 @@ class PrepareImages(Stage):
             ],
         }
 
-    def _prepare_equirectangular_pinhole(self, ctx: StageContext, source: dict) -> dict:
+    def _prepare_equirectangular_pinhole(
+        self, ctx: StageContext, source: dict, progress_span: ProgressSpan
+    ) -> dict:
         return self._render_pinhole_views(
             ctx,
             source,
@@ -285,15 +334,26 @@ class PrepareImages(Stage):
             render=lambda frame, view, _lens: rendering.render_perspective_from_equirect(
                 _frame_image_path(ctx.project_dir, frame), view
             ),
+            progress_span=progress_span,
         )
 
-    def _render_pinhole_views(self, ctx: StageContext, source: dict, *, lenses: list[dict], render) -> dict:
+    def _render_pinhole_views(
+        self,
+        ctx: StageContext,
+        source: dict,
+        *,
+        lenses: list[dict],
+        render,
+        progress_span: ProgressSpan,
+    ) -> dict:
         views = projection.cubemap_views(size=ctx.params["size"], fov_deg=ctx.params["fov_deg"])
         prefix = f"sources/{source['id']}/"
         group_id = f"{source['id']}:pinhole-rig"
         images = []
         names = []
         outputs = []
+        total = len(source["frames"]) * len(views) * len(lenses)
+        completed = 0
         for frame in source["frames"]:
             for view in views:
                 for lens in lenses:
@@ -324,6 +384,13 @@ class PrepareImages(Stage):
                         )
                     )
                     outputs.append(_file_ref(output_path, ctx, "image/jpeg"))
+                    completed += 1
+                    progress_span.tick(
+                        completed / max(1, total),
+                        message=f"{source['label']}: rendered view {completed}/{total}",
+                        key="log.prepare_source_progress",
+                        args={"source": source["label"], "cur": completed, "tot": total},
+                    )
         focal = (ctx.params["size"] / 2.0) / math.tan(math.radians(ctx.params["fov_deg"]) / 2.0)
         params = [focal, focal, ctx.params["size"] / 2.0, ctx.params["size"] / 2.0]
         cameras = colmap_rig.compute_rig_cameras(views, lenses, prefix=prefix)
@@ -345,11 +412,13 @@ class PrepareImages(Stage):
             "outputs": outputs,
         }
 
-    def _prepare_perspective(self, ctx: StageContext, source: dict) -> dict:
+    def _prepare_perspective(
+        self, ctx: StageContext, source: dict, progress_span: ProgressSpan
+    ) -> dict:
         groups_by_signature: dict[tuple, dict] = {}
         images = []
         outputs = []
-        for frame in source["frames"]:
+        for frame_number, frame in enumerate(source["frames"], 1):
             input_path = _frame_image_path(ctx.project_dir, frame)
             temporary = ctx.stage_out_dir / "sources" / source["id"] / f"frame_{frame['index']:06d}.jpg"
             width, height, metadata = _write_prepared_jpeg(
@@ -395,6 +464,12 @@ class PrepareImages(Stage):
                 )
             )
             outputs.append(_file_ref(final_path, ctx, "image/jpeg"))
+            progress_span.tick(
+                frame_number / max(1, len(source["frames"])),
+                message=f"{source['label']}: prepared image {frame_number}/{len(source['frames'])}",
+                key="log.prepare_source_progress",
+                args={"source": source["label"], "cur": frame_number, "tot": len(source["frames"])},
+            )
         camera_groups = []
         for group in groups_by_signature.values():
             diagonal = math.hypot(group["width"], group["height"])

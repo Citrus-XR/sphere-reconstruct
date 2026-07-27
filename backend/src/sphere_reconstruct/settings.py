@@ -46,6 +46,14 @@ class BinariesConfig(BaseModel):
     vocab_tree: str = ""
 
 
+class FrameExtractionConfig(BaseModel):
+    # auto は実データの 1 frame で候補 backend を検証し、利用できる最速の hardware decoder を選ぶ。
+    hwaccel: str = "auto"
+    require_hwaccel: bool = False
+    # 0 は logical CPU 全数。共有 machine で負荷を抑える場合だけ正数を指定する。
+    score_workers: int = 0
+
+
 class Sam3Config(BaseModel):
     repo_path: str = ""
     checkpoint_path: str = ""
@@ -55,7 +63,7 @@ class Sam3Config(BaseModel):
     training_prompt: str = ""
     feature_prompt: str = ""
     # SAM3 推論前に長辺をこの画素数まで縮小する (0 = 縮小しない).
-    max_inference_size: int = 1024
+    max_inference_size: int = 2048
     confidence_threshold: float = 0.5
 
 class LogConfig(BaseModel):
@@ -135,6 +143,7 @@ class AppSettings(BaseSettings):
     workspace: WorkspaceConfig = Field(default_factory=WorkspaceConfig)
     filesystem: FilesystemConfig = Field(default_factory=FilesystemConfig)
     binaries: BinariesConfig = Field(default_factory=BinariesConfig)
+    frame_extraction: FrameExtractionConfig = Field(default_factory=FrameExtractionConfig)
     sam3: Sam3Config = Field(default_factory=Sam3Config)
     aliked: AlikedConfig = Field(default_factory=AlikedConfig)
     log: LogConfig = Field(default_factory=LogConfig)

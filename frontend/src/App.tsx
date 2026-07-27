@@ -25,16 +25,19 @@ const PointCloudViewer = lazy(() => import('./viewers/PointCloudViewer').then(mo
   default: module.PointCloudViewer,
 })))
 
-// ログ行の時刻 (ローカル HH:MM:SS) と stage タグ (snake_case → PascalCase: extract_frames → ExtractFrames).
+// ログ行の時刻 (ローカル HH:MM:SS).
 const fmtTime = (ts: string): string => {
   const d = new Date(ts)
   if (isNaN(d.getTime())) return ''
   const p = (n: number) => String(n).padStart(2, '0')
   return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
 }
-const stageTag = (s: string | null): string =>
-  s ? s.split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join('') : ''
 const sameValue = (left: unknown, right: unknown): boolean => JSON.stringify(left) === JSON.stringify(right)
+const mergeProgressEvent = (previous: EventEnvelope | undefined, incoming: EventEnvelope): EventEnvelope => (
+  previous?.job_id === incoming.job_id && incoming.progress == null
+    ? { ...incoming, progress: previous.progress }
+    : incoming
+)
 
 // Unity/VSCode 風のドッキング初期レイアウト. タブのタイトルをドラッグして再配置でき,
 // 変更は localStorage に保存される. Console は既定でシーンビューの下.
@@ -67,6 +70,7 @@ export const App = () => {
   const { data: projects } = useQuery({ queryKey: ['projects'], queryFn: api.listProjects, refetchInterval: 3000 })
   const { data: settingsData } = useQuery({ queryKey: ['settings'], queryFn: api.getSettings, retry: false })
   const [projectId, setProjectId] = useState<string | null>(null)
+  const [hydratedProjectId, setHydratedProjectId] = useState<string | null>(null)
   const [selectedStage, setSelectedStage] = useState<string>('extract_frames')
   const [reconMode, setReconMode] = useState<ReconMode>('native_fisheye')
   const [params, setParamsState] = useState<StageParams>(DEFAULT_PARAMS)
@@ -169,6 +173,7 @@ export const App = () => {
     setActiveJobId(null)
     setEvents([])
     setProgressByStage({})
+    setHydratedProjectId(project.id)
   }, [project, settingsData])
 
   const saveTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
@@ -203,7 +208,53 @@ export const App = () => {
     queryFn: () => api.getFisheyeRegion(projectId as string, primarySource!.id),
     enabled: !!projectId && isFisheye && !!primarySource, retry: false,
   })
-  const firstFrame = framesData?.frames?.find(frame => frame.source_id === primarySource?.id)?.index ?? null
+  const stageJobsRef = useRef<Record<string, string | null>>({})
+  useEffect(() => {
+    if (!stagesData) return
+    stageJobsRef.current = Object.fromEntries(
+      stagesData.stages.map(stage => [stage.stage, stage.job_id]),
+    )
+    setProgressByStage(previous => {
+      const next = { ...previous }
+      for (const stage of stagesData.stages) {
+        if (!['running', 'queued'].includes(stage.status ?? '') || !stage.job_id) continue
+        const snapshot = stage.progress_event
+        const existing = next[stage.stage]
+        if (!snapshot) {
+          if (existing?.job_id !== stage.job_id) delete next[stage.stage]
+          continue
+        }
+        if (existing?.job_id === stage.job_id && existing.id >= snapshot.id) continue
+        next[stage.stage] = mergeProgressEvent(existing, snapshot)
+      }
+      return next
+    })
+  }, [stagesData])
+
+  const previousStageRuns = useRef<{ projectId: string | null; states: Record<string, string | null> }>({
+    projectId: null,
+    states: {},
+  })
+  useEffect(() => {
+    if (!stagesData || !projectId) return
+    const current = Object.fromEntries(stagesData.stages.map(stage => [stage.stage, stage.status]))
+    const previous = previousStageRuns.current
+    if (previous.projectId === projectId) {
+      const completedExternally = stagesData.stages.some(stage =>
+        ['running', 'queued'].includes(previous.states[stage.stage] ?? '')
+        && !['running', 'queued'].includes(stage.status ?? ''))
+      if (completedExternally) {
+        for (const key of ['frames', 'reconstruction', 'fisheye-region', 'masks', 'export-info'])
+          qc.invalidateQueries({ queryKey: [key, projectId] })
+      }
+    }
+    previousStageRuns.current = { projectId, states: current }
+  }, [stagesData, projectId, qc])
+  const primaryFrameIndices = useMemo(
+    () => framesData?.frames.filter(frame => frame.source_id === primarySource?.id).map(frame => frame.index) ?? [],
+    [framesData, primarySource?.id],
+  )
+  const firstFrame = primaryFrameIndices[0] ?? null
   const route = [
     'inspect_source',
     'extract_frames',
@@ -246,34 +297,39 @@ export const App = () => {
       }
     }
   }, [jobData]) // eslint-disable-line react-hooks/exhaustive-deps
-  const anyStageRunning = !!stagesData?.stages.some(s => s.status === 'running')
+  const anyStageRunning = !!stagesData?.stages.some(s => ['running', 'queued'].includes(s.status ?? ''))
   const jobRunning = jobData?.status === 'running' || jobData?.status === 'queued'
   const processing = jobRunning || anyStageRunning
   // 停止対象: UI が開始した job を優先, 無ければ実行中ステージの job_id (別セッション/外部起動でも止められる).
-  const runningJobId = stagesData?.stages.find(s => s.status === 'running')?.job_id ?? null
+  const runningJobId = stagesData?.stages.find(s => ['running', 'queued'].includes(s.status ?? ''))?.job_id ?? null
   const stopTarget = activeJobId ?? runningJobId
   const stopJob = () => { if (stopTarget) api.cancelJob(stopTarget).then(() => qc.invalidateQueries({ queryKey: ['stages', projectId] })) }
 
   const synthId = useRef(-1)
   useEffect(() => {
-    if (!projectId) return
-    setEvents([]); setProgressByStage({})
+    if (!projectId || hydratedProjectId !== projectId) return
     const ws = openEventStream({ projectId, since: -1 }, e => {
-      // progress を持つイベントは環形インジケータ用に stage 別で保持. kind==='progress' は
-      // Console には出さず (spam 防止), それ以外 (開始/完了/失敗/警告) だけログに積む.
-      if (e.progress != null && e.stage) setProgressByStage(prev => ({ ...prev, [e.stage as string]: e }))
+      // Activity-only event は同じ job の直近 percentage を保持し、処理中の文案だけ更新する。
+      if (e.stage && (!stageJobsRef.current[e.stage] || stageJobsRef.current[e.stage] === e.job_id)) {
+        setProgressByStage(previous => {
+          const existing = previous[e.stage as string]
+          if (existing?.job_id === e.job_id && existing.id >= e.id) return previous
+          return { ...previous, [e.stage as string]: mergeProgressEvent(existing, e) }
+        })
+      }
       if (e.kind !== 'progress') setEvents(prev => [...prev.slice(-500), e])
     }, status => {
       // 接続断 / 再接続を Console に 1 行ずつ出す (クライアント合成イベント).
-      const key = status === 'disconnected' ? 'log.ws_disconnected' : 'log.ws_reconnected'
+      const key = status === 'disconnected' ? 'log.ws_disconnected'
+        : status === 'reconnected' ? 'log.ws_reconnected' : 'log.ws_invalid_event'
       setEvents(prev => [...prev.slice(-500), {
         id: synthId.current--, job_id: null, project_id: projectId, stage: null,
-        level: status === 'disconnected' ? 'warn' : 'info', message: key,
+        level: status === 'reconnected' ? 'info' : 'warn', message: key,
         msg_key: key, msg_args: null, progress: null, kind: 'log', ts: new Date().toISOString(),
       }])
     })
     return () => ws.close()
-  }, [projectId])
+  }, [projectId, hydratedProjectId])
 
   const refreshAfterSourceMutation = () => {
     qc.invalidateQueries({ queryKey: ['projects'] })
@@ -303,7 +359,15 @@ export const App = () => {
     mutationFn: (stage: string) => api.rerunStage(projectId as string, stage, {
       [stage]: paramsForStage(stage, params, reconMode),
     }),
-    onSuccess: r => { setActiveJobId(r.job_id); qc.invalidateQueries({ queryKey: ['stages', projectId] }) },
+    onSuccess: (response, stage) => {
+      setActiveJobId(response.job_id)
+      setProgressByStage(previous => {
+        const next = { ...previous }
+        delete next[stage]
+        return next
+      })
+      qc.invalidateQueries({ queryKey: ['stages', projectId] })
+    },
   })
   const runNext = () => {
     if (!nextStep) return
@@ -329,7 +393,15 @@ export const App = () => {
     },
   })
 
-  const onJob = (jobId: string) => { setActiveJobId(jobId); qc.invalidateQueries({ queryKey: ['stages', projectId] }) }
+  const onJob = (jobId: string) => {
+    setActiveJobId(jobId)
+    setProgressByStage(previous => {
+      const next = { ...previous }
+      delete next[selectedStage]
+      return next
+    })
+    qc.invalidateQueries({ queryKey: ['stages', projectId] })
+  }
   const selectStep = (stage: string) => { setSelectedStage(stage); setSelectedCameraId(null); setSelectedFrameIndex(null) }
   const selectCamera = (id: number) => { setSelectedCameraId(id); setSelectedStage(''); setSelectedFrameIndex(null) }
   const selectFrame = (index: number) => { setSelectedFrameIndex(index); setSelectedStage(''); setSelectedCameraId(null) }
@@ -351,13 +423,18 @@ export const App = () => {
     const toggleable = s.stage === 'generate_feature_masks' || s.stage === 'generate_training_masks'
     const done = stageIsFresh(s)
     const stale = s.status === 'stale' || (s.has_output && !done)
+    const running = ['running', 'queued'].includes(s.status ?? '')
+    const progressEvent = progressByStage[s.stage]
+    const currentProgress = progressEvent?.job_id === s.job_id ? progressEvent.progress : null
     items.push({
       key: s.stage, label: t(`st_${s.stage}`),
-      badgeColor: s.status === 'failed' ? 'var(--error)' : stale ? '#d69a2a' : done ? '#4caf50' : 'var(--border)',
-      statusLabel: s.status === 'running' ? t('running') : s.status === 'failed' ? t('failed')
+      badgeColor: s.status === 'failed' ? 'var(--error)'
+        : s.status === 'cancelled' ? '#888' : stale ? '#d69a2a' : done ? '#4caf50' : 'var(--border)',
+      statusLabel: s.status === 'running' ? t('running') : s.status === 'queued' ? t('queued')
+        : s.status === 'cancelled' ? t('cancelled') : s.status === 'failed' ? t('failed')
         : stale ? t('stale') : done ? t('done') : t('notrun'),
-      toggleable, enabled: en, dim: !en, running: s.status === 'running',
-      progress: progressByStage[s.stage]?.progress ?? 0,
+      toggleable, enabled: en, dim: !en, running,
+      progress: currentProgress,
     })
     // 魚眼有効領域は魚眼ソース (native 魚眼 + INSV) を選んだ時点で pipeline に出す.
     // 抽出前は灰色 pending, クリックすると「先に抽出」ヒントを出す (空プレビューにしない).
@@ -373,6 +450,11 @@ export const App = () => {
   }
 
   const stageStatus = stagesData?.stages.find(s => s.stage === selectedStage)
+  const featureMaskRunning = stagesData?.stages.find(s => s.stage === 'generate_feature_masks')?.status === 'running'
+  const trainingMaskRunning = stagesData?.stages.find(s => s.stage === 'generate_training_masks')?.status === 'running'
+  const selectedProgressCandidate = progressByStage[selectedStage]
+  const selectedProgress = selectedProgressCandidate?.job_id === stageStatus?.job_id
+    ? selectedProgressCandidate : undefined
   // KEY+ARGS を持つイベントは表示言語で翻訳し, 未 key 行は message フォールバックを使う.
   const renderMsg = (e: EventEnvelope) => (e.msg_key ? translateMsg(lang, e.msg_key, e.msg_args) : e.message)
   const lastEv = events.length ? events[events.length - 1] : null
@@ -427,30 +509,33 @@ export const App = () => {
           <div className="dock-content">
             {selectedCamImage
               ? <CameraInspector projectId={projectId as string} image={selectedCamImage}
-                  sources={project?.sources ?? []} />
+                  sources={project?.sources ?? []} featureMaskRunning={featureMaskRunning}
+                  trainingMaskRunning={trainingMaskRunning} />
               : selectedFrameIndex != null
               ? <FrameInspector projectId={projectId as string} frameIndex={selectedFrameIndex}
-                  frames={framesData?.frames} recon={recon} sources={project?.sources ?? []} />
+                  frames={framesData?.frames} recon={recon} sources={project?.sources ?? []}
+                  featureMaskRunning={featureMaskRunning} trainingMaskRunning={trainingMaskRunning} />
               : selectedStage === 'fisheye_region'
               ? (firstFrame !== null
                   ? <FisheyeRegionEditor projectId={projectId as string} sourceId={primarySource!.id}
-                      frameIndex={firstFrame}
+                      initialFrameIndex={firstFrame} frameIndices={primaryFrameIndices}
                       onSaved={() => qc.invalidateQueries({ queryKey: ['fisheye-region', projectId, primarySource!.id] })} />
                   : <div className="hint">{t('needExtractFirst')}</div>)
               : selectedStage
               ? <StageSettings projectId={projectId as string} stage={selectedStage} status={stageStatus}
                   sourceInfo={sourceInfo} reconMode={reconMode} setReconMode={changeReconMode} params={params} setParams={setParams}
                   onJob={onJob} hasSource={!!project?.sources.length} sources={project?.sources ?? []} resultMode={resultMode}
-                  primaryProjection={primarySource?.projection ?? null} processing={processing} stageIsRunning={stageStatus?.status === 'running'} onStop={stopJob}
+                  primaryProjection={primarySource?.projection ?? null} processing={processing}
+                  stageIsRunning={['running', 'queued'].includes(stageStatus?.status ?? '')} onStop={stopJob}
                   onSelectSource={source => { addSource.reset(); setPendingSource(source); setBrowsing(true) }}
                   onDeleteSource={sourceId => deleteSource.mutate(sourceId)}
                   onMakePrimarySource={sourceId => makePrimarySource.mutate(sourceId)}
                   sourceMutationError={addSource.error ?? deleteSource.error ?? makePrimarySource.error}
                   frameSelection={primarySource
                     ? framesData?.sources.find(source => source.id === primarySource.id)?.selection : null}
-                  stageProgress={progressByStage[selectedStage]?.progress ?? 0}
+                  stageProgress={selectedProgress?.progress ?? null}
                   stageStartedAt={stageStatus?.started_at ?? null}
-                  stageProgressMsg={progressByStage[selectedStage] ? renderMsg(progressByStage[selectedStage]) : ''}
+                  stageProgressMsg={selectedProgress ? renderMsg(selectedProgress) : ''}
                   blockedReason={null} />
               : <div className="hint">—</div>}
           </div>
@@ -470,7 +555,9 @@ export const App = () => {
               onScroll={e => { const el = e.currentTarget; atBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24 }}>
               {filtered.map(e => (
                 <div key={e.id}>
-                  <span style={{ color: 'var(--fg-mute)' }}>[{fmtTime(e.ts)}]{e.stage ? `[${stageTag(e.stage)}]` : ''}</span>{' '}
+                  <span style={{ color: 'var(--fg-mute)' }}>
+                    [{fmtTime(e.ts)}]{e.stage ? `[${t(`st_${e.stage}`)}]` : ''}
+                  </span>{' '}
                   <span title={e.level}>{LVL_EMOJI[e.level] ?? e.level}</span>{' '}
                   {renderMsg(e)}{e.progress != null ? ` (${Math.round(e.progress * 100)}%)` : ''}
                 </div>

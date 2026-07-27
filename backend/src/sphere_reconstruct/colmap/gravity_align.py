@@ -15,6 +15,7 @@ from __future__ import annotations
 import itertools
 import re
 from collections import Counter
+from collections.abc import Callable
 
 import numpy as np
 
@@ -163,6 +164,7 @@ def compute_timed_align_rotation(
     offset_step: float = 0.02,
     window_seconds: float = 0.025,
     image_prefix: str | None = None,
+    progress: Callable[[str, int, int], None] | None = None,
 ) -> tuple[np.ndarray | None, dict]:
     """時刻同期した加速度列から world up と IMU mounting を同時推定する.
 
@@ -192,12 +194,17 @@ def compute_timed_align_rotation(
         else [(sample.timestamp_us - imu_samples[0].timestamp_us) / 1_000_000.0 for sample in imu_samples]
     )
     raw_acceleration = np.asarray([sample.accel_xyz for sample in imu_samples], dtype=float)
+    if timestamps.ndim != 1 or len(timestamps) != len(raw_acceleration):
+        raise ValueError("IMU timestamps and accelerations must have matching one-dimensional lengths")
+    if np.any(np.diff(timestamps) < 0):
+        raise ValueError("IMU timestamps must be sorted")
     rotations = np.asarray([_quat_to_R(image.qvec) for image, _time in pairs])
     exposure_times = np.asarray([time for _image, time in pairs])
 
     offsets = np.arange(offset_min, offset_max + offset_step * 0.5, offset_step)
-    estimates = [
-        _estimate_at_offset(
+    estimates = []
+    for offset_number, offset in enumerate(offsets, 1):
+        estimate = _estimate_at_offset(
             timestamps,
             raw_acceleration,
             rotations,
@@ -205,9 +212,10 @@ def compute_timed_align_rotation(
             float(offset),
             window_seconds,
         )
-        for offset in offsets
-    ]
-    estimates = [estimate for estimate in estimates if estimate is not None]
+        if estimate is not None:
+            estimates.append(estimate)
+        if progress is not None:
+            progress("coarse", offset_number, len(offsets))
     if not estimates:
         return None, {"reason": "imu_time_range_mismatch"}
     best = min(estimates, key=lambda estimate: estimate["score"])
@@ -218,8 +226,9 @@ def compute_timed_align_rotation(
         best["time_offset_sec"] + offset_step + fine_step * 0.5,
         fine_step,
     )
-    fine = [
-        _estimate_at_offset(
+    fine = []
+    for offset_number, offset in enumerate(fine_offsets, 1):
+        estimate = _estimate_at_offset(
             timestamps,
             raw_acceleration,
             rotations,
@@ -227,9 +236,10 @@ def compute_timed_align_rotation(
             float(offset),
             window_seconds,
         )
-        for offset in fine_offsets
-    ]
-    fine = [estimate for estimate in fine if estimate is not None]
+        if estimate is not None:
+            fine.append(estimate)
+        if progress is not None:
+            progress("fine", offset_number, len(fine_offsets))
     if fine:
         best = min(fine, key=lambda estimate: estimate["score"])
 
@@ -288,10 +298,12 @@ def _estimate_at_offset(
     gravities = []
     selected_rotations = []
     for rotation, exposure in zip(rotations, exposure_times, strict=True):
-        selection = np.abs(timestamps - (exposure + offset)) <= window
-        if not np.any(selection):
+        target = exposure + offset
+        left = int(np.searchsorted(timestamps, target - window, side="left"))
+        right = int(np.searchsorted(timestamps, target + window, side="right"))
+        if left == right:
             continue
-        gravity = np.median(accelerations[selection], axis=0)
+        gravity = np.median(accelerations[left:right], axis=0)
         norm = np.linalg.norm(gravity)
         if norm <= 1e-9:
             continue

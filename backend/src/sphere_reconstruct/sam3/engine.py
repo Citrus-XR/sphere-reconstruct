@@ -18,6 +18,7 @@ token / 自動 DL は使わない (load_from_HF=False).
 from __future__ import annotations
 
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -103,7 +104,12 @@ class Sam3Engine:
             elif dt in ("float16", "fp16", "half"):
                 self._autocast_dtype = torch.float16
 
-    def detect(self, image_rgb: np.ndarray, prompts: list[str]) -> list[Sam3Detection]:
+    def detect(
+        self,
+        image_rgb: np.ndarray,
+        prompts: list[str],
+        progress: Callable[[int, int], None] | None = None,
+    ) -> list[Sam3Detection]:
         """RGB (H,W,3) uint8 画像に対し, prompt 各語で検出する.
 
         戻り値は prompt ごとの Sam3Detection. set_image は 1 回のみ実行し, 各 prompt
@@ -128,7 +134,7 @@ class Sam3Engine:
             state = self._processor.set_image(pil)
 
             results: list[Sam3Detection] = []
-            for term in prompts:
+            for prompt_number, term in enumerate(prompts, 1):
                 self._processor.reset_all_prompts(state)
                 state = self._processor.set_text_prompt(prompt=term, state=state)
                 det = Sam3Detection(prompt=term)
@@ -143,6 +149,8 @@ class Sam3Engine:
                         sc = scores.detach().float().cpu().numpy().tolist()
                         det.scores = [float(s) for s in sc]
                 results.append(det)
+                if progress is not None:
+                    progress(prompt_number, len(prompts))
         return results
 
     def unload(self) -> None:

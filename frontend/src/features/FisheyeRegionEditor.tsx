@@ -12,12 +12,14 @@ const DEFAULT_CIRCLE: LensCircle = { cx: 0.5, cy: 0.5, r: 0.459 }
 export const FisheyeRegionEditor = ({
   projectId,
   sourceId,
-  frameIndex,
+  initialFrameIndex,
+  frameIndices,
   onSaved,
 }: {
   projectId: string
   sourceId: string
-  frameIndex: number
+  initialFrameIndex: number
+  frameIndices: number[]
   onSaved?: () => void
 }) => {
   const { t } = useSettings()
@@ -31,8 +33,15 @@ export const FisheyeRegionEditor = ({
   const [lens, setLens] = useState<0 | 1>(0)
   const [zoom, setZoom] = useState(1)
   const [savedMsg, setSavedMsg] = useState(false)
+  const [previewPosition, setPreviewPosition] = useState(() => Math.max(
+    0,
+    frameIndices.indexOf(initialFrameIndex),
+  ))
 
   useEffect(() => { if (data) setRegion(data) }, [data])
+  useEffect(() => {
+    setPreviewPosition(Math.max(0, frameIndices.indexOf(initialFrameIndex)))
+  }, [frameIndices, initialFrameIndex])
 
   const save = useMutation({
     mutationFn: () => api.putFisheyeRegion(projectId, sourceId, region),
@@ -46,6 +55,7 @@ export const FisheyeRegionEditor = ({
 
   const lensKey = lens === 0 ? 'lens0' : 'lens1'
   const circle = region[lensKey]
+  const previewFrameIndex = frameIndices[previewPosition] ?? initialFrameIndex
   const setCircle = (c: LensCircle) => setRegion(prev => ({ ...prev, [lensKey]: c }))
 
   const svgRef = useRef<SVGSVGElement>(null)
@@ -77,13 +87,25 @@ export const FisheyeRegionEditor = ({
         {data && !data.saved && <span className="mono" style={{ color: '#d69a2a' }}>{t('regionUnsaved')}</span>}
       </div>
       <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 6 }}>
+        <button type="button" className="btn" aria-label={t('previousFrame')}
+          disabled={previewPosition === 0}
+          onClick={() => setPreviewPosition(position => Math.max(0, position - 1))}>‹</button>
+        <input type="range" aria-label={t('regionPreviewFrame')} min={0}
+          max={Math.max(0, frameIndices.length - 1)} step={1} value={previewPosition}
+          onChange={event => setPreviewPosition(Number(event.target.value))} style={{ flex: 1 }} />
+        <button type="button" className="btn" aria-label={t('nextFrame')}
+          disabled={previewPosition >= frameIndices.length - 1}
+          onClick={() => setPreviewPosition(position => Math.min(frameIndices.length - 1, position + 1))}>›</button>
+        <span className="mono">{t('frameLabel')} {previewFrameIndex} · {previewPosition + 1}/{frameIndices.length}</span>
+      </div>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 6 }}>
         <span className="mono">{t('zoom')}</span>
         <input type="range" min={1} max={4} step={0.25} value={zoom} onChange={e => setZoom(Number(e.target.value))} style={{ flex: 1 }} />
         <span className="mono">{zoom.toFixed(2)}x · r {circle.r.toFixed(3)}</span>
       </div>
       <div style={{ overflow: 'auto', maxHeight: 360, background: '#111', borderRadius: 8 }}>
         <div style={{ position: 'relative', width: `${zoom * 100}%`, aspectRatio: '1 / 1' }}>
-          <img src={frameImageUrl(projectId, frameIndex, lens)}
+          <img src={frameImageUrl(projectId, previewFrameIndex, lens)}
             style={{ width: '100%', height: '100%', display: 'block', objectFit: 'cover' }} alt={`lens${lens}`} />
           <svg ref={svgRef} viewBox="0 0 1 1" preserveAspectRatio="none"
             style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', touchAction: 'none' }}

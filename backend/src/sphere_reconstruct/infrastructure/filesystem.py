@@ -11,6 +11,7 @@ import hashlib
 import os
 import shutil
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 
@@ -121,15 +122,29 @@ def _rename(source: Path, destination: Path) -> None:
             time.sleep(0.2)
 
 
-def sha256_file(path: Path, chunk_size: int = 1 << 20) -> str:
+def sha256_file(
+    path: Path,
+    chunk_size: int = 1 << 20,
+    progress: Callable[[int, int], None] | None = None,
+) -> str:
     """ファイルの SHA-256 を hex で返す. 大きなファイル向けにストリーミング."""
     h = hashlib.sha256()
+    total = path.stat().st_size
+    completed = 0
+    last_percent = -1
     with path.open("rb") as f:
         while True:
             chunk = f.read(chunk_size)
             if not chunk:
                 break
             h.update(chunk)
+            completed += len(chunk)
+            percent = min(100, int(completed * 100 / max(1, total)))
+            if progress is not None and percent > last_percent:
+                last_percent = percent
+                progress(completed, total)
+    if progress is not None and last_percent < 100:
+        progress(total, total)
     return h.hexdigest()
 
 

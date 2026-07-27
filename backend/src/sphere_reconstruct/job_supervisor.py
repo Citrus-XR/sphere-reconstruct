@@ -100,8 +100,24 @@ class JobSupervisor:
         row = await cur.fetchone()
         if row is None:
             return
+        active = await (
+            await self._db.conn.execute(
+                "SELECT 1 FROM job WHERE project_id=? AND id<>? "
+                "AND status IN ('queued', 'running') LIMIT 1",
+                (row["project_id"], job_id),
+            )
+        ).fetchone()
+        if active is not None:
+            return
         project_dir = workspace_root() / "projects" / row["project_id"]
+        stage_rows = await (
+            await self._db.conn.execute(
+                "SELECT DISTINCT stage FROM stage_run WHERE job_id=?",
+                (job_id,),
+            )
+        ).fetchall()
         scratch = [
+            *(project_dir / f".{stage_row['stage']}.tmp" for stage_row in stage_rows),
             *project_dir.glob(".extract-frames-sharpness-*"),
             *project_dir.glob(".extract-frames-spatial-*"),
         ]

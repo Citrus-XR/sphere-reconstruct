@@ -59,3 +59,43 @@ async def test_cancel_is_terminal_even_when_worker_exit_races(tmp_path: Path, mo
     assert row["status"] == "cancelled" and row["error_text"] is None
     assert stage["status"] == "cancelled"
     await database.close()
+
+
+@pytest.mark.asyncio
+async def test_cancel_cleanup_removes_stage_temporary_artifacts(tmp_path: Path, monkeypatch):
+    database = Database(tmp_path / "state.db")
+    await database.connect()
+    now = datetime.now(UTC).isoformat()
+    async with database.transaction() as connection:
+        await connection.execute(
+            "INSERT INTO project (id, name, created_at, updated_at, state) VALUES (?, ?, ?, ?, ?)",
+            ("project", "test", now, now, "created"),
+        )
+        await connection.execute(
+            "INSERT INTO job (id, project_id, kind, status, created_at) VALUES (?, ?, ?, ?, ?)",
+            ("job", "project", "rerun_stage", "cancelled", now),
+        )
+        await connection.execute(
+            """
+            INSERT INTO stage_run
+                (id, project_id, job_id, stage, impl_version, params_hash, inputs_hash, status, started_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("stage", "project", "job", "generate_feature_masks", "1", "", "", "cancelled", now),
+        )
+
+    project_dir = tmp_path / "projects" / "project"
+    temporary = project_dir / ".generate_feature_masks.tmp"
+    temporary.mkdir(parents=True)
+    (temporary / "partial.png").write_bytes(b"partial")
+    final = project_dir / "generate_feature_masks"
+    final.mkdir()
+    (final / "manifest.json").write_text("{}")
+    monkeypatch.setattr("sphere_reconstruct.job_supervisor.workspace_root", lambda: tmp_path)
+
+    supervisor = JobSupervisor(database, tmp_path / "state.db")
+    await supervisor._cleanup_scratch("job")
+
+    assert not temporary.exists()
+    assert final.is_dir()
+    await database.close()

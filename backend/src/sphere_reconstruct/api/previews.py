@@ -15,7 +15,13 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from ..domain import project as project_domain
-from ..domain.mask_artifact import MaskPurpose, load_mask_manifest, mask_manifest_path
+from ..domain.mask_artifact import (
+    MaskPurpose,
+    load_mask_manifest,
+    load_partial_mask_manifest,
+    mask_manifest_path,
+    stage_for,
+)
 from ..imaging import fisheye_region
 from ..infrastructure.database import get_db
 from ..infrastructure.filesystem import PathNotAllowedError, ensure_within
@@ -116,16 +122,21 @@ async def prepared_image(project_id: str, name: str):
 @router.get("/api/projects/{project_id}/prepared-mask", response_class=FileResponse, response_model=None)
 async def prepared_mask(project_id: str, name: str, purpose: MaskPurpose):
     project_dir = await _project_dir(project_id)
-    manifest = mask_manifest_path(project_dir, purpose)
-    if not manifest.is_file():
-        raise HTTPException(status_code=404, detail=f"{purpose.value} masks not run yet")
+    document, artifact_root, partial = await _mask_artifact(project_id, project_dir, purpose)
     record = next(
-        (item for item in load_mask_manifest(project_dir, purpose)["images"] if item["name"] == name),
+        (item for item in document["images"] if item["name"] == name),
         None,
     )
     if record is None:
         raise HTTPException(status_code=404, detail="mask not found")
-    path = _safe(project_dir, record["path"])
+    if partial:
+        try:
+            relative = Path(record["path"]).relative_to(stage_for(purpose).value)
+        except ValueError:
+            raise HTTPException(status_code=500, detail="invalid partial mask path") from None
+        path = _safe(project_dir, str(artifact_root.relative_to(project_dir) / relative))
+    else:
+        path = _safe(project_dir, record["path"])
     if not path.is_file():
         raise HTTPException(status_code=404, detail="mask file missing")
     return FileResponse(path, media_type="image/png")
@@ -135,10 +146,34 @@ async def prepared_mask(project_id: str, name: str, purpose: MaskPurpose):
 async def list_masks(project_id: str, purpose: MaskPurpose) -> dict:
     """指定用途の mask manifest を返す。"""
     project_dir = await _project_dir(project_id)
-    mf = mask_manifest_path(project_dir, purpose)
-    if not mf.exists():
+    document, _artifact_root, _partial = await _mask_artifact(project_id, project_dir, purpose)
+    return document
+
+
+async def _mask_artifact(
+    project_id: str,
+    project_dir: Path,
+    purpose: MaskPurpose,
+) -> tuple[dict, Path, bool]:
+    stage = stage_for(purpose)
+    db = get_db()
+    active = await (
+        await db.conn.execute(
+            "SELECT 1 FROM stage_run WHERE project_id=? AND stage=? AND status='running' "
+            "ORDER BY started_at DESC LIMIT 1",
+            (project_id, stage.value),
+        )
+    ).fetchone()
+    if active is not None:
+        temporary_root = project_dir / f".{stage.value}.tmp"
+        partial = load_partial_mask_manifest(temporary_root, purpose)
+        if partial is None:
+            raise HTTPException(status_code=404, detail=f"{purpose.value} mask preview not ready")
+        return partial, temporary_root, True
+
+    if not mask_manifest_path(project_dir, purpose).is_file():
         raise HTTPException(status_code=404, detail=f"{purpose.value} masks not run yet")
-    return load_mask_manifest(project_dir, purpose)
+    return load_mask_manifest(project_dir, purpose), project_dir, False
 
 
 @router.get("/api/projects/{project_id}/export-info")

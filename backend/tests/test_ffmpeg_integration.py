@@ -73,17 +73,20 @@ def test_extract_paired_frames_roundtrip(tmp_path: Path):
     out0 = tmp_path / "lens0"
     out1 = tmp_path / "lens1"
     indices = [0, 5, 10]  # 3 pairs
+    progress = []
     p0, p1 = ffmpeg.extract_paired_frames(
         mp4,
-        fps=10.0,
         frame_indices=indices,
         out_dir_lens0=out0,
         out_dir_lens1=out1,
+        progress=lambda current, total: progress.append((current, total)),
     )
     assert len(p0) == 3 and len(p1) == 3
     for p in p0 + p1:
         assert p.exists()
         assert p.stat().st_size > 500  # 少なくとも JPEG ヘッダはあるサイズ
+    assert progress[-1] == (len(indices), len(indices))
+    assert [current for current, _total in progress] == sorted(current for current, _total in progress)
 
     # extract できたペアが同時刻で対応することを確認するのは難しいので, ここでは
     # ファイル数と非空サイズだけを担保する.
@@ -123,4 +126,34 @@ def test_chunked_jpeg_selection_preserves_exact_frames(tmp_path: Path):
     assert all(
         np.array_equal(np.asarray(Image.open(left)), np.asarray(Image.open(right)))
         for left, right in zip(direct, chunked, strict=True)
+    )
+
+
+def test_chunked_paired_selection_preserves_both_streams(tmp_path: Path):
+    mp4 = tmp_path / "dual.mp4"
+    _make_dual_stream_mp4(mp4, duration=2.0, fps=10, size="64x64")
+    indices = [0, 2, 3, 4, 6, 8, 11, 13, 14, 15, 18]
+    paired0, paired1 = ffmpeg.extract_paired_frames(
+        mp4,
+        frame_indices=indices,
+        out_dir_lens0=tmp_path / "paired0",
+        out_dir_lens1=tmp_path / "paired1",
+        max_filter_expression_chars=24,
+    )
+    direct0 = ffmpeg.extract_frames_sequential(
+        mp4,
+        stream_index=0,
+        frame_indices=indices,
+        out_dir=tmp_path / "direct0",
+    )
+    direct1 = ffmpeg.extract_frames_sequential(
+        mp4,
+        stream_index=1,
+        frame_indices=indices,
+        out_dir=tmp_path / "direct1",
+    )
+
+    assert all(
+        np.array_equal(np.asarray(Image.open(paired)), np.asarray(Image.open(direct)))
+        for paired, direct in zip([*paired0, *paired1], [*direct0, *direct1], strict=True)
     )

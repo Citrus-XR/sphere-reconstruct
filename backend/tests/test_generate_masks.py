@@ -33,7 +33,7 @@ class _FakeEngine:
     def unload(self):
         pass
 
-    def detect(self, image_rgb, prompts):
+    def detect(self, image_rgb, prompts, progress=None):
         height, width = image_rgb.shape[:2]
         mask = np.zeros((height, width), dtype=np.uint8)
         mask[:, : width // 2] = 1
@@ -44,6 +44,8 @@ class _FakeEngine:
                 detection.masks = [mask]
                 detection.scores = [0.9]
             detections.append(detection)
+            if progress is not None:
+                progress(index + 1, len(prompts))
         return detections
 
 
@@ -118,9 +120,15 @@ def test_generate_masks_for_perspective_images(tmp_path, monkeypatch, stage_type
     document = json.loads((output / "manifest_masks.json").read_text())
     assert document["version"] == 3
     assert document["purpose"] == purpose
+    assert document["complete"] is True
+    assert document["generated_images"] == len(names)
+    assert document["total_images"] == len(names)
+    assert document["revision"]
     assert 0.45 < document["images"][0]["coverage"] < 0.55
     assert document["prompt"] == ["person", "tripod"]
     assert len(manifest.outputs) == len(names) + 1
+    assert not (output / ".preview-mask-header.json").exists()
+    assert not (output / ".preview-mask-records.jsonl").exists()
 
 
 def test_generate_masks_combines_fisheye_valid_circle(tmp_path, monkeypatch):

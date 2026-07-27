@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -54,7 +55,12 @@ class InputSpec:
         return cls(**data)
 
 
-def build(project_dir: Path, output_dir: Path, use_feature_masks: bool) -> InputSpec:
+def build(
+    project_dir: Path,
+    output_dir: Path,
+    use_feature_masks: bool,
+    progress: Callable[[int, int], None] | None = None,
+) -> InputSpec:
     catalog_path = project_dir / "prepare_images" / "image_catalog.json"
     if not catalog_path.is_file():
         raise RuntimeError("prepare_images must run before feature extraction")
@@ -74,7 +80,7 @@ def build(project_dir: Path, output_dir: Path, use_feature_masks: bool) -> Input
     materialize_masks = use_feature_masks or any(
         image["valid_region"]["kind"] != "full" for image in catalog["images"]
     )
-    for image in catalog["images"]:
+    for image_number, image in enumerate(catalog["images"], 1):
         source = project_dir / image["path"]
         _link_or_copy(source, images_dir / image["name"])
         if materialize_masks:
@@ -86,6 +92,8 @@ def build(project_dir: Path, output_dir: Path, use_feature_masks: bool) -> Input
                 raise RuntimeError(f"feature mask missing for prepared image: {image['name']}")
             else:
                 _write_valid_region_mask(image, destination)
+        if progress is not None:
+            progress(image_number, len(catalog["images"]))
 
     list_dir = output_dir / "image_lists"
     list_dir.mkdir(parents=True, exist_ok=True)

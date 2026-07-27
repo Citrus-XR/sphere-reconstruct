@@ -3,8 +3,13 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import tempfile
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 
 from ..domain.artifacts import FileRef, StageManifest
@@ -14,19 +19,58 @@ from ..imaging import ffmpeg, ffprobe
 from ..infrastructure.filesystem import sha256_file
 from ..pipeline.manifest import register
 from ..pipeline.source_inputs import IMAGE_EXTENSIONS, collect_source_inputs
-from ..pipeline.stage import SourceContext, Stage, StageContext, new_manifest
+from ..pipeline.stage import ProgressSpan, SourceContext, Stage, StageContext, new_manifest
 from ..settings import get_settings
+
+
+@dataclass
+class _CandidateFrameCache:
+    root: Path
+    pairs_by_source_index: dict[int, tuple[Path, Path]]
+
+    def materialize(
+        self,
+        source_indices: list[int],
+        output_root: Path,
+        progress: Callable[[int, int], None],
+    ) -> tuple[list[Path], list[Path]]:
+        destinations = (output_root / "lens0", output_root / "lens1")
+        for destination in destinations:
+            destination.mkdir(parents=True, exist_ok=True)
+        outputs0: list[Path] = []
+        outputs1: list[Path] = []
+        for output_index, source_index in enumerate(source_indices):
+            source0, source1 = self.pairs_by_source_index[source_index]
+            output0 = destinations[0] / f"lens0_{output_index:06d}.jpg"
+            output1 = destinations[1] / f"lens1_{output_index:06d}.jpg"
+            source0.replace(output0)
+            source1.replace(output1)
+            outputs0.append(output0)
+            outputs1.append(output1)
+            progress(output_index + 1, len(source_indices))
+        return outputs0, outputs1
+
+    def cleanup(self) -> None:
+        shutil.rmtree(self.root, ignore_errors=True)
 
 
 @register
 class ExtractFrames(Stage):
     name = StageName.EXTRACT_FRAMES
-    impl_version = "2.0"
+    impl_version = "2.2"
 
     def collect_inputs(self, ctx: StageContext) -> list[FileRef]:
-        return collect_source_inputs(ctx.sources)
+        return collect_source_inputs(
+            ctx.sources,
+            progress=lambda path, current, total: ctx.progress.tick(
+                message=f"fingerprinting {path.name}: {current}/{total} bytes",
+                key="log.source_hash_progress",
+                args={"name": path.name, "cur": current, "tot": total},
+            ),
+        )
 
     def normalize_params(self, raw: dict) -> dict:
+        extraction = get_settings().frame_extraction
         return {
             "interval_sec": float(raw.get("interval_sec", 1.0)),
             "max_frames": int(raw.get("max_frames", 0)),
@@ -37,6 +81,9 @@ class ExtractFrames(Stage):
             "max_clip": float(raw.get("max_clip", 0.25)),
             "min_features": int(raw.get("min_features", 0)),
             "target_motion": float(raw.get("target_motion", 1.5)),
+            "hwaccel": str(raw.get("hwaccel", extraction.hwaccel)).lower(),
+            "require_hwaccel": bool(raw.get("require_hwaccel", extraction.require_hwaccel)),
+            "score_workers": int(raw.get("score_workers", extraction.score_workers)),
         }
 
     def execute(self, ctx: StageContext) -> StageManifest:
@@ -44,16 +91,21 @@ class ExtractFrames(Stage):
             raise RuntimeError("project has no enabled sources")
         settings = get_settings()
         manifest = new_manifest(self.name, self.impl_version)
-        manifest.inputs = self.collect_inputs(ctx)
+        manifest.inputs = ctx.inputs_for(self)
         manifest.params = ctx.params
 
         source_manifests = []
         outputs: list[FileRef] = []
         next_index = 0
         for source_number, source in enumerate(ctx.sources):
+            source_span = ProgressSpan(
+                ctx.progress,
+                0.98 * source_number / len(ctx.sources),
+                0.98 * (source_number + 1) / len(ctx.sources),
+            )
             ctx.progress.info(
                 f"source extraction: {source.label}",
-                progress=source_number / len(ctx.sources),
+                progress=source_span.low,
                 key="log.extract_source_start",
                 args={"source": source.label, "cur": source_number + 1, "tot": len(ctx.sources)},
             )
@@ -64,6 +116,7 @@ class ExtractFrames(Stage):
                     next_index,
                     ffmpeg_bin=settings.binaries.ffmpeg or None,
                     ffprobe_bin=settings.binaries.ffprobe or None,
+                    progress_span=source_span,
                 )
             elif source.media_kind == MediaKind.VIDEO:
                 source_manifest, source_outputs = self._extract_video(
@@ -72,9 +125,16 @@ class ExtractFrames(Stage):
                     next_index,
                     ffmpeg_bin=settings.binaries.ffmpeg or None,
                     ffprobe_bin=settings.binaries.ffprobe or None,
+                    progress_span=source_span,
                 )
             else:
                 source_manifest, source_outputs = self._prepare_images(source, next_index)
+                source_span.tick(
+                    1.0,
+                    message=f"{source.label}: {len(source_manifest['frames'])} images collected",
+                    key="log.extract_source_collected",
+                    args={"source": source.label, "count": len(source_manifest["frames"])},
+                )
             source_manifests.append(source_manifest)
             outputs.extend(source_outputs)
             next_index += len(source_manifest["frames"])
@@ -93,7 +153,7 @@ class ExtractFrames(Stage):
         manifest.extra = _frame_statistics(frames_manifest)
         ctx.progress.info(
             f"extract_frames done: {len(flattened)} captures from {len(source_manifests)} sources",
-            progress=1.0,
+            progress=0.99,
             key="log.extract_done_mixed",
             args={"count": len(flattened), "sources": len(source_manifests)},
         )
@@ -107,6 +167,7 @@ class ExtractFrames(Stage):
         *,
         ffmpeg_bin: str | None,
         ffprobe_bin: str | None,
+        progress_span: ProgressSpan,
     ) -> tuple[dict, list[FileRef]]:
         probe = ffprobe.probe(source.path, ffprobe_bin=ffprobe_bin)
         pair = probe.dual_lens_streams()
@@ -116,29 +177,56 @@ class ExtractFrames(Stage):
             )
         lens0, lens1 = pair
         duration = probe.duration or (lens0.nb_frames or 0) / lens0.fps
-        indices, selection, scores = self._select_indices(
+        decoder = self._resolve_decoder(ctx, source, ffmpeg_bin)
+        progress_span.tick(
+            0.02,
+            message=f"{source.label}: video metadata ready",
+            key="log.extract_probe_done",
+            args={"source": source.label},
+        )
+        selection_end = _selection_end(ctx.params)
+        indices, selection, scores, candidate_cache = self._select_indices(
             ctx,
             source,
             fps=lens0.fps,
             duration=duration,
             nb_frames=lens0.nb_frames,
             ffmpeg_bin=ffmpeg_bin,
+            hwaccel=decoder.method,
+            paired_candidates=True,
+            progress_span=progress_span.child(0.02, selection_end),
         )
         output_root = ctx.stage_out_dir / "sources" / source.id
-        paths0, paths1 = ffmpeg.extract_paired_frames(
-            source.path,
-            fps=lens0.fps,
-            frame_indices=indices,
-            out_dir_lens0=output_root / "lens0",
-            out_dir_lens1=output_root / "lens1",
-            ffmpeg_bin=ffmpeg_bin,
-            progress=lambda lens, current, total: ctx.progress.tick(
-                progress=current / max(1, total),
-                message=f"{source.label} {lens}: paired frame {current}/{total}",
-                key="log.extract_source_progress",
-                args={"source": source.label, "lens": lens, "cur": current, "tot": total},
-            ),
-        )
+        output_span = progress_span.child(selection_end, 1.0)
+
+        def paired_progress(current: int, total: int) -> None:
+            output_span.tick(
+                current / max(1, total),
+                message=f"{source.label}: output frame pair {current}/{total}",
+                key="log.extract_paired_output_progress",
+                args={"source": source.label, "cur": current, "tot": total},
+            )
+
+        try:
+            if candidate_cache is not None:
+                paths0, paths1 = candidate_cache.materialize(
+                    indices,
+                    output_root,
+                    paired_progress,
+                )
+            else:
+                paths0, paths1 = ffmpeg.extract_paired_frames(
+                    source.path,
+                    frame_indices=indices,
+                    out_dir_lens0=output_root / "lens0",
+                    out_dir_lens1=output_root / "lens1",
+                    ffmpeg_bin=ffmpeg_bin,
+                    hwaccel=decoder.method,
+                    progress=paired_progress,
+                )
+        finally:
+            if candidate_cache is not None:
+                candidate_cache.cleanup()
         frames = [
             {
                 "index": start_index + local_index,
@@ -174,20 +262,33 @@ class ExtractFrames(Stage):
         *,
         ffmpeg_bin: str | None,
         ffprobe_bin: str | None,
+        progress_span: ProgressSpan,
     ) -> tuple[dict, list[FileRef]]:
         probe = ffprobe.probe(source.path, ffprobe_bin=ffprobe_bin)
         if not probe.video_streams:
             raise RuntimeError(f"source {source.label}: video stream not found")
         stream = probe.video_streams[0]
         duration = probe.duration or (stream.nb_frames or 0) / stream.fps
-        indices, selection, scores = self._select_indices(
+        decoder = self._resolve_decoder(ctx, source, ffmpeg_bin)
+        progress_span.tick(
+            0.02,
+            message=f"{source.label}: video metadata ready",
+            key="log.extract_probe_done",
+            args={"source": source.label},
+        )
+        selection_end = _selection_end(ctx.params)
+        indices, selection, scores, _candidate_cache = self._select_indices(
             ctx,
             source,
             fps=stream.fps,
             duration=duration,
             nb_frames=stream.nb_frames,
             ffmpeg_bin=ffmpeg_bin,
+            hwaccel=decoder.method,
+            paired_candidates=False,
+            progress_span=progress_span.child(0.02, selection_end),
         )
+        output_span = progress_span.child(selection_end, 1.0)
         paths = ffmpeg.extract_frames_sequential(
             source.path,
             stream_index=0,
@@ -195,10 +296,11 @@ class ExtractFrames(Stage):
             out_dir=ctx.stage_out_dir / "sources" / source.id / "images",
             out_prefix="frame",
             ffmpeg_bin=ffmpeg_bin,
-            progress=lambda current, total: ctx.progress.tick(
-                progress=current / max(1, total),
+            hwaccel=decoder.method,
+            progress=lambda current, total: output_span.tick(
+                current / max(1, total),
                 message=f"{source.label}: frame {current}/{total}",
-                key="log.extract_source_progress",
+                key="log.extract_output_progress",
                 args={"source": source.label, "cur": current, "tot": total},
             ),
         )
@@ -267,7 +369,10 @@ class ExtractFrames(Stage):
         duration: float,
         nb_frames: int | None,
         ffmpeg_bin: str | None,
-    ) -> tuple[list[int], dict, dict[int, dict]]:
+        hwaccel: str | None,
+        paired_candidates: bool,
+        progress_span: ProgressSpan,
+    ) -> tuple[list[int], dict, dict[int, dict], _CandidateFrameCache | None]:
         interval = ctx.params["interval_sec"]
         if interval <= 0:
             raise ValueError("interval_sec must be > 0")
@@ -281,15 +386,19 @@ class ExtractFrames(Stage):
         mode = ctx.params["selection_mode"]
         selection: dict = {"mode": mode}
         scores: dict[int, dict] = {}
+        candidate_cache = None
         if mode == "spatial":
-            indices, statistics, scores = self._select_spatial_indices(
+            indices, statistics, scores, candidate_cache = self._select_spatial_indices(
                 ctx,
                 source,
                 fps=fps,
                 duration=duration,
                 nb_frames=nb_frames,
                 ffmpeg_bin=ffmpeg_bin,
+                hwaccel=hwaccel,
+                paired_candidates=paired_candidates,
                 fallback_count=len(indices),
+                progress_span=progress_span,
             )
             selection.update(statistics)
         elif mode == "sharpness" or ctx.params["sharpness_candidates"] > 1:
@@ -302,9 +411,18 @@ class ExtractFrames(Stage):
                 candidate_count=max(2, ctx.params["sharpness_candidates"]),
                 nb_frames=nb_frames,
                 ffmpeg_bin=ffmpeg_bin,
+                hwaccel=hwaccel,
+                progress_span=progress_span,
+            )
+        else:
+            progress_span.tick(
+                1.0,
+                message=f"{source.label}: {len(indices)} frame indices selected",
+                key="log.extract_selection_done",
+                args={"source": source.label, "count": len(indices)},
             )
         selection["selected"] = len(indices)
-        return indices, selection, scores
+        return indices, selection, scores, candidate_cache
 
     def _refine_by_sharpness(
         self,
@@ -317,6 +435,8 @@ class ExtractFrames(Stage):
         candidate_count: int,
         nb_frames: int | None,
         ffmpeg_bin: str | None,
+        hwaccel: str | None,
+        progress_span: ProgressSpan,
     ) -> tuple[list[int], dict[int, dict]]:
         from ..imaging import sampling  # noqa: PLC0415
 
@@ -330,6 +450,7 @@ class ExtractFrames(Stage):
             tempfile.mkdtemp(prefix=f".extract-frames-sharpness-{source.id}-", dir=ctx.project_dir)
         )
         try:
+            decode_span = progress_span.child(0.0, 0.75)
             paths = ffmpeg.extract_frames_sequential(
                 source.path,
                 stream_index=0,
@@ -337,15 +458,49 @@ class ExtractFrames(Stage):
                 out_dir=scratch,
                 out_prefix="candidate",
                 ffmpeg_bin=ffmpeg_bin,
+                hwaccel=hwaccel,
+                progress=lambda current, total: decode_span.tick(
+                    current / max(1, total),
+                    message=f"{source.label}: candidate frame {current}/{total}",
+                    key="log.extract_candidates_progress",
+                    args={"source": source.label, "cur": current, "tot": total},
+                ),
             )
             path_by_index = dict(zip(candidates, paths, strict=True))
+            score_span = progress_span.child(0.75, 0.98)
+            sharpness_by_index = {}
+            with _single_threaded_opencv_workers(), ThreadPoolExecutor(
+                max_workers=_candidate_score_workers(ctx.params["score_workers"])
+            ) as executor:
+                futures = {
+                    executor.submit(sampling.sharpness_of_file, path_by_index[index]): index
+                    for index in candidates
+                }
+                for candidate_number, future in enumerate(as_completed(futures), 1):
+                    sharpness_by_index[futures[future]] = future.result()
+                    score_span.tick(
+                        candidate_number / max(1, len(candidates)),
+                        message=f"{source.label}: sharpness candidate {candidate_number}/{len(candidates)}",
+                        key="log.extract_scoring_progress",
+                        args={
+                            "source": source.label,
+                            "cur": candidate_number,
+                            "tot": len(candidates),
+                        },
+                    )
             selected = []
             scores_by_index = {}
             for group in groups:
-                scores = [sampling.sharpness_of_file(path_by_index[index]) for index in group]
+                scores = [sharpness_by_index[index] for index in group]
                 best = sampling.pick_sharpest(scores)
                 selected.append(group[best])
                 scores_by_index[group[best]] = {"sharpness": round(float(scores[best]), 1)}
+            progress_span.tick(
+                1.0,
+                message=f"{source.label}: sharpness selection complete",
+                key="log.extract_selection_done",
+                args={"source": source.label, "count": len(selected)},
+            )
             return sorted(set(selected)), scores_by_index
         finally:
             shutil.rmtree(scratch, ignore_errors=True)
@@ -359,55 +514,108 @@ class ExtractFrames(Stage):
         duration: float,
         nb_frames: int | None,
         ffmpeg_bin: str | None,
+        hwaccel: str | None,
+        paired_candidates: bool,
         fallback_count: int,
-    ) -> tuple[list[int], dict, dict[int, dict]]:
+        progress_span: ProgressSpan,
+    ) -> tuple[list[int], dict, dict[int, dict], _CandidateFrameCache | None]:
         import cv2  # noqa: PLC0415
 
         from ..imaging import quality, sampling  # noqa: PLC0415
 
         candidate_fps = ctx.params["candidate_fps"]
+        if candidate_fps <= 0:
+            raise ValueError("candidate_fps must be > 0")
         bound = nb_frames - 1 if nb_frames else None
         candidate_count = max(2, int(duration * candidate_fps))
         candidate_indices = sorted({int(index / candidate_fps * fps) for index in range(candidate_count)})
         if bound is not None:
             candidate_indices = sorted({min(bound, index) for index in candidate_indices})
         scratch = Path(tempfile.mkdtemp(prefix=f".extract-frames-spatial-{source.id}-", dir=ctx.project_dir))
+        keep_scratch = False
         try:
-            paths = ffmpeg.extract_frames_sequential(
-                source.path,
-                stream_index=0,
-                frame_indices=candidate_indices,
-                out_dir=scratch,
-                out_prefix="candidate",
-                ffmpeg_bin=ffmpeg_bin,
-            )
+            decode_span = progress_span.child(0.0, 0.65)
+
+            def candidate_progress(current: int, total: int) -> None:
+                decode_span.tick(
+                    current / max(1, total),
+                    message=f"{source.label}: spatial candidate {current}/{total}",
+                    key="log.extract_candidates_progress",
+                    args={"source": source.label, "cur": current, "tot": total},
+                )
+            candidate_cache = None
+            if paired_candidates:
+                paths, paired_paths = ffmpeg.extract_paired_frames(
+                    source.path,
+                    frame_indices=candidate_indices,
+                    out_dir_lens0=scratch / "lens0",
+                    out_dir_lens1=scratch / "lens1",
+                    ffmpeg_bin=ffmpeg_bin,
+                    hwaccel=hwaccel,
+                    progress=candidate_progress,
+                )
+                candidate_cache = _CandidateFrameCache(
+                    root=scratch,
+                    pairs_by_source_index=dict(
+                        zip(candidate_indices, zip(paths, paired_paths, strict=True), strict=True)
+                    ),
+                )
+            else:
+                paths = ffmpeg.extract_frames_sequential(
+                    source.path,
+                    stream_index=0,
+                    frame_indices=candidate_indices,
+                    out_dir=scratch,
+                    out_prefix="candidate",
+                    ffmpeg_bin=ffmpeg_bin,
+                    hwaccel=hwaccel,
+                    progress=candidate_progress,
+                )
             grays = {}
             candidates = []
-            for index, path in zip(candidate_indices, paths, strict=True):
+            score_span = progress_span.child(0.65, 0.85)
+
+            def score_candidate(item: tuple[int, Path]):
+                index, path = item
                 gray = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
                 if gray is None:
-                    continue
+                    return None
                 height, width = gray.shape[:2]
                 small = cv2.resize(
                     gray,
                     (max(1, width // 4), max(1, height // 4)),
                     interpolation=cv2.INTER_AREA,
                 )
-                grays[index] = small
                 exposure_ok = quality.exposure_stats(small).is_ok(ctx.params["max_clip"])
-                candidates.append(
-                    sampling.Candidate(
-                        index=index,
-                        timestamp_us=int(index / fps * 1_000_000),
-                        sharpness=sampling.laplacian_sharpness(small),
-                        exposure_ok=exposure_ok,
-                        feature_count=quality.sift_feature_count(small, downscale=1) if exposure_ok else 0,
-                    )
+                candidate = sampling.Candidate(
+                    index=index,
+                    timestamp_us=int(index / fps * 1_000_000),
+                    sharpness=sampling.laplacian_sharpness(small),
+                    exposure_ok=exposure_ok,
+                    feature_count=quality.sift_feature_count(small, downscale=1) if exposure_ok else 0,
                 )
+                return index, small, candidate
+
+            with _single_threaded_opencv_workers(), ThreadPoolExecutor(
+                max_workers=_candidate_score_workers(ctx.params["score_workers"])
+            ) as executor:
+                scored = executor.map(score_candidate, zip(candidate_indices, paths, strict=True))
+                for candidate_number, result in enumerate(scored, 1):
+                    if result is not None:
+                        index, small, candidate = result
+                        grays[index] = small
+                        candidates.append(candidate)
+                    score_span.tick(
+                        candidate_number / max(1, len(paths)),
+                        message=f"{source.label}: score candidate {candidate_number}/{len(paths)}",
+                        key="log.extract_scoring_progress",
+                        args={"source": source.label, "cur": candidate_number, "tot": len(paths)},
+                    )
 
             def motion(first: int, second: int) -> float:
                 return quality.optical_flow_median(grays[first], grays[second], downscale=1)
 
+            motion_span = progress_span.child(0.85, 1.0)
             result = sampling.select_spatial(
                 candidates,
                 motion,
@@ -417,11 +625,30 @@ class ExtractFrames(Stage):
                     target_motion=ctx.params["target_motion"],
                     max_frames=ctx.params["max_frames"],
                 ),
+                progress=lambda current, total: motion_span.tick(
+                    current / max(1, total),
+                    message=f"{source.label}: motion pair {current}/{total}",
+                    key="log.extract_motion_progress",
+                    args={"source": source.label, "cur": current, "tot": total},
+                ),
             )
+            if len(candidates) <= 1:
+                motion_span.tick(
+                    1.0,
+                    message=f"{source.label}: spatial selection complete",
+                    key="log.extract_selection_done",
+                    args={"source": source.label, "count": len(result.selected_indices)},
+                )
             statistics = {"candidates": len(candidates), "reasons": dict(result.reasons)}
             if not result.selected_indices:
                 step = max(1, len(candidate_indices) // max(1, fallback_count))
-                return candidate_indices[::step], {**statistics, "fallback": True}, {}
+                keep_scratch = candidate_cache is not None
+                return (
+                    candidate_indices[::step],
+                    {**statistics, "fallback": True},
+                    {},
+                    candidate_cache,
+                )
             by_index = {candidate.index: candidate for candidate in candidates}
             scores = {
                 index: {
@@ -430,9 +657,49 @@ class ExtractFrames(Stage):
                 }
                 for index in result.selected_indices
             }
-            return result.selected_indices, statistics, scores
+            keep_scratch = candidate_cache is not None
+            return result.selected_indices, statistics, scores, candidate_cache
         finally:
-            shutil.rmtree(scratch, ignore_errors=True)
+            if not keep_scratch:
+                shutil.rmtree(scratch, ignore_errors=True)
+
+    def _resolve_decoder(
+        self,
+        ctx: StageContext,
+        source: SourceContext,
+        ffmpeg_bin: str | None,
+    ) -> ffmpeg.HardwareDecode:
+        decoder = ffmpeg.resolve_hardware_decode(
+            source.path,
+            stream_index=0,
+            preference=ctx.params["hwaccel"],
+            required=ctx.params["require_hwaccel"],
+            ffmpeg_bin=ffmpeg_bin,
+        )
+        args = {
+            "source": source.label,
+            "decoder": decoder.method or "software",
+            "detail": decoder.detail,
+        }
+        if decoder.method is None and ctx.params["hwaccel"] not in {"", "none", "software"}:
+            ctx.progress.warn(
+                f"{source.label}: {decoder.detail}",
+                key="log.extract_decoder_fallback",
+                args=args,
+            )
+        elif decoder.method is None:
+            ctx.progress.info(
+                f"{source.label}: decoder=software",
+                key="log.extract_decoder_software",
+                args=args,
+            )
+        else:
+            ctx.progress.info(
+                f"{source.label}: decoder={decoder.method}",
+                key="log.extract_decoder",
+                args=args,
+            )
+        return decoder
 
 
 def _source_manifest(
@@ -460,6 +727,32 @@ def _source_manifest(
         "selection": selection,
         "frames": frames,
     }
+
+
+def _selection_end(params: dict) -> float:
+    if params["selection_mode"] == "spatial":
+        return 0.72
+    if params["selection_mode"] == "sharpness" or params["sharpness_candidates"] > 1:
+        return 0.55
+    return 0.05
+
+
+def _candidate_score_workers(configured: int) -> int:
+    if configured < 0:
+        raise ValueError("score_workers must be >= 0")
+    return configured or max(1, os.cpu_count() or 1)
+
+
+@contextmanager
+def _single_threaded_opencv_workers():
+    import cv2  # noqa: PLC0415
+
+    previous = cv2.getNumThreads()
+    cv2.setNumThreads(1)
+    try:
+        yield
+    finally:
+        cv2.setNumThreads(max(1, previous))
 
 
 def _frame_statistics(manifest: dict) -> dict:

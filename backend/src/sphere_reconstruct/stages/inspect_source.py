@@ -24,20 +24,27 @@ from ..insta360 import metadata as insv_metadata
 from ..insta360 import protobuf as pb
 from ..pipeline.manifest import register
 from ..pipeline.source_inputs import IMAGE_EXTENSIONS, collect_source_inputs
-from ..pipeline.stage import Stage, StageContext, new_manifest
+from ..pipeline.stage import ProgressSpan, Stage, StageContext, new_manifest
 
 
 @register
 class InspectSource(Stage):
     name = StageName.INSPECT_SOURCE
-    impl_version = "2.0"
+    impl_version = "2.1"
 
     def collect_inputs(self, ctx: StageContext) -> list[FileRef]:
-        return collect_source_inputs(ctx.sources)
+        return collect_source_inputs(
+            ctx.sources,
+            progress=lambda path, current, total: ctx.progress.tick(
+                message=f"fingerprinting {path.name}: {current}/{total} bytes",
+                key="log.source_hash_progress",
+                args={"name": path.name, "cur": current, "tot": total},
+            ),
+        )
 
     def execute(self, ctx: StageContext) -> StageManifest:
         manifest = new_manifest(self.name, self.impl_version)
-        manifest.inputs = self.collect_inputs(ctx)
+        manifest.inputs = ctx.inputs_for(self)
         manifest.params = ctx.params
 
         if not ctx.sources:
@@ -47,15 +54,26 @@ class InspectSource(Stage):
         out_dir.mkdir(parents=True, exist_ok=True)
 
         summaries = []
-        for source in ctx.sources:
+        for source_number, source in enumerate(ctx.sources):
+            source_span = ProgressSpan(
+                ctx.progress,
+                0.98 * source_number / len(ctx.sources),
+                0.98 * (source_number + 1) / len(ctx.sources),
+            )
+            ctx.progress.info(
+                f"inspecting source: {source.label}",
+                progress=source_span.low,
+                key="log.inspect_source_start",
+                args={"source": source.label, "cur": source_number + 1, "tot": len(ctx.sources)},
+            )
             source_out = out_dir / "sources" / source.id
             source_out.mkdir(parents=True, exist_ok=True)
             if source.adapter == SourceAdapter.INSTA360_INSV:
-                summary = self._inspect_insv(source.path, source_out, ctx)
+                summary = self._inspect_insv(source.path, source_out, ctx, source_span)
             elif source.media_kind == MediaKind.VIDEO:
-                summary = self._inspect_video(source.path, ctx)
+                summary = self._inspect_video(source.path, ctx, source_span)
             else:
-                summary = self._inspect_images(source.path, ctx)
+                summary = self._inspect_images(source.path, ctx, source_span)
             summaries.append(
                 {
                     "id": source.id,
@@ -82,10 +100,15 @@ class InspectSource(Stage):
             )
         ]
         manifest.extra = _source_statistics(summaries)
+        ctx.progress.info("all sources inspected", progress=0.99, key="log.inspect_all_done")
         return manifest
 
-    def _inspect_insv(self, path: Path, out_dir: Path, ctx: StageContext) -> dict:
-        ctx.progress.info("scanning MP4 boxes", progress=0.1, key="log.inspect_scan_mp4")
+    def _inspect_insv(
+        self, path: Path, out_dir: Path, ctx: StageContext, progress_span: ProgressSpan
+    ) -> dict:
+        ctx.progress.info(
+            "scanning MP4 boxes", progress=progress_span.value(0.1), key="log.inspect_scan_mp4"
+        )
         layout = insv.layout(path)
 
         summary: dict = {
@@ -107,7 +130,9 @@ class InspectSource(Stage):
 
         if layout.footer_offset is not None:
             ctx.progress.info(
-                "scanning Insta360 footer (inst box)", progress=0.4, key="log.inspect_scan_footer"
+                "scanning Insta360 footer (inst box)",
+                progress=progress_span.value(0.4),
+                key="log.inspect_scan_footer",
             )
             try:
                 view = insv_metadata.read_footer(path, layout.footer_offset)
@@ -126,7 +151,9 @@ class InspectSource(Stage):
 
                 # inst box を丸ごと読んで offset_v3 ASCII 校准串を拾う.
                 ctx.progress.info(
-                    "parsing offset_v3 (ascii)", progress=0.55, key="log.inspect_parse_offset_v3"
+                    "parsing offset_v3 (ascii)",
+                    progress=progress_span.value(0.55),
+                    key="log.inspect_parse_offset_v3",
                 )
                 inst_bytes = insv_metadata.read_inst_box_bytes(view)
                 cands = calib.find_ascii_calibrations(inst_bytes)
@@ -159,7 +186,7 @@ class InspectSource(Stage):
                     ctx.progress.info(
                         f"IMU gravity: {grav.gravity_imu} ({grav.sample_count} samples, "
                         f"|a|~{grav.mean_magnitude:.2f})",
-                        progress=0.6,
+                        progress=progress_span.value(0.6),
                         key="log.inspect_gravity",
                         args={
                             "gx": round(grav.gravity_imu[0], 3),
@@ -172,7 +199,7 @@ class InspectSource(Stage):
                 else:
                     ctx.progress.info(
                         "IMU gravity not found (no Gyro record)",
-                        progress=0.6,
+                        progress=progress_span.value(0.6),
                         key="log.inspect_gravity_none",
                     )
             except insv_metadata.FooterNotFoundError as e:
@@ -182,7 +209,11 @@ class InspectSource(Stage):
                     args={"error": str(e)},
                 )
 
-        ctx.progress.info("looking for external .insv.pb", progress=0.7, key="log.inspect_look_pb")
+        ctx.progress.info(
+            "looking for external .insv.pb",
+            progress=progress_span.value(0.7),
+            key="log.inspect_look_pb",
+        )
         pb_path = pb.find_pb_for(path)
         if pb_path is not None:
             probe = pb.probe(pb_path)
@@ -193,18 +224,26 @@ class InspectSource(Stage):
             # offset_v3 では埋まらなかったが footer は存在する -> 内蔵 profile への降級待ち.
             summary["calibration_source"] = "builtin_profile"
 
-        ctx.progress.info("inspect done", progress=1.0, key="log.inspect_done")
+        ctx.progress.info(
+            "inspect done", progress=progress_span.high, key="log.inspect_done"
+        )
         return summary
 
     # -- ERP video / images (最小実装) ---------------------------------------------
-    def _inspect_video(self, path: Path, ctx: StageContext) -> dict:
+    def _inspect_video(
+        self, path: Path, ctx: StageContext, progress_span: ProgressSpan
+    ) -> dict:
         from ..imaging import ffprobe as _ffprobe
         from ..settings import get_settings
 
-        ctx.progress.info("ffprobe on video source", progress=0.5, key="log.inspect_video")
+        ctx.progress.info(
+            "ffprobe on video source",
+            progress=progress_span.value(0.2),
+            key="log.inspect_video",
+        )
         pr = _ffprobe.probe(path, ffprobe_bin=get_settings().binaries.ffprobe or None)
         vs = pr.video_streams[0] if pr.video_streams else None
-        ctx.progress.info("inspect done", progress=1.0, key="log.inspect_done")
+        ctx.progress.info("inspect done", progress=progress_span.high, key="log.inspect_done")
         return {
             "path": str(path),
             "file_size": path.stat().st_size,
@@ -220,7 +259,9 @@ class InspectSource(Stage):
             else None,
         }
 
-    def _inspect_images(self, path: Path, ctx: StageContext) -> dict:
+    def _inspect_images(
+        self, path: Path, ctx: StageContext, progress_span: ProgressSpan
+    ) -> dict:
         if not path.is_dir():
             raise NotADirectoryError(f"image source must be a directory: {path}")
         images = sorted(
@@ -228,7 +269,7 @@ class InspectSource(Stage):
         )
         ctx.progress.info(
             f"image collection: {len(images)} files",
-            progress=1.0,
+            progress=progress_span.high,
             key="log.inspect_images",
             args={"count": len(images)},
         )

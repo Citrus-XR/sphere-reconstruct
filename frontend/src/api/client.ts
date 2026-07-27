@@ -270,6 +270,7 @@ export interface StageStatus {
   finished_at: string | null
   params: Record<string, unknown> | null
   extra: Record<string, unknown> | null
+  progress_event: EventEnvelope | null
 }
 export interface StagesStatus {
   project_id: string
@@ -334,6 +335,10 @@ export interface MaskImageRecord {
 export interface MasksManifest {
   version: 3
   purpose: MaskPurpose
+  revision: string
+  complete: boolean
+  total_images: number
+  generated_images: number
   prompt: string[]
   max_inference_size: number
   dilate_px: number
@@ -363,8 +368,9 @@ export const frameImageUrl = (id: string, index: number, lens: number) =>
 // 用途別 mask PNG の URL.
 export const preparedImageUrl = (id: string, name: string) =>
   `/api/projects/${id}/prepared-image?name=${encodeURIComponent(name)}`
-export const preparedMaskUrl = (id: string, name: string, purpose: MaskPurpose) =>
+export const preparedMaskUrl = (id: string, name: string, purpose: MaskPurpose, revision?: string) =>
   `/api/projects/${id}/prepared-mask?name=${encodeURIComponent(name)}&purpose=${purpose}`
+  + (revision ? `&revision=${encodeURIComponent(revision)}` : '')
 
 export type ParsedImageName = {
   kind: 'native' | 'pinhole' | 'erp' | 'perspective'
@@ -437,7 +443,7 @@ export const fetchPoints = async (projectId: string): Promise<ParsedPoints> => {
 export const openEventStream = (
   opts: { jobId?: string; projectId?: string; since?: number },
   onEvent: (e: EventEnvelope) => void,
-  onStatus?: (status: 'disconnected' | 'reconnected') => void,
+  onStatus?: (status: 'disconnected' | 'reconnected' | 'invalid-event') => void,
 ): { close: () => void } => {
   // バックエンド再起動 / 一時的な切断でも進捗が止まらないよう自動再接続する.
   // 受信した最大 id を覚え, 再接続時に since=lastId で続きから取り (取りこぼし / 重複なし).
@@ -445,8 +451,8 @@ export const openEventStream = (
   let ws: WebSocket | null = null
   let closed = false
   let lastId = opts.since ?? -1
-  let everOpen = false
   let downNotified = false
+  let invalidNotified = false
   let retry: ReturnType<typeof setTimeout> | undefined
 
   const connect = () => {
@@ -458,8 +464,7 @@ export const openEventStream = (
     const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
     ws = new WebSocket(`${proto}//${window.location.host}/api/events?${params.toString()}`)
     ws.onopen = () => {
-      if (everOpen && downNotified) onStatus?.('reconnected')
-      everOpen = true
+      if (downNotified) onStatus?.('reconnected')
       downNotified = false
     }
     ws.onmessage = ev => {
@@ -472,17 +477,21 @@ export const openEventStream = (
           try {
             args = JSON.parse(raw.msg_args) as Record<string, unknown>
           } catch {
-            args = null
+            if (!invalidNotified) onStatus?.('invalid-event')
+            invalidNotified = true
+            return
           }
         }
+        invalidNotified = false
         onEvent({ ...raw, msg_args: args })
       } catch {
-        // 壊れたメッセージは無視.
+        if (!invalidNotified) onStatus?.('invalid-event')
+        invalidNotified = true
       }
     }
     ws.onclose = () => {
       if (closed) return
-      if (everOpen && !downNotified) { onStatus?.('disconnected'); downNotified = true }
+      if (!downNotified) { onStatus?.('disconnected'); downNotified = true }
       clearTimeout(retry)
       retry = setTimeout(connect, 1000)
     }

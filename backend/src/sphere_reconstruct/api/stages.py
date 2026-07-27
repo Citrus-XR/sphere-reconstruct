@@ -56,6 +56,57 @@ async def list_stages(project_id: str) -> dict:
             "job_id": row["job_id"],
         }
 
+    progress_by_job: dict[tuple[str, str], dict] = {}
+    progress_rows = await (
+        await db.conn.execute(
+            """
+            WITH activity AS (
+                SELECT stage, job_id, MAX(id) AS event_id
+                FROM event
+                WHERE project_id=? AND stage IS NOT NULL AND job_id IS NOT NULL
+                GROUP BY stage, job_id
+            ), numeric_progress AS (
+                SELECT stage, job_id, MAX(id) AS event_id
+                FROM event
+                WHERE project_id=? AND stage IS NOT NULL AND job_id IS NOT NULL
+                  AND progress IS NOT NULL
+                GROUP BY stage, job_id
+            )
+            SELECT
+                activity.stage,
+                activity.job_id,
+                activity_event.id,
+                activity_event.level,
+                activity_event.message,
+                activity_event.msg_key,
+                activity_event.msg_args,
+                activity_event.kind,
+                activity_event.ts,
+                numeric_event.progress
+            FROM activity
+            JOIN event AS activity_event ON activity_event.id=activity.event_id
+            LEFT JOIN numeric_progress
+              ON numeric_progress.stage=activity.stage AND numeric_progress.job_id=activity.job_id
+            LEFT JOIN event AS numeric_event ON numeric_event.id=numeric_progress.event_id
+            """,
+            (project_id, project_id),
+        )
+    ).fetchall()
+    for row in progress_rows:
+        progress_by_job[(row["stage"], row["job_id"])] = {
+            "id": row["id"],
+            "job_id": row["job_id"],
+            "project_id": project_id,
+            "stage": row["stage"],
+            "level": row["level"],
+            "message": row["message"],
+            "msg_key": row["msg_key"],
+            "msg_args": json.loads(row["msg_args"]) if row["msg_args"] else None,
+            "progress": row["progress"],
+            "kind": row["kind"],
+            "ts": row["ts"],
+        }
+
     proj_dir = _project_dir(project_id)
     stages = []
     for st in STAGE_ORDER:
@@ -71,6 +122,7 @@ async def list_stages(project_id: str) -> dict:
             except (OSError, json.JSONDecodeError):
                 params = None
         run = latest.get(st.value, {})
+        job_id = run.get("job_id")
         status = _resolve_stage_status(
             has_output=has_output,
             stale=is_stale(proj_dir, st),
@@ -87,6 +139,7 @@ async def list_stages(project_id: str) -> dict:
                 "finished_at": run.get("finished_at"),
                 "params": params,
                 "extra": extra,
+                "progress_event": progress_by_job.get((st.value, job_id)) if job_id else None,
             }
         )
     return {"project_id": project_id, "state": p.state.value, "stages": stages}

@@ -122,9 +122,6 @@ class Engine:
         # 出力先は tmp ディレクトリ, 成功時に final に atomic replace.
         final_dir = project_dir / stage_name.value
         tmp_dir = project_dir / f".{stage_name.value}.tmp"
-        if tmp_dir.exists():
-            shutil.rmtree(tmp_dir)
-        tmp_dir.mkdir(parents=True)
 
         stage_run_id = str(uuid.uuid4())
         started_at = _iso_now()
@@ -167,23 +164,7 @@ class Engine:
             progress=reporter,
         )
 
-        # 冪等チェック. すでに final があって, 入力/パラメータ/実装バージョンが一致するならスキップ.
-        cached = self._cached_matches(stage, ctx)
-        if cached is not None:
-            reporter.info(
-                f"stage {stage_name.value} skipped (cache hit)",
-                progress=1.0,
-                key="log.cache_hit",
-                args={"stage": stage_name.value},
-            )
-            shutil.rmtree(tmp_dir, ignore_errors=True)
-            self._refresh_project_state()
-            return
-
-        if StageName.EXPORT_DATASET in downstream_of(stage_name):
-            assert_export_is_managed(project_dir)
-
-        # stage_run 挿入 (running).
+        # Fingerprint 中も UI が running / activity を復元できるよう先に lifecycle row を作る。
         self._execute(
             """
             INSERT INTO stage_run
@@ -204,6 +185,49 @@ class Engine:
         )
 
         try:
+            if tmp_dir.exists():
+                reporter.info(
+                    f"removing stale temporary output: {stage_name.value}",
+                    key="log.stage_cleanup",
+                    args={"stage": stage_name.value},
+                )
+                shutil.rmtree(tmp_dir)
+            tmp_dir.mkdir(parents=True)
+            # 冪等チェックと実行で同じ fingerprint を共有し、大きな source/database を二重 hash しない。
+            reporter.info(
+                f"preparing stage inputs: {stage_name.value}",
+                key="log.stage_preflight",
+                args={"stage": stage_name.value},
+            )
+            current_inputs = ctx.inputs_for(stage)
+            cached = self._cached_matches(stage, ctx, current_inputs)
+            if cached is not None:
+                self._execute(
+                    """
+                    UPDATE stage_run SET status='succeeded', finished_at=?, inputs_hash=?,
+                        params_hash=?, manifest_path=? WHERE id=?
+                    """,
+                    (
+                        _iso_now(),
+                        cached.inputs_hash,
+                        cached.params_hash,
+                        str(manifest_path(project_dir, stage_name.value)),
+                        stage_run_id,
+                    ),
+                )
+                reporter.info(
+                    f"stage {stage_name.value} skipped (cache hit)",
+                    progress=1.0,
+                    key="log.cache_hit",
+                    args={"stage": stage_name.value},
+                )
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+                self._refresh_project_state()
+                return
+
+            if StageName.EXPORT_DATASET in downstream_of(stage_name):
+                assert_export_is_managed(project_dir)
+
             manifest = stage.execute(ctx)
             manifest.compute_hashes()
             manifest.finished_at = datetime.now(UTC)
@@ -214,6 +238,11 @@ class Engine:
                 """,
                 (_iso_now(), _short_error(e), stage_run_id),
             )
+            reporter.error(
+                f"stage {stage_name.value} failed: {_short_error(e)}",
+                key="log.stage_failed",
+                args={"stage": stage_name.value, "error": _short_error(e)},
+            )
             shutil.rmtree(tmp_dir, ignore_errors=True)
             raise
 
@@ -223,6 +252,12 @@ class Engine:
             assert_export_is_managed(project_dir)
 
         # tmp -> final を原子置換.
+        reporter.tick(
+            progress=0.99,
+            message=f"publishing stage artifacts: {stage_name.value}",
+            key="log.stage_publishing",
+            args={"stage": stage_name.value},
+        )
         atomic_replace_dir(tmp_dir, final_dir)
         clear_stale(project_dir, stage_name)
         manifest_file = manifest_path(project_dir, stage_name.value)
@@ -248,8 +283,19 @@ class Engine:
         )
         self._invalidate_downstream(stage_name)
         self._refresh_project_state()
+        reporter.info(
+            f"stage {stage_name.value} published",
+            progress=1.0,
+            key="log.stage_published",
+            args={"stage": stage_name.value},
+        )
 
-    def _cached_matches(self, stage, ctx: StageContext) -> StageManifest | None:
+    def _cached_matches(
+        self,
+        stage,
+        ctx: StageContext,
+        current_inputs: list,
+    ) -> StageManifest | None:
         """既存 manifest が現在の入力/パラメータ/実装バージョンと一致するならそれを返す."""
         mf_path = manifest_path(self.project_dir(), stage.name.value)
         if not mf_path.exists():
@@ -258,7 +304,6 @@ class Engine:
         if existing.impl_version != stage.impl_version:
             return None
         # 現在の入力ハッシュを計算して比較する. 入力ファイル走査コスト vs. 実行コストを考えると許容.
-        current_inputs = stage.collect_inputs(ctx)
         temp = StageManifest(
             stage=stage.name.value,
             impl_version=stage.impl_version,

@@ -4,22 +4,29 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from uuid import uuid4
 
 import numpy as np
 
 from ..domain.artifacts import FileRef, StageManifest
-from ..domain.mask_artifact import MASK_MANIFEST_VERSION, MaskPurpose
+from ..domain.mask_artifact import (
+    MASK_MANIFEST_VERSION,
+    MaskPurpose,
+    append_partial_mask_record,
+    initialise_partial_mask_manifest,
+    remove_partial_mask_manifest,
+)
 from ..domain.pipeline_state import StageName
 from ..imaging import masks as mask_utils
 from ..infrastructure.filesystem import sha256_file
 from ..pipeline.manifest import register
-from ..pipeline.stage import Stage, StageContext, new_manifest
+from ..pipeline.stage import ProgressSpan, Stage, StageContext, new_manifest
 from ..settings import get_settings
 
 
 class _GenerateMasks(Stage):
     purpose: MaskPurpose
-    impl_version = "1.0"
+    impl_version = "1.2"
 
     def normalize_params(self, raw: dict) -> dict:
         settings = get_settings().sam3
@@ -62,14 +69,31 @@ class _GenerateMasks(Stage):
         if ctx.params["max_images"] > 0:
             images = images[: ctx.params["max_images"]]
         prompts = [term.strip() for term in ctx.params["prompt"].split(",") if term.strip()]
+        manifest_base = {
+            "version": MASK_MANIFEST_VERSION,
+            "purpose": self.purpose.value,
+            "revision": uuid4().hex,
+            "prompt": prompts,
+            "max_inference_size": ctx.params["max_inference_size"],
+            "dilate_px": ctx.params["dilate_px"],
+            "total_images": len(images),
+        }
+        partial_records_path = initialise_partial_mask_manifest(ctx.stage_out_dir, manifest_base)
 
         engine = None
         if prompts:
             from ..sam3.engine import Sam3Engine  # noqa: PLC0415
 
-            ctx.progress.info("SAM3 model を読み込み中", progress=0.01, key="log.mask_loading_model")
+            settings = get_settings().sam3
+            ctx.progress.info(
+                "SAM3 model を読み込み中",
+                progress=0.01,
+                key="log.mask_loading_model",
+                args={"device": settings.device},
+            )
             engine = Sam3Engine.from_settings()
             engine.load()
+            ctx.progress.info("SAM3 model loaded", progress=0.02, key="log.mask_model_loaded")
         else:
             ctx.progress.info(
                 "prompt 空: SAM3 をスキップし valid-region mask だけを生成",
@@ -81,6 +105,17 @@ class _GenerateMasks(Stage):
         outputs = []
         try:
             for number, image_record in enumerate(images, 1):
+                image_span = ProgressSpan(
+                    ctx.progress,
+                    0.02 + 0.96 * (number - 1) / max(1, len(images)),
+                    0.02 + 0.96 * number / max(1, len(images)),
+                )
+                image_span.tick(
+                    0.02,
+                    message=f"mask image {number}/{len(images)}",
+                    key="log.mask_progress_image",
+                    args={"cur": number, "tot": len(images), "name": image_record["name"]},
+                )
                 source_path = ctx.project_dir / image_record["path"]
                 bgr = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
                 if bgr is None:
@@ -88,7 +123,30 @@ class _GenerateMasks(Stage):
                 height, width = bgr.shape[:2]
                 plan = mask_utils.plan_downsample(width, height, ctx.params["max_inference_size"])
                 small_rgb = cv2.cvtColor(mask_utils.downsample_image(bgr, plan), cv2.COLOR_BGR2RGB)
-                detections = engine.detect(small_rgb, prompts) if engine is not None else []
+
+                def prompt_progress(
+                    current: int,
+                    total: int,
+                    *,
+                    span: ProgressSpan = image_span,
+                    name: str = image_record["name"],
+                ) -> None:
+                    span.tick(
+                        0.05 + 0.85 * current / max(1, total),
+                        message=f"prompt {current}/{total}: {name}",
+                        key="log.mask_prompt_progress",
+                        args={"cur": current, "tot": total, "name": name},
+                    )
+
+                detections = (
+                    engine.detect(
+                        small_rgb,
+                        prompts,
+                        progress=prompt_progress,
+                    )
+                    if engine is not None
+                    else []
+                )
                 union = mask_utils.union_masks([mask for detection in detections for mask in detection.masks])
                 dynamic = (
                     np.zeros((height, width), np.uint8)
@@ -106,22 +164,22 @@ class _GenerateMasks(Stage):
                         key="log.mask_coverage_warn_image",
                         args={"name": image_record["name"], "cov": round(coverage, 2)},
                     )
-                records.append(
-                    {
-                        "name": image_record["name"],
-                        "source_id": image_record["source_id"],
-                        "capture_index": image_record["capture_index"],
-                        "path": _final_relpath(output_path, ctx),
-                        "coverage": coverage,
-                        "coverage_warning": warning,
-                        "detections": {
-                            detection.prompt: len(detection.masks) for detection in detections
-                        },
-                    }
-                )
+                record = {
+                    "name": image_record["name"],
+                    "source_id": image_record["source_id"],
+                    "capture_index": image_record["capture_index"],
+                    "path": _final_relpath(output_path, ctx),
+                    "coverage": coverage,
+                    "coverage_warning": warning,
+                    "detections": {
+                        detection.prompt: len(detection.masks) for detection in detections
+                    },
+                }
+                records.append(record)
+                append_partial_mask_record(partial_records_path, record)
                 outputs.append(_file_ref(output_path, ctx, "image/png"))
-                ctx.progress.tick(
-                    progress=0.02 + 0.96 * number / max(1, len(images)),
+                image_span.tick(
+                    1.0,
                     message=f"mask {number}/{len(images)}",
                     key="log.mask_progress_image",
                     args={"cur": number, "tot": len(images), "name": image_record["name"]},
@@ -131,24 +189,23 @@ class _GenerateMasks(Stage):
                 engine.unload()
 
         mask_manifest = {
-            "version": MASK_MANIFEST_VERSION,
-            "purpose": self.purpose.value,
-            "prompt": prompts,
-            "max_inference_size": ctx.params["max_inference_size"],
-            "dilate_px": ctx.params["dilate_px"],
+            **manifest_base,
+            "complete": True,
+            "generated_images": len(records),
             "images": records,
         }
         manifest_path = ctx.stage_out_dir / "manifest_masks.json"
         manifest_path.write_text(
             json.dumps(mask_manifest, ensure_ascii=False, indent=2), encoding="utf-8"
         )
+        remove_partial_mask_manifest(ctx.stage_out_dir)
         outputs.append(_file_ref(manifest_path, ctx, "application/json"))
         manifest = new_manifest(self.name, self.impl_version)
-        manifest.inputs = self.collect_inputs(ctx)
+        manifest.inputs = ctx.inputs_for(self)
         manifest.params = ctx.params
         manifest.outputs = outputs
         manifest.extra = _mask_statistics(mask_manifest)
-        ctx.progress.info(f"{self.name.value} done", progress=1.0, key="log.mask_done")
+        ctx.progress.info(f"{self.name.value} done", progress=0.99, key="log.mask_done")
         return manifest
 
 

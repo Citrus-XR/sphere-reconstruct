@@ -22,7 +22,7 @@ def diagnose() -> dict:
     checks = {
         "workspace": _workspace_check(),
         "filesystem_roots": _filesystem_roots_check(),
-        "ffmpeg": _binary_check(settings.binaries.ffmpeg, "ffmpeg", ["-version"]),
+        "ffmpeg": _ffmpeg_check(),
         "ffprobe": _binary_check(settings.binaries.ffprobe, "ffprobe", ["-version"]),
         "colmap": _colmap_check(),
         "sam3": _sam3_check(),
@@ -52,6 +52,45 @@ def _binary_check(explicit: str, name: str, version_args: list[str]) -> dict:
         "version": result["output"].splitlines()[0] if result["output"] else "",
         "message": "ok" if result["returncode"] == 0 else result["output"][-500:],
     }
+
+
+def _ffmpeg_check() -> dict:
+    settings = get_settings()
+    check = _binary_check(settings.binaries.ffmpeg, "ffmpeg", ["-version"])
+    methods: list[str] = []
+    if check["ok"]:
+        result = _run([check["path"], "-hide_banner", "-v", "error", "-hwaccels"])
+        if result["returncode"] == 0:
+            methods = [
+                line.strip()
+                for line in result["output"].splitlines()
+                if line.strip() and not line.lower().startswith("hardware acceleration")
+            ]
+    check["hardware_decode"] = {
+        "preference": settings.frame_extraction.hwaccel,
+        "required": settings.frame_extraction.require_hwaccel,
+        "available_methods": methods,
+        "source_probe": "performed when frame extraction starts",
+    }
+    preference = settings.frame_extraction.hwaccel.lower()
+    if check["ok"]:
+        available_text = ", ".join(methods) if methods else "none"
+        check["message"] = f"ok; hardware decode={preference}, available={available_text}"
+    if settings.frame_extraction.require_hwaccel and settings.frame_extraction.hwaccel in {
+        "",
+        "none",
+        "software",
+    }:
+        check["ok"] = False
+        check["message"] = "hardware decode is required but disabled"
+    elif (
+        settings.frame_extraction.require_hwaccel
+        and preference != "auto"
+        and preference not in methods
+    ):
+        check["ok"] = False
+        check["message"] = f"required hardware decoder is not compiled into FFmpeg: {preference}"
+    return check
 
 
 def _colmap_check() -> dict:

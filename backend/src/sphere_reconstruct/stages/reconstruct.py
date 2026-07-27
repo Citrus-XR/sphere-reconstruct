@@ -26,7 +26,7 @@ from .colmap_progress import global_mapper_progress, hidden_log, mapper_progress
 @register
 class Reconstruct(Stage):
     name = StageName.RECONSTRUCT
-    impl_version = "2.2"
+    impl_version = "2.3"
 
     def normalize_params(self, raw: dict) -> dict:
         mapper = str(raw.get("mapper", "global")).lower()
@@ -69,15 +69,17 @@ class Reconstruct(Stage):
 
     def execute(self, ctx: StageContext) -> StageManifest:
         manifest = new_manifest(self.name, self.impl_version)
-        manifest.inputs = self.collect_inputs(ctx)
+        manifest.inputs = ctx.inputs_for(self)
         manifest.params = ctx.params
         source_database = ctx.project_dir / "match_features" / "database.db"
         spec_path = ctx.project_dir / "extract_features" / "input_spec.json"
         if not source_database.exists() or not spec_path.exists():
             raise RuntimeError("extract_features and match_features must run before reconstruction")
         spec = InputSpec.read(spec_path)
+        ctx.progress.info("copying matched database", progress=0.0, key="log.recon_copy_database")
         database_path = ctx.stage_out_dir / "database.db"
         shutil.copy2(source_database, database_path)
+        ctx.progress.tick(0.03, message="matched database copied", key="log.recon_database_ready")
         sparse_dir = ctx.stage_out_dir / "sparse"
         logs_dir = ctx.stage_out_dir / "logs"
         sparse_dir.mkdir(parents=True, exist_ok=True)
@@ -107,6 +109,11 @@ class Reconstruct(Stage):
                     log_path=logs_dir / "view_graph_calibrator.log",
                     on_line=hidden_log(ctx, "view-graph"),
                 )
+                ctx.progress.tick(
+                    0.12,
+                    message="view graph calibration complete",
+                    key="log.recon_view_graph_done",
+                )
             model_dir, summary, mapper_attempts = _run_global_mapper_with_retries(
                 ctx,
                 spec,
@@ -127,10 +134,11 @@ class Reconstruct(Stage):
                 multiple_models=spec.multiple_models,
                 extra_args=_incremental_args(ctx.params),
                 log_path=logs_dir / "mapper.log",
-                on_line=mapper_progress(ctx, spec.image_count),
+                on_line=mapper_progress(ctx, spec.image_count, low=0.12, high=0.9),
             )
             model_dir, summary = _select_largest_model(sparse_dir, spec)
             mapper_attempts = []
+        ctx.progress.tick(0.92, message="mapper complete", key="log.recon_mapper_done")
         primary = summary["source_registration"][spec.primary_source_id]
         summary["registered_ratio"] = primary["registered"] / max(1, primary["total"])
         summary["registered_total_ratio"] = summary["num_images"] / max(1, spec.image_count)
@@ -152,7 +160,7 @@ class Reconstruct(Stage):
         ctx.progress.info(
             f"reconstruction done: {summary['num_images']}/{spec.image_count} images, "
             f"{summary['num_points3D']} points, {summary['mean_reprojection_error']:.3f}px",
-            progress=1.0,
+            progress=0.99,
             key="log.recon_done",
             args={
                 "images": summary["num_images"],
@@ -187,10 +195,19 @@ def _run_global_mapper_with_retries(
     seeds = list(dict.fromkeys((initial_seed, initial_seed + 1, initial_seed + 2)))
     candidates: list[tuple[Path, dict]] = []
     attempts = []
+    attempt_boundaries = (0.12, 0.72, 0.84, 0.9)
     for attempt_index, seed in enumerate(seeds):
         attempt_dir = sparse_dir / f"attempt_{attempt_index:02d}_seed_{seed}"
         attempt_dir.mkdir(parents=True, exist_ok=True)
         attempt_params = {**ctx.params, "random_seed": seed}
+        attempt_low = attempt_boundaries[attempt_index]
+        attempt_high = attempt_boundaries[attempt_index + 1]
+        ctx.progress.info(
+            f"Global Mapper attempt {attempt_index + 1}/{len(seeds)} seed={seed}",
+            progress=attempt_low,
+            key="log.recon_attempt",
+            args={"cur": attempt_index + 1, "tot": len(seeds), "seed": seed},
+        )
         try:
             colmap_runner.global_mapper(
                 colmap_bin,
@@ -202,7 +219,13 @@ def _run_global_mapper_with_retries(
                 use_gpu=ctx.params["ba_use_gpu"],
                 extra_args=colmap_quality.global_mapper_extra_args(attempt_params),
                 log_path=logs_dir / f"global_mapper_seed_{seed}.log",
-                on_line=global_mapper_progress(ctx),
+                on_line=global_mapper_progress(ctx, low=attempt_low, high=attempt_high),
+            )
+            ctx.progress.tick(
+                attempt_high,
+                message=f"Global Mapper seed={seed} complete",
+                key="log.recon_attempt_done",
+                args={"seed": seed},
             )
             model_dir, summary = _select_largest_model(attempt_dir, spec)
             primary = summary["source_registration"][spec.primary_source_id]
