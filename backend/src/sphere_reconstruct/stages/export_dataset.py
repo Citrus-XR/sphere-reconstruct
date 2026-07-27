@@ -36,7 +36,7 @@ from ..pipeline.stage import Stage, StageContext, new_manifest
 @register
 class ExportDataset(Stage):
     name = StageName.EXPORT_DATASET
-    impl_version = "1.1"
+    impl_version = "1.2"
 
     def collect_inputs(self, ctx: StageContext) -> list[FileRef]:
         candidates = [
@@ -188,13 +188,15 @@ class ExportDataset(Stage):
                 "train_configs_auto_applied": False,
                 "warnings": [
                     "lfstudio_gui_does_not_auto_apply_train_configs",
-                    "select_mrnf_enable_gut_and_segment_masks_manually",
+                    "select_mrnf_enable_gut_segment_masks_and_ppisp_manually",
                 ],
                 "required_settings": {
                     "strategy": cfg_info["recommended_strategy"],
                     "gut": configs["mrnf"]["gut"],
                     "undistort": configs["mrnf"]["undistort"],
                     "mask_mode": configs["mrnf"]["mask_mode"],
+                    "ppisp": configs["mrnf"]["use_ppisp"],
+                    "ppisp_controller": configs["mrnf"]["ppisp_use_controller"],
                 },
             }
             tc_dir = out / "train_configs"

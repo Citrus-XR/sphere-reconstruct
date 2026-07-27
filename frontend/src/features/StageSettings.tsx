@@ -538,6 +538,8 @@ export const StageSettings = ({
                       {t('lfRequiredSettings')}: {exportInfo.gui_integration.required_settings.strategy.toUpperCase()}
                       {' · '}GUT={String(exportInfo.gui_integration.required_settings.gut)}
                       {' · '}mask={exportInfo.gui_integration.required_settings.mask_mode}
+                      {' · '}PPISP={String(exportInfo.gui_integration.required_settings.ppisp)}
+                      {' · '}controller={String(exportInfo.gui_integration.required_settings.ppisp_controller)}
                     </div>
                   </div>
                 )}

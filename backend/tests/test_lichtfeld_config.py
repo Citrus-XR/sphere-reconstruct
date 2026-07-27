@@ -111,3 +111,19 @@ def test_binary_masks_enable_segment_mode():
     for config in configs.values():
         assert config["mask_mode"] == "segment"
         assert config["invert_masks"] is False
+
+
+def test_recommended_mrnf_enables_ppisp_and_novel_view_controller():
+    configs, info = lc.build_configs(_profile(["OPENCV_FISHEYE", "SIMPLE_RADIAL"]))
+
+    recommended = configs["mrnf"]
+    assert info["recommended_strategy"] == "mrnf"
+    assert recommended["use_ppisp"] is True
+    assert recommended["ppisp_use_controller"] is True
+    assert recommended["ppisp_freeze_gaussians_on_distill"] is True
+    assert recommended["ppisp_controller_activation_step"] == -1
+    assert recommended["ppisp_warmup_steps"] == 500
+
+    for alternative in (configs["mcmc"], configs["igsplus"]):
+        assert alternative.get("use_ppisp", False) is False
+        assert alternative.get("ppisp_use_controller", False) is False

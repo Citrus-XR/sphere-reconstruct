@@ -154,7 +154,17 @@ const installUiMock = async (page: Page, options: MockOptions = {}) => {
       return
     }
     if (projectId && path === `/api/projects/${projectId}/export-info`) {
-      await route.fulfill({ json: { dir: MOCK_EXPORT, gui_integration: null } })
+      await route.fulfill({ json: {
+        dir: MOCK_EXPORT,
+        gui_integration: {
+          train_configs_auto_applied: false,
+          warnings: ['lfstudio_gui_does_not_auto_apply_train_configs'],
+          required_settings: {
+            strategy: 'mrnf', gut: true, undistort: false, mask_mode: 'segment',
+            ppisp: true, ppisp_controller: true,
+          },
+        },
+      } })
       return
     }
     if (path.includes('/image') || path.includes('/prepared-image') || path.includes('/prepared-mask')) {
@@ -262,6 +272,7 @@ test('scene copy follows language and paths remain copyable native values', asyn
 
   await page.getByText('Export', { exact: true }).click()
   await expect(page.getByText('D:/LFStudio/export_dataset', { exact: true })).toHaveCount(1)
+  await expect(page.getByText(/MRNF · GUT=true · mask=segment · PPISP=true · controller=true/)).toBeVisible()
   const statistics = page.getByRole('button', { name: 'Stage statistics', exact: true })
   await expect(statistics).toHaveAttribute('aria-expanded', 'false')
   await expect(page.getByText('LFStudio training loss / PSNR / SSIM', { exact: true })).toHaveCount(0)

@@ -346,6 +346,8 @@ export interface ExportInfo {
       gut: boolean
       undistort: boolean
       mask_mode: string
+      ppisp: boolean
+      ppisp_controller: boolean
     }
   } | null
 }

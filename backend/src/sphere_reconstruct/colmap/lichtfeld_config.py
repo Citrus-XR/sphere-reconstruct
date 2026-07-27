@@ -1,8 +1,9 @@
 """LichtFeld-Studio 向け推奨学習 config の生成.
 
 再構成プロファイル + camera model から, 3 つの densification strategy (mrnf / igs+ / mcmc)
-の config JSON を組み立てる. 公式 preset (eval/*.json, commit dee66c7 相当) を基底にし,
-場面依存の `max_cap` と, camera model 互換に関わる `gut` / `undistort` / `random` だけを上書きする.
+の config JSON を組み立てる. 公式 preset を基底にし, 場面依存の `max_cap` と camera model 互換に
+関わる `gut` / `undistort` / `random` を上書きする. 推奨 MRNF では複数 physical camera 間の
+exposure / color / vignetting / CRF 差を分離する PPISP と novel-view controller も有効にする.
 scene_scale は LichtFeld が読み込み時に自動計算するため config には出さない.
 
 互換の要点 (LichtFeld source code で確認):
@@ -177,6 +178,23 @@ _IGSPLUS_PRESET = {
 
 _PRESETS = {"mrnf": _MRNF_PRESET, "igsplus": _IGSPLUS_PRESET, "mcmc": _MCMC_PRESET}
 
+_RECOMMENDED_STRATEGY = "mrnf"
+
+# PPISP controller は free-view rendering に frame 固有補正を持ち込まず、rendered appearance から
+# 補正を推定する。最後の 5,000 step で scene を固定して distill する LFStudio 既定 schedule を使う。
+# https://github.com/MrNeRF/LichtFeld-Studio/blob/b27a98e83cc42bdffad76f35a064614d82b12264/src/core/include/core/parameters.hpp#L162-L172
+# https://github.com/nv-tlabs/ppisp/blob/df33809f7b3b20ac06de088dfc871b144b8fb54d/README.md#overview
+_RECOMMENDED_PPISP = {
+    "use_ppisp": True,
+    "ppisp_lr": 0.002,
+    "ppisp_reg_weight": 0.001,
+    "ppisp_warmup_steps": 500,
+    "ppisp_use_controller": True,
+    "ppisp_freeze_gaussians_on_distill": True,
+    "ppisp_controller_activation_step": -1,
+    "ppisp_controller_lr": 0.002,
+}
+
 # max_cap 導出: SfM 点数の倍率. VRAM/品質のダイヤルなので clamp する.
 _CAP_K = 6
 # LFStudio v0.5.3 の再現用 eval preset は 1M。runtime 既定 5M は eager allocation で
@@ -218,6 +236,8 @@ def build_configs(profile: dict, *, has_masks: bool = False) -> tuple[dict[str, 
     configs: dict[str, dict] = {}
     for name, preset in _PRESETS.items():
         cfg = deepcopy(preset)
+        if name == _RECOMMENDED_STRATEGY:
+            cfg.update(_RECOMMENDED_PPISP)
         cfg["max_cap"] = cap
         cfg["mask_mode"] = "segment" if has_masks else "none"
         cfg["invert_masks"] = False
@@ -260,8 +280,8 @@ def build_configs(profile: dict, *, has_masks: bool = False) -> tuple[dict[str, 
         "scene_scale_camera": profile.get("scene_scale_camera"),
         "warnings": warnings,
         "supported_configs": sorted(configs),
-        "recommended_config": "train_config.mrnf.json",
-        "recommended_strategy": "mrnf",
+        "recommended_config": f"train_config.{_RECOMMENDED_STRATEGY}.json",
+        "recommended_strategy": _RECOMMENDED_STRATEGY,
         "usage": (
             "LichtFeld-Studio --config train_configs/train_config.mrnf.json --data-path <export_dataset>"
         ),
