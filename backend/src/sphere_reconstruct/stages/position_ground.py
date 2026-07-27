@@ -16,7 +16,7 @@ from . import similarity_transform
 @register
 class PositionGround(Stage):
     name = StageName.POSITION_GROUND
-    impl_version = "1.0"
+    impl_version = "1.1"
 
     def normalize_params(self, raw: dict) -> dict:
         method = str(raw.get("method", "auto")).lower()
@@ -28,6 +28,7 @@ class PositionGround(Stage):
             "max_camera_height_m": float(raw.get("max_camera_height_m", 4.0)),
             "histogram_bin_m": float(raw.get("histogram_bin_m", 0.05)),
             "inlier_band_m": float(raw.get("inlier_band_m", 0.15)),
+            "max_path_distance_m": float(raw.get("max_path_distance_m", 4.0)),
             "min_support_ratio": float(raw.get("min_support_ratio", 0.005)),
             "min_horizontal_span_ratio": float(raw.get("min_horizontal_span_ratio", 0.25)),
             "max_preview_points": int(raw.get("max_preview_points", 500_000)),
@@ -50,9 +51,7 @@ class PositionGround(Stage):
             raise RuntimeError("restore_metric_scale must run before ground positioning")
         ctx.progress.info("predicting ground position", progress=0.0, key="log.ground_start")
         scale_info = json.loads(
-            (ctx.project_dir / "restore_metric_scale" / "scale_restoration.json").read_text(
-                encoding="utf-8"
-            )
+            (ctx.project_dir / "restore_metric_scale" / "scale_restoration.json").read_text(encoding="utf-8")
         )
         reconstruction = colmap_model.read_model(input_model)
         if ctx.params["method"] == "none":
@@ -74,10 +73,14 @@ class PositionGround(Stage):
         else:
             result = ground_position.estimate_ground_position(
                 reconstruction,
+                reference_image_prefix=(
+                    f"sources/{ctx.primary_source.id}/" if ctx.primary_source is not None else None
+                ),
                 min_camera_height_m=ctx.params["min_camera_height_m"],
                 max_camera_height_m=ctx.params["max_camera_height_m"],
                 histogram_bin_m=ctx.params["histogram_bin_m"],
                 inlier_band_m=ctx.params["inlier_band_m"],
+                max_path_distance_m=ctx.params["max_path_distance_m"],
                 min_support_ratio=ctx.params["min_support_ratio"],
                 min_horizontal_span_ratio=ctx.params["min_horizontal_span_ratio"],
             )
@@ -108,7 +111,5 @@ class PositionGround(Stage):
         )
         manifest.outputs = similarity_transform.output_refs(ctx, output_model, result_path)
         manifest.extra = {**result, "preview_points": preview.num_points_written}
-        ctx.progress.info(
-            "ground positioning stage complete", progress=0.99, key="log.ground_complete"
-        )
+        ctx.progress.info("ground positioning stage complete", progress=0.99, key="log.ground_complete")
         return manifest
