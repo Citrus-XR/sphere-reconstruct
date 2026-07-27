@@ -2,7 +2,8 @@
     [Parameter(Mandatory = $true)]
     [string]$OutputDirectory,
     [string]$CudaArchitectures = "",
-    [string]$CudssWheelPath = ""
+    [string]$CudssWheelPath = "",
+    [switch]$ReuseBuildRoot
 )
 
 $ErrorActionPreference = "Stop"
@@ -55,15 +56,73 @@ function Initialize-PinnedRepository {
 
     New-Item $Destination -ItemType Directory | Out-Null
     git -C $Destination init --quiet
+    Assert-NativeSuccess "git init: $Destination"
     git -C $Destination remote add origin $Url
+    Assert-NativeSuccess "git remote add: $Url"
     git -C $Destination fetch --depth 1 origin $Revision
+    Assert-NativeSuccess "git fetch: $Revision"
     git -C $Destination checkout --detach FETCH_HEAD
+    Assert-NativeSuccess "git checkout: $Revision"
 }
 
-if (Test-Path $BuildRoot) {
+function Assert-NativeSuccess {
+    param([Parameter(Mandatory = $true)][string]$Operation)
+    if ($LASTEXITCODE -ne 0) {
+        throw "$Operation が exit code $LASTEXITCODE で失敗しました"
+    }
+}
+
+function Ensure-GitPatch {
+    param(
+        [Parameter(Mandatory = $true)][string]$Repository,
+        [Parameter(Mandatory = $true)][string]$Patch,
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][string]$SentinelFile,
+        [Parameter(Mandatory = $true)][string]$SentinelText
+    )
+    if (Select-String `
+        -Path (Join-Path $Repository $SentinelFile) `
+        -Pattern $SentinelText `
+        -SimpleMatch `
+        -Quiet) {
+        return
+    }
+    git -C $Repository apply --check $Patch
+    Assert-NativeSuccess "$Name patch check"
+    git -C $Repository apply $Patch
+    Assert-NativeSuccess "$Name patch"
+}
+
+function Resolve-CmakeExecutable {
+    $Candidates = @(
+        Get-Command cmake -All -ErrorAction SilentlyContinue |
+            Select-Object -ExpandProperty Source
+    )
+    $CommonCmake = Join-Path $env:ProgramFiles "CMake/bin/cmake.exe"
+    if (Test-Path $CommonCmake) {
+        $Candidates += $CommonCmake
+    }
+    $Resolved = @(
+        $Candidates | Select-Object -Unique | ForEach-Object {
+            $Output = & $_ --version | Select-Object -First 1
+            if ($Output -match '^cmake version (?<version>\d+\.\d+\.\d+)') {
+                [PSCustomObject]@{ Path = $_; Version = [version]$Matches['version'] }
+            }
+        }
+    ) | Sort-Object Version -Descending | Select-Object -First 1
+    if ($null -eq $Resolved -or $Resolved.Version -lt [version]"3.30.0") {
+        throw "CMake 3.30+ が必要です"
+    }
+    Write-Host "CMake $($Resolved.Version): $($Resolved.Path)"
+    return $Resolved.Path
+}
+
+$CmakeExecutable = Resolve-CmakeExecutable
+
+if ((Test-Path $BuildRoot) -and -not $ReuseBuildRoot) {
     Remove-Item $BuildRoot -Recurse -Force
 }
-New-Item $BuildRoot -ItemType Directory | Out-Null
+New-Item $BuildRoot -ItemType Directory -Force | Out-Null
 New-Item $OutputDirectory -ItemType Directory -Force | Out-Null
 if ($env:VCPKG_DEFAULT_BINARY_CACHE) {
     New-Item $env:VCPKG_DEFAULT_BINARY_CACHE -ItemType Directory -Force | Out-Null
@@ -79,38 +138,61 @@ $CeresConfigDirectory = Join-Path $CeresInstall "lib/cmake/Ceres"
 $ColmapBuild = Join-Path $BuildRoot "colmap-build"
 $ColmapInstall = Join-Path $BuildRoot "colmap-install"
 
-Initialize-PinnedRepository `
-    -Url "https://github.com/colmap/colmap.git" `
-    -Revision $ColmapTag `
-    -Destination $ColmapSource
+if (-not (Test-Path (Join-Path $ColmapSource ".git"))) {
+    Initialize-PinnedRepository `
+        -Url "https://github.com/colmap/colmap.git" `
+        -Revision $ColmapTag `
+        -Destination $ColmapSource
+}
 $RigPairPatch = Join-Path $PSScriptRoot "patches/colmap-4.1.1-sequential-rig-pairs.patch"
 # 4.1.1 の folder-major rig pairing bug に upstream の最小 semantic fix だけを backport する。
 # https://github.com/colmap/colmap/pull/4591
-git -C $ColmapSource apply --check $RigPairPatch
-git -C $ColmapSource apply $RigPairPatch
-Initialize-PinnedRepository `
-    -Url "https://github.com/ceres-solver/ceres-solver.git" `
-    -Revision $CeresCommit `
-    -Destination $CeresSource
+Ensure-GitPatch `
+    $ColmapSource `
+    $RigPairPatch `
+    "COLMAP rig pairing" `
+    "src/colmap/controllers/pairing.cc" `
+    "IsValidSequentialNeighbor("
+if (-not (Test-Path (Join-Path $CeresSource ".git"))) {
+    Initialize-PinnedRepository `
+        -Url "https://github.com/ceres-solver/ceres-solver.git" `
+        -Revision $CeresCommit `
+        -Destination $CeresSource
+}
 $CeresArchitecturePatch = Join-Path $PSScriptRoot "patches/ceres-preserve-cuda-architectures.patch"
 # Ceres bac1127 は caller の architecture list を破棄するため、明示値だけを優先させる。
 # https://github.com/ceres-solver/ceres-solver/blob/bac1127f9ef672405bd0d2d9c84e809ae89bd239/CMakeLists.txt#L319-L353
-git -C $CeresSource apply --check $CeresArchitecturePatch
-git -C $CeresSource apply $CeresArchitecturePatch
+Ensure-GitPatch `
+    $CeresSource `
+    $CeresArchitecturePatch `
+    "Ceres CUDA architecture" `
+    "CMakeLists.txt" `
+    "Using caller-provided CUDA Architecture"
 git -C $CeresSource submodule update --init --depth 1 third_party/abseil-cpp
-Initialize-PinnedRepository `
-    -Url "https://github.com/microsoft/vcpkg.git" `
-    -Revision $VcpkgCommit `
-    -Destination $VcpkgRoot
+Assert-NativeSuccess "Ceres abseil submodule"
+if (-not (Test-Path (Join-Path $VcpkgRoot "vcpkg.exe"))) {
+    Initialize-PinnedRepository `
+        -Url "https://github.com/microsoft/vcpkg.git" `
+        -Revision $VcpkgCommit `
+        -Destination $VcpkgRoot
+    & (Join-Path $VcpkgRoot "bootstrap-vcpkg.bat") -disableMetrics
+    Assert-NativeSuccess "vcpkg bootstrap"
+}
 Remove-Item Env:VCPKG_ROOT -ErrorAction SilentlyContinue
-& (Join-Path $VcpkgRoot "bootstrap-vcpkg.bat") -disableMetrics
 
 # COLMAP の manifest Ceres は CPU build で、直後に Ceres_DIR で差し替えても vcpkg が重複 build する。
 # Ceres feature が暗黙に供給していた LAPACK / SuiteSparse は COLMAP 自身の CHOLMOD 検出にも必要なため、
 # manifest の直接依存へ移して custom Ceres と COLMAP の両方から同じ package を解決する。
 $ColmapManifestPath = Join-Path $ColmapSource "vcpkg.json"
 $ColmapManifest = Get-Content $ColmapManifestPath -Raw | ConvertFrom-Json
-$OriginalDependencyCount = $ColmapManifest.dependencies.Count
+$CeresDependencyCount = @(
+    $ColmapManifest.dependencies | Where-Object {
+        if ($_ -is [string]) { $_ -eq "ceres" } else { $_.name -eq "ceres" }
+    }
+).Count
+if ($CeresDependencyCount -gt 1) {
+    throw "COLMAP vcpkg manifest の Ceres dependency が重複しています"
+}
 $ColmapManifest.dependencies = @(
     $ColmapManifest.dependencies | Where-Object {
         if ($_ -is [string]) {
@@ -119,9 +201,6 @@ $ColmapManifest.dependencies = @(
         return $_.name -ne "ceres"
     }
 )
-if ($ColmapManifest.dependencies.Count -ne $OriginalDependencyCount - 1) {
-    throw "COLMAP vcpkg manifest から Ceres dependency を一意に除外できません"
-}
 $RequiredColmapDependencies = @(
     "lapack",
     [PSCustomObject]@{
@@ -152,36 +231,45 @@ $ColmapManifest | ConvertTo-Json -Depth 20 | Set-Content $ColmapManifestPath -En
     "suitesparse-config:$Triplet" `
     "suitesparse-spqr:$Triplet" `
     "lapack:$Triplet"
+Assert-NativeSuccess "vcpkg Ceres dependencies"
 
 $WheelDirectory = Join-Path $BuildRoot "wheel"
-New-Item $WheelDirectory -ItemType Directory | Out-Null
-$WheelPath = Join-Path $WheelDirectory $CudssWheel.FileName
-if ($CudssWheelPath) {
-    Copy-Item $CudssWheelPath $WheelPath
-}
-else {
-    curl.exe `
-        --fail `
-        --location `
-        --retry 5 `
-        --retry-all-errors `
-        --retry-delay 2 `
-        --connect-timeout 30 `
-        --speed-limit 1024 `
-        --speed-time 60 `
-        --continue-at - `
-        --output $WheelPath `
-        $CudssWheel.Url
-}
-$WheelHash = (Get-FileHash $WheelPath -Algorithm SHA256).Hash.ToLowerInvariant()
-if ($WheelHash -ne $CudssWheel.Sha256) {
-    throw "cuDSS wheel の SHA-256 が一致しません: $WheelHash"
-}
-$WheelZip = Join-Path $WheelDirectory "cudss.zip"
-Copy-Item $WheelPath $WheelZip
-Expand-Archive $WheelZip -DestinationPath $CudssRoot
-
 $CudssPackageRoot = Join-Path $CudssRoot "nvidia/cu$CudaMajor"
+$CudssDll = Join-Path $CudssPackageRoot "bin/cudss64_0.dll"
+$CudssHeader = Join-Path $CudssPackageRoot "include/cudss.h"
+if (-not ((Test-Path $CudssDll) -and (Test-Path $CudssHeader))) {
+    if (Test-Path $CudssRoot) {
+        Remove-Item $CudssRoot -Recurse -Force
+    }
+    New-Item $WheelDirectory -ItemType Directory -Force | Out-Null
+    $WheelPath = Join-Path $WheelDirectory $CudssWheel.FileName
+    if ($CudssWheelPath) {
+        Copy-Item $CudssWheelPath $WheelPath -Force
+    }
+    else {
+        curl.exe `
+            --fail `
+            --location `
+            --retry 5 `
+            --retry-all-errors `
+            --retry-delay 2 `
+            --connect-timeout 30 `
+            --speed-limit 1024 `
+            --speed-time 60 `
+            --continue-at - `
+            --output $WheelPath `
+            $CudssWheel.Url
+        Assert-NativeSuccess "cuDSS wheel download"
+    }
+    $WheelHash = (Get-FileHash $WheelPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($WheelHash -ne $CudssWheel.Sha256) {
+        throw "cuDSS wheel の SHA-256 が一致しません: $WheelHash"
+    }
+    $WheelZip = Join-Path $WheelDirectory "cudss.zip"
+    Copy-Item $WheelPath $WheelZip -Force
+    Expand-Archive $WheelZip -DestinationPath $CudssRoot
+}
+
 $CudssConfigDirectory = Join-Path $CudssPackageRoot "lib/cmake/cudss"
 New-Item $CudssConfigDirectory -ItemType Directory -Force | Out-Null
 $CudssConfig = @(
@@ -212,29 +300,36 @@ elseif ($CudaMajor -ge 13) {
 else {
     "75;80-real;86-real;89-real;90-real"
 }
-cmake -S $CeresSource -B $CeresBuild -GNinja `
-    "-DCMAKE_BUILD_TYPE=Release" `
-    @CompilerLauncherArgs `
-    "-DCMAKE_CUDA_STANDARD=17" `
-    "-DCMAKE_CUDA_STANDARD_REQUIRED=ON" `
-    "-DCMAKE_TOOLCHAIN_FILE=$Toolchain" `
-    "-DVCPKG_TARGET_TRIPLET=$Triplet" `
-    "-DVCPKG_MANIFEST_MODE=OFF" `
-    "-DCMAKE_INSTALL_PREFIX=$CeresInstall" `
-    "-DCMAKE_CUDA_FLAGS=-Xcompiler=/Zc:preprocessor" `
-    "-DCMAKE_PREFIX_PATH=$CudssPackageRoot" `
-    "-Dcudss_DIR=$CudssConfigDirectory" `
-    "-DBUILD_SHARED_LIBS=ON" `
-    "-DBUILD_TESTING=OFF" `
-    "-DBUILD_EXAMPLES=OFF" `
-    "-DUSE_CUDA=ON" `
-    "-DSUITESPARSE=ON" `
-    "-DLAPACK=ON" `
-    "-DCMAKE_CUDA_ARCHITECTURES:STRING=$EffectiveCudaArchitectures"
-cmake --build $CeresBuild --target install
+$CeresDll = Join-Path $CeresInstall "bin/ceres.dll"
+if (-not ($ReuseBuildRoot -and (Test-Path $CeresDll))) {
+    & $CmakeExecutable -S $CeresSource -B $CeresBuild -GNinja `
+        "-DCMAKE_BUILD_TYPE=Release" `
+        "-DCMAKE_TRY_COMPILE_CONFIGURATION=Release" `
+        @CompilerLauncherArgs `
+        "-DCMAKE_CUDA_STANDARD=17" `
+        "-DCMAKE_CUDA_STANDARD_REQUIRED=ON" `
+        "-DCMAKE_TOOLCHAIN_FILE=$Toolchain" `
+        "-DVCPKG_TARGET_TRIPLET=$Triplet" `
+        "-DVCPKG_MANIFEST_MODE=OFF" `
+        "-DCMAKE_INSTALL_PREFIX=$CeresInstall" `
+        "-DCMAKE_CUDA_FLAGS=-Xcompiler=/Zc:preprocessor" `
+        "-DCMAKE_PREFIX_PATH=$CudssPackageRoot" `
+        "-Dcudss_DIR=$CudssConfigDirectory" `
+        "-DBUILD_SHARED_LIBS=ON" `
+        "-DBUILD_TESTING=OFF" `
+        "-DBUILD_EXAMPLES=OFF" `
+        "-DUSE_CUDA=ON" `
+        "-DSUITESPARSE=ON" `
+        "-DLAPACK=ON" `
+        "-DCMAKE_CUDA_ARCHITECTURES:STRING=$EffectiveCudaArchitectures"
+    Assert-NativeSuccess "Ceres configure"
+    & $CmakeExecutable --build $CeresBuild --target install
+    Assert-NativeSuccess "Ceres build"
+}
 
-cmake -S $ColmapSource -B $ColmapBuild -GNinja `
+& $CmakeExecutable -S $ColmapSource -B $ColmapBuild -GNinja `
     "-DCMAKE_BUILD_TYPE=Release" `
+    "-DCMAKE_TRY_COMPILE_CONFIGURATION=Release" `
     @CompilerLauncherArgs `
     "-DCMAKE_CUDA_STANDARD=17" `
     "-DCMAKE_CUDA_STANDARD_REQUIRED=ON" `
@@ -254,7 +349,9 @@ cmake -S $ColmapSource -B $ColmapBuild -GNinja `
     "-DCGAL_ENABLED=OFF" `
     "-DTESTS_ENABLED=OFF" `
     "-DCMAKE_CUDA_ARCHITECTURES:STRING=$EffectiveCudaArchitectures"
-cmake --build $ColmapBuild --target install
+Assert-NativeSuccess "COLMAP configure"
+& $CmakeExecutable --build $ColmapBuild --target install
+Assert-NativeSuccess "COLMAP build"
 
 $InstallBin = Join-Path $ColmapInstall "bin"
 Copy-Item (Join-Path $CeresInstall "bin/*.dll") $InstallBin -Force
@@ -287,11 +384,13 @@ foreach ($Pattern in $CudaRuntimePatterns) {
 
 $CeresDll = Join-Path $InstallBin "ceres.dll"
 $Dependencies = & dumpbin /DEPENDENTS $CeresDll | Out-String
+Assert-NativeSuccess "dumpbin Ceres dependency inspection"
 if ($Dependencies -notmatch "cudss64_0.dll") {
     throw "The generated Ceres library is not linked to cuDSS"
 }
 $ColmapExecutable = Join-Path $InstallBin "colmap.exe"
 & $ColmapExecutable version
+Assert-NativeSuccess "COLMAP runtime smoke test"
 
 $Metadata = @{
     colmap_version = $ColmapTag
@@ -326,11 +425,20 @@ Invoke-WebRequest `
     -OutFile (Join-Path $LicenseDirectory "NVIDIA-CUDSS-LICENSE.html") `
     -UseBasicParsing
 
+$RuntimeBundle = Join-Path $BuildRoot "runtime-bundle"
+if (Test-Path $RuntimeBundle) {
+    Remove-Item $RuntimeBundle -Recurse -Force
+}
+New-Item $RuntimeBundle -ItemType Directory | Out-Null
+Copy-Item $InstallBin $RuntimeBundle -Recurse
+Copy-Item $LicenseDirectory $RuntimeBundle -Recurse
+Copy-Item (Join-Path $ColmapInstall "sphere-colmap-capabilities.json") $RuntimeBundle
+
 $Archive = Join-Path $OutputDirectory "colmap-4.1.1-x64-windows-cuda-ba.zip"
 if (Test-Path $Archive) {
     Remove-Item $Archive -Force
 }
-Compress-Archive -Path (Join-Path $ColmapInstall "*") -DestinationPath $Archive -CompressionLevel Optimal
+Compress-Archive -Path (Join-Path $RuntimeBundle "*") -DestinationPath $Archive -CompressionLevel Optimal
 $Hash = (Get-FileHash $Archive -Algorithm SHA256).Hash.ToLowerInvariant()
 Set-Content "${Archive}.sha256" "$Hash  $(Split-Path $Archive -Leaf)" -Encoding ascii
 Write-Output "COLMAP CUDA BA archive: $Archive"
