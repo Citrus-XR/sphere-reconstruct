@@ -23,7 +23,7 @@ jobs:
         uses: Jimver/cuda-toolkit@v0.2.35
         with:
           cuda: ${{ env.CUDA_MAJOR_VERSION }}.${{ env.CUDA_MINOR_VERSION }}.${{ env.CUDA_PATCH_VERSION }}
-          sub-packages: '["nvcc", "crt", "nvvm", "thrust", "nvtx", "cudart", "curand", "curand_dev", "nvrtc_dev", "cublas", "cublas_dev", "cusolver", "cusolver_dev", "cusparse", "cusparse_dev"]'
+          sub-packages: '["nvcc", "thrust", "nvtx", "cudart", "curand", "curand_dev", "nvrtc_dev", "cublas", "cublas_dev", "cusolver", "cusolver_dev", "cusparse", "cusparse_dev"]'
           method: network
 
       - name: Install CMake and Ninja
