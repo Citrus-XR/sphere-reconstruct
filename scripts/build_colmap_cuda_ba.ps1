@@ -55,13 +55,24 @@ $ColmapManifest.dependencies = @(
 if ($ColmapManifest.dependencies.Count -ne $OriginalDependencyCount - 1) {
     throw "COLMAP vcpkg manifest から Ceres dependency を一意に除外できません"
 }
-$DependencyNames = @(
-    $ColmapManifest.dependencies | ForEach-Object {
-        if ($_ -is [string]) { $_ } else { $_.name }
-    }
+$RequiredColmapDependencies = @(
+    "lapack",
+    [PSCustomObject]@{
+        name = "suitesparse-cholmod"
+        "default-features" = $false
+        features = @("matrixops")
+    },
+    "suitesparse-config",
+    "suitesparse-spqr"
 )
-foreach ($Dependency in @("lapack", "suitesparse")) {
-    if ($DependencyNames -notcontains $Dependency) {
+foreach ($Dependency in $RequiredColmapDependencies) {
+    $DependencyName = if ($Dependency -is [string]) { $Dependency } else { $Dependency.name }
+    $DependencyNames = @(
+        $ColmapManifest.dependencies | ForEach-Object {
+            if ($_ -is [string]) { $_ } else { $_.name }
+        }
+    )
+    if ($DependencyNames -notcontains $DependencyName) {
         $ColmapManifest.dependencies += $Dependency
     }
 }
@@ -70,7 +81,9 @@ $ColmapManifest | ConvertTo-Json -Depth 20 | Set-Content $ColmapManifestPath -En
 & (Join-Path $VcpkgRoot "vcpkg.exe") install `
     "eigen3:$Triplet" `
     "glog:$Triplet" `
-    "suitesparse:$Triplet" `
+    "suitesparse-cholmod[matrixops]:$Triplet" `
+    "suitesparse-config:$Triplet" `
+    "suitesparse-spqr:$Triplet" `
     "lapack:$Triplet"
 
 $WheelDirectory = Join-Path $BuildRoot "wheel"
