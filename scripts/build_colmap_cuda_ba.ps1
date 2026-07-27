@@ -33,6 +33,8 @@ $ColmapInstall = Join-Path $BuildRoot "colmap-install"
 
 git clone --depth 1 --branch $ColmapTag https://github.com/colmap/colmap.git $ColmapSource
 $RigPairPatch = Join-Path $PSScriptRoot "patches/colmap-4.1.1-sequential-rig-pairs.patch"
+# 4.1.1 の folder-major rig pairing bug に upstream の最小 semantic fix だけを backport する。
+# https://github.com/colmap/colmap/pull/4591
 git -C $ColmapSource apply --check $RigPairPatch
 git -C $ColmapSource apply $RigPairPatch
 git clone https://github.com/ceres-solver/ceres-solver.git $CeresSource
@@ -130,6 +132,7 @@ cmake -S $CeresSource -B $CeresBuild -GNinja `
     "-DVCPKG_TARGET_TRIPLET=$Triplet" `
     "-DVCPKG_MANIFEST_MODE=OFF" `
     "-DCMAKE_INSTALL_PREFIX=$CeresInstall" `
+    "-DCMAKE_CUDA_FLAGS=-Xcompiler=/Zc:preprocessor" `
     "-DCMAKE_PREFIX_PATH=$CudssPackageRoot" `
     "-Dcudss_DIR=$CudssConfigDirectory" `
     "-DBUILD_SHARED_LIBS=ON" `
@@ -146,6 +149,7 @@ cmake -S $ColmapSource -B $ColmapBuild -GNinja `
     "-DCMAKE_TOOLCHAIN_FILE=$Toolchain" `
     "-DVCPKG_TARGET_TRIPLET=$Triplet" `
     "-DCMAKE_INSTALL_PREFIX=$ColmapInstall" `
+    "-DCMAKE_CUDA_FLAGS=-Xcompiler=/Zc:preprocessor" `
     "-DCMAKE_PREFIX_PATH=$CeresInstall;$CudssPackageRoot" `
     "-DCeres_DIR=$CeresConfigDirectory" `
     "-Dcudss_DIR=$CudssConfigDirectory" `
