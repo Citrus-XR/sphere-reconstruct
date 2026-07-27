@@ -14,6 +14,7 @@ jobs:
       CUDA_MAJOR_VERSION: "13"
       CUDA_MINOR_VERSION: "2"
       CUDA_PATCH_VERSION: "0"
+      VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}\vcpkg-binary-cache
     steps:
       - uses: actions/checkout@v4
 
@@ -29,6 +30,12 @@ jobs:
         with:
           cmakeVersion: "4.1.0"
           ninjaVersion: "1.12.1"
+
+      - name: Restore vcpkg binary cache
+        uses: actions/cache@v4
+        with:
+          path: vcpkg-binary-cache
+          key: vcpkg-6d9d7df564a1ccdaa994e4ad39ccd4a32360867b-x64-windows-release-v1
 
       - name: Enter Visual Studio environment and build
         shell: pwsh

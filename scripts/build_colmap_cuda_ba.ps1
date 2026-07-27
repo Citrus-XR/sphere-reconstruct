@@ -4,6 +4,7 @@
 )
 
 $ErrorActionPreference = "Stop"
+$PSNativeCommandUseErrorActionPreference = $true
 $ColmapTag = "4.1.1"
 $CeresCommit = "bac1127f9ef672405bd0d2d9c84e809ae89bd239"
 $VcpkgCommit = "6d9d7df564a1ccdaa994e4ad39ccd4a32360867b"
@@ -35,7 +36,8 @@ git -C $VcpkgRoot checkout $VcpkgCommit
 & (Join-Path $VcpkgRoot "bootstrap-vcpkg.bat") -disableMetrics
 
 # COLMAP の manifest Ceres は CPU build で、直後に Ceres_DIR で差し替えても vcpkg が重複 build する。
-# それ以外の upstream dependency/feature 定義は維持し、Ceres だけを単独 CUDA build に一本化する。
+# Ceres feature が暗黙に供給していた LAPACK / SuiteSparse は COLMAP 自身の CHOLMOD 検出にも必要なため、
+# manifest の直接依存へ移して custom Ceres と COLMAP の両方から同じ package を解決する。
 $ColmapManifestPath = Join-Path $ColmapSource "vcpkg.json"
 $ColmapManifest = Get-Content $ColmapManifestPath -Raw | ConvertFrom-Json
 $OriginalDependencyCount = $ColmapManifest.dependencies.Count
@@ -49,6 +51,16 @@ $ColmapManifest.dependencies = @(
 )
 if ($ColmapManifest.dependencies.Count -ne $OriginalDependencyCount - 1) {
     throw "COLMAP vcpkg manifest から Ceres dependency を一意に除外できません"
+}
+$DependencyNames = @(
+    $ColmapManifest.dependencies | ForEach-Object {
+        if ($_ -is [string]) { $_ } else { $_.name }
+    }
+)
+foreach ($Dependency in @("lapack", "suitesparse")) {
+    if ($DependencyNames -notcontains $Dependency) {
+        $ColmapManifest.dependencies += $Dependency
+    }
 }
 $ColmapManifest | ConvertTo-Json -Depth 20 | Set-Content $ColmapManifestPath -Encoding utf8
 
