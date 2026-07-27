@@ -69,6 +69,7 @@ export const App = () => {
   const qc = useQueryClient()
   const { data: projects } = useQuery({ queryKey: ['projects'], queryFn: api.listProjects, refetchInterval: 3000 })
   const { data: settingsData } = useQuery({ queryKey: ['settings'], queryFn: api.getSettings, retry: false })
+  const { data: doctor } = useQuery({ queryKey: ['doctor'], queryFn: api.getDoctor, staleTime: 30_000 })
   const [projectId, setProjectId] = useState<string | null>(null)
   const [hydratedProjectId, setHydratedProjectId] = useState<string | null>(null)
   const [selectedStage, setSelectedStage] = useState<string>('extract_frames')
@@ -149,7 +150,7 @@ export const App = () => {
   // 工程に保存された UI 設定を復元 (工程ごと 1 回). 復元後の変更は debounce して保存する.
   const hydratedRef = useRef<string | null>(null)
   useEffect(() => {
-    if (!project || !settingsData || hydratedRef.current === project.id) return
+    if (!project || !settingsData || !doctor || hydratedRef.current === project.id) return
     hydratedRef.current = project.id
     const ui = project.ui_state
     const sam3 = (settingsData as {
@@ -161,6 +162,7 @@ export const App = () => {
     ) as Partial<StageParams>
     setParamsState({
       ...DEFAULT_PARAMS,
+      baUseGpu: Boolean(doctor.checks.colmap?.capabilities?.gpu_bundle_adjustment),
       featureMaskPrompt: sam3?.feature_prompt ?? '',
       trainingMaskPrompt: sam3?.training_prompt ?? '',
       ...knownParams,
@@ -174,7 +176,7 @@ export const App = () => {
     setEvents([])
     setProgressByStage({})
     setHydratedProjectId(project.id)
-  }, [project, settingsData])
+  }, [project, settingsData, doctor])
 
   const saveTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   useEffect(() => {
@@ -266,6 +268,8 @@ export const App = () => {
     'match_features',
     'reconstruct',
     'align_reconstruction',
+    'restore_metric_scale',
+    'position_ground',
     'export_dataset',
   ]
   const stageIsFresh = (stage: NonNullable<typeof stagesData>['stages'][number]): boolean => {
@@ -493,7 +497,7 @@ export const App = () => {
               <div className="scene-info">
                 {t('sceneImages')} {recon.stats.num_images} · {t('scenePoints')} {recon.stats.num_points3D.toLocaleString()}
                 {recon.stats.registered_ratio != null && ` · ${t('sceneRegistered')} ${(recon.stats.registered_ratio * 100).toFixed(0)}%`}
-                {recon.stats.camera_trajectory_diameter != null && ` · ${t('scenePathSpan')} ${recon.stats.camera_trajectory_diameter.toFixed(3)} ${t('sceneUnits')}`}
+                {recon.stats.camera_trajectory_diameter != null && ` · ${t('scenePathSpan')} ${recon.stats.camera_trajectory_diameter.toFixed(3)} ${recon.metric_scale?.metric ? t('sceneMeters') : t('sceneUnits')}`}
               </div>
             )}
           </div>

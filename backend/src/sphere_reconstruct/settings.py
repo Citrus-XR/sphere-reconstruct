@@ -42,6 +42,8 @@ class BinariesConfig(BaseModel):
     ffmpeg: str = ""
     ffprobe: str = ""
     colmap: str = ""
+    # LFStudio export の JPEG を再圧縮せず crop する libjpeg-turbo tool.
+    jpegtran: str = ""
     # COLMAP loop detection 用 vocab tree (.bin). 空なら loop closure 無効.
     vocab_tree: str = ""
 
@@ -65,6 +67,7 @@ class Sam3Config(BaseModel):
     # SAM3 推論前に長辺をこの画素数まで縮小する (0 = 縮小しない).
     max_inference_size: int = 2048
     confidence_threshold: float = 0.5
+
 
 class LogConfig(BaseModel):
     level: str = "INFO"

@@ -22,6 +22,7 @@ interface MockOptions {
   socketEvents?: Array<Record<string, unknown>>
   incrementalFeatureMask?: boolean
   frameCount?: number
+  gpuBundleAdjustment?: boolean
 }
 
 const installUiMock = async (page: Page, options: MockOptions = {}) => {
@@ -94,6 +95,9 @@ const installUiMock = async (page: Page, options: MockOptions = {}) => {
     if (path === '/api/system/doctor') {
       await route.fulfill({ json: { ready: true, platform: {}, checks: {
         workspace: { ok: true, message: 'ok', path: MOCK_ENV_PATH },
+        colmap: { ok: true, message: 'ok', capabilities: {
+          gpu_bundle_adjustment: options.gpuBundleAdjustment ?? false,
+        } },
       } } })
       return
     }
@@ -113,7 +117,7 @@ const installUiMock = async (page: Page, options: MockOptions = {}) => {
     const projectMatch = path.match(/^\/api\/projects\/(p1|p2)/)
     const projectId = projectMatch?.[1]
     if (projectId && path === `/api/projects/${projectId}/stages`) {
-      const names = ['inspect_source', 'extract_frames', 'prepare_images', 'generate_feature_masks', 'generate_training_masks', 'extract_features', 'match_features', 'reconstruct', 'align_reconstruction', 'export_dataset']
+      const names = ['inspect_source', 'extract_frames', 'prepare_images', 'generate_feature_masks', 'generate_training_masks', 'extract_features', 'match_features', 'reconstruct', 'align_reconstruction', 'restore_metric_scale', 'position_ground', 'export_dataset']
       const extras: Record<string, Record<string, unknown>> = {
         inspect_source: { kind: 'insv', file_size: 1024, gravity_samples: 42 },
         extract_frames: { frames: 1, selection_mode: 'interval', selected: 1 },
@@ -123,7 +127,9 @@ const installUiMock = async (page: Page, options: MockOptions = {}) => {
         extract_features: { images: 2, minimum_keypoints: 100, average_keypoints: 200, maximum_keypoints: 300, descriptor_images: 2 },
         match_features: { raw_pairs: 1, verified_pairs: 1, minimum_inliers: 20, average_inliers: 20, maximum_inliers: 20, total_inliers: 20 },
         reconstruct: { input_images: 2, num_images: 2, num_points3D: 42, registered_ratio: 1, mean_reprojection_error: 0.5 },
-        align_reconstruction: { applied: true, spread_deg: 0.4, normalization_scale: 1, preview_points: 42 },
+        align_reconstruction: { applied: true, spread_deg: 0.4, preview_points: 42 },
+        restore_metric_scale: { applied: true, metric: true, scale_factor: 445, baseline_pairs: 2 },
+        position_ground: { applied: true, ground_y: 5, support_points: 1200 },
         export_dataset: { images: 2, total_points: 42, validation: { loadable: true, training_ready: true }, lfstudio_training_metrics: 'external' },
       }
       await route.fulfill({ json: { project_id: 'p1', state: 'exported', stages: names.map(stage => ({
@@ -587,6 +593,13 @@ test('feature, matching, and mapper controls have localized names and explanatio
   await expect(page.getByText('Reconstruction solver (mapper)', { exact: true })).toBeVisible()
   await expect(page.getByText('View-graph calibration (view_graph_calibration)', { exact: true })).toBeVisible()
   await expect(page.getByText('GPU bundle adjustment (ba_use_gpu)', { exact: true })).toBeVisible()
+  await page.getByText('Restore metric scale', { exact: true }).click()
+  await expect(page.getByText('Metric-scale restoration', { exact: true })).toBeVisible()
+  await page.getByText('Position from predicted ground', { exact: true }).click()
+  await expect(page.getByText('Finds a broadly supported horizontal ground mode in the gravity-aligned point cloud and moves it to dataset Y=0.', { exact: true })).toBeVisible()
+  await page.getByText('Export', { exact: true }).click()
+  await expect(page.getByText('Optimize fisheye training images', { exact: true })).toBeVisible()
+  await page.getByText('Sparse reconstruction', { exact: true }).click()
 
   await page.getByTitle('Settings').click()
   await page.locator('.pop select').nth(1).selectOption('zh')
@@ -594,6 +607,10 @@ test('feature, matching, and mapper controls have localized names and explanatio
   await expect(page.getByText('视图图校准 (view_graph_calibration)', { exact: true })).toBeVisible()
   await expect(page.getByText('GPU 光束平差 (ba_use_gpu)', { exact: true })).toBeVisible()
   await page.mouse.click(10, 200)
+  await page.getByText('恢复真实大小', { exact: true }).click()
+  await expect(page.getByText('真实大小恢复方式', { exact: true })).toBeVisible()
+  await page.getByText('根据地面预测矫正位置', { exact: true }).first().click()
+  await expect(page.getByText('从已完成重力对齐的点云中预测具有大范围水平支撑的地面高度，并把它移动到数据集 Y=0。', { exact: true })).toBeVisible()
   await page.getByText('特征匹配', { exact: true }).click()
   await expect(page.getByText('特征匹配器 (matcher_type)', { exact: true })).toBeVisible()
   await expect(page.getByText('图像配对策略 (pairing)', { exact: true })).toBeVisible()
@@ -604,6 +621,19 @@ test('feature, matching, and mapper controls have localized names and explanatio
   await expect(page.getByText('SIFT 峰值阈值 (peak_threshold)', { exact: true })).toBeVisible()
   await expect(page.getByText('SIFT 边缘阈值 (edge_threshold)', { exact: true })).toBeVisible()
   await expect(page.getByText('仿射形状 + DSP (affine_shape + DSP)', { exact: true })).toBeVisible()
+  await page.getByText('导出', { exact: true }).click()
+  await expect(page.getByText('优化鱼眼训练图像', { exact: true })).toBeVisible()
+  expect(mock.unexpectedRequests).toEqual([])
+})
+
+test('a capable pinned runtime enables GPU bundle adjustment by default', async ({ page }) => {
+  const mock = await installUiMock(page, { gpuBundleAdjustment: true })
+  await page.goto('/')
+
+  await page.getByText('Sparse reconstruction', { exact: true }).click()
+  const row = page.getByText('GPU bundle adjustment (ba_use_gpu)', { exact: true }).locator('..')
+  await expect(row.locator('input[type="checkbox"]')).toBeChecked()
+  await expect(row.locator('input[type="checkbox"]')).toBeEnabled()
   expect(mock.unexpectedRequests).toEqual([])
 })
 

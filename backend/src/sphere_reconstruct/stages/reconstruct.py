@@ -26,16 +26,20 @@ from .colmap_progress import global_mapper_progress, hidden_log, mapper_progress
 @register
 class Reconstruct(Stage):
     name = StageName.RECONSTRUCT
-    impl_version = "2.3"
+    impl_version = "2.4"
 
     def normalize_params(self, raw: dict) -> dict:
         mapper = str(raw.get("mapper", "global")).lower()
         if mapper not in {"incremental", "global"}:
             raise ValueError(f"unsupported mapper: {mapper}")
+        ba_use_gpu = bool(raw.get("ba_use_gpu", False))
         return {
             "mapper": mapper,
             "view_graph_calibration": bool(raw.get("view_graph_calibration", mapper == "global")),
-            "ba_use_gpu": bool(raw.get("ba_use_gpu", False)),
+            "ba_use_gpu": ba_use_gpu,
+            "global_positioning_use_gpu": bool(
+                raw.get("global_positioning_use_gpu", ba_use_gpu)
+            ),
             "random_seed": int(raw.get("random_seed", 0)),
             "mapper_min_num_matches": int(raw.get("mapper_min_num_matches", 0)),
             "init_min_num_inliers": int(raw.get("init_min_num_inliers", 0)),
@@ -146,6 +150,9 @@ class Reconstruct(Stage):
         summary["input_images"] = spec.image_count
         summary["view_graph_calibration"] = bool(mapper == "global" and ctx.params["view_graph_calibration"])
         summary["ba_gpu_enabled"] = ctx.params["ba_use_gpu"]
+        summary["global_positioning_gpu_requested"] = bool(
+            mapper == "global" and ctx.params["global_positioning_use_gpu"]
+        )
         summary["mapper_attempts"] = mapper_attempts
         _validate_summary(summary, ctx.params)
         summary_path = ctx.stage_out_dir / "model_summary.json"
@@ -216,7 +223,8 @@ def _run_global_mapper_with_retries(
                 output_path=attempt_dir,
                 refine_intrinsics=spec.refine_intrinsics,
                 refine_rig=spec.refine_rig,
-                use_gpu=ctx.params["ba_use_gpu"],
+                ba_use_gpu=ctx.params["ba_use_gpu"],
+                global_positioning_use_gpu=ctx.params["global_positioning_use_gpu"],
                 extra_args=colmap_quality.global_mapper_extra_args(attempt_params),
                 log_path=logs_dir / f"global_mapper_seed_{seed}.log",
                 on_line=global_mapper_progress(ctx, low=attempt_low, high=attempt_high),

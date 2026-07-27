@@ -17,6 +17,8 @@ allowed_roots = []
 ffmpeg = ""
 ffprobe = ""
 colmap = ""
+# Native fisheye の LFStudio 用 lossless crop. 空文字は PATH から検索する.
+jpegtran = ""
 # SIFT sequential loop closure / vocab-tree pairing を使う場合だけ設定する.
 vocab_tree = ""
 

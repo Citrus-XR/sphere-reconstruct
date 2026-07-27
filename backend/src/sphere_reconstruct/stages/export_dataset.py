@@ -12,6 +12,7 @@ aligned reconstruction を LFStudio が直接選択できる dataset root とし
   max_preview_points: int   プレビュー点群の上限 (default 500000)
   include_dataset: bool     標準データセットも書き出す (default True)
   emit_train_configs: bool  LFStudio 推奨設定を書き出す (default True)
+  optimize_fisheye_training_images: bool  円形領域外を lossless crop (default True)
   feature_masks_enabled: bool   training mask 無効時の export fallback
   training_masks_enabled: bool  export で優先する mask
 """
@@ -22,11 +23,12 @@ import json
 import os
 import shutil
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from PIL import Image as PilImage
 
-from ..colmap import gravity_align, lichtfeld_config, train_profile
+from ..colmap import gravity_align, lichtfeld_config, train_profile, training_crop
 from ..colmap import model as colmap_model
 from ..colmap.input_workspace import InputSpec
 from ..domain.artifacts import FileRef, StageManifest
@@ -42,24 +44,27 @@ from ..domain.pipeline_state import StageName
 from ..infrastructure.filesystem import sha256_file
 from ..pipeline.manifest import register
 from ..pipeline.stage import ProgressSpan, Stage, StageContext, new_manifest
+from ..settings import get_settings
 
 
 @register
 class ExportDataset(Stage):
     name = StageName.EXPORT_DATASET
-    impl_version = "2.1"
+    impl_version = "2.2"
 
     def collect_inputs(self, ctx: StageContext) -> list[FileRef]:
         candidates = [
-            ctx.project_dir / "manifests" / "align_reconstruction.json",
+            ctx.project_dir / "manifests" / "position_ground.json",
+            ctx.project_dir / "restore_metric_scale" / "scale_restoration.json",
             ctx.project_dir / "manifests" / "extract_features.json",
             ctx.project_dir / "extract_features" / "input_spec.json",
-            ctx.project_dir / "align_reconstruction" / "alignment.json",
-            ctx.project_dir / "align_reconstruction" / "sparse" / "0" / "rigs.bin",
-            ctx.project_dir / "align_reconstruction" / "sparse" / "0" / "cameras.bin",
-            ctx.project_dir / "align_reconstruction" / "sparse" / "0" / "frames.bin",
-            ctx.project_dir / "align_reconstruction" / "sparse" / "0" / "images.bin",
-            ctx.project_dir / "align_reconstruction" / "sparse" / "0" / "points3D.bin",
+            ctx.project_dir / "prepare_images" / "image_catalog.json",
+            ctx.project_dir / "position_ground" / "ground_position.json",
+            ctx.project_dir / "position_ground" / "sparse" / "0" / "rigs.bin",
+            ctx.project_dir / "position_ground" / "sparse" / "0" / "cameras.bin",
+            ctx.project_dir / "position_ground" / "sparse" / "0" / "frames.bin",
+            ctx.project_dir / "position_ground" / "sparse" / "0" / "images.bin",
+            ctx.project_dir / "position_ground" / "sparse" / "0" / "points3D.bin",
         ]
         purpose = export_purpose(
             feature_enabled=ctx.params["feature_masks_enabled"],
@@ -88,6 +93,9 @@ class ExportDataset(Stage):
             "max_preview_points": int(raw.get("max_preview_points", 500_000)),
             "include_dataset": bool(raw.get("include_dataset", True)),
             "emit_train_configs": bool(raw.get("emit_train_configs", True)),
+            "optimize_fisheye_training_images": bool(
+                raw.get("optimize_fisheye_training_images", True)
+            ),
             "feature_masks_enabled": bool(raw.get("feature_masks_enabled", True)),
             "training_masks_enabled": bool(raw.get("training_masks_enabled", True)),
         }
@@ -97,13 +105,60 @@ class ExportDataset(Stage):
         manifest.inputs = ctx.inputs_for(self)
         manifest.params = ctx.params
 
-        model_dir = ctx.project_dir / "align_reconstruction" / "sparse" / "0"
+        model_dir = ctx.project_dir / "position_ground" / "sparse" / "0"
         if not (model_dir / "cameras.bin").exists():
-            raise RuntimeError("align_reconstruction must run first (sparse/0 missing)")
+            raise RuntimeError("position_ground must run first (sparse/0 missing)")
 
         ctx.progress.info("reading aligned reconstruction", progress=0.0, key="log.export_start")
         recon = colmap_model.read_model(model_dir)
         spec = InputSpec.read(ctx.project_dir / "extract_features" / "input_spec.json")
+        metric_scale_info = json.loads(
+            (ctx.project_dir / "restore_metric_scale" / "scale_restoration.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        ground_position_info = json.loads(
+            (ctx.project_dir / "position_ground" / "ground_position.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        export_recon = recon
+        crop_plan: training_crop.CropPlan | None = None
+        crop_info: dict = {"enabled": False, "requested": ctx.params["optimize_fisheye_training_images"]}
+        if ctx.params["optimize_fisheye_training_images"]:
+            jpegtran = training_crop.resolve_jpegtran(get_settings().binaries.jpegtran)
+            catalog_path = ctx.project_dir / "prepare_images" / "image_catalog.json"
+            if jpegtran is None:
+                crop_info["skipped_reason"] = "jpegtran_unavailable"
+                ctx.progress.warn(
+                    "jpegtran unavailable; preserving original training images",
+                    key="log.export_crop_unavailable",
+                )
+            elif catalog_path.is_file():
+                catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
+                candidate = training_crop.build_plan(recon, catalog)
+                if candidate.changed:
+                    crop_plan = candidate
+                    export_recon = training_crop.crop_reconstruction(recon, crop_plan)
+                    crop_info.update(
+                        {
+                            "enabled": True,
+                            "lossless": True,
+                            "alignment_px": crop_plan.alignment_px,
+                            "source_pixels": crop_plan.source_pixels,
+                            "cropped_pixels": crop_plan.cropped_pixels,
+                            "pixel_reduction_ratio": 1.0
+                            - crop_plan.cropped_pixels / crop_plan.source_pixels,
+                            "camera_rectangles": {
+                                str(camera_id): rect.as_list()
+                                for camera_id, rect in crop_plan.cameras.items()
+                            },
+                        }
+                    )
+                else:
+                    crop_info["skipped_reason"] = "no_circular_padding"
+            else:
+                crop_info["skipped_reason"] = "image_catalog_unavailable"
         out = ctx.stage_out_dir
         outputs: list[FileRef] = []
         train_profile_data = train_profile.compute_profile(recon)
@@ -122,7 +177,7 @@ class ExportDataset(Stage):
             progress=0.12,
             key="log.export_web_preview",
         )
-        shutil.copytree(ctx.project_dir / "align_reconstruction" / "preview", preview_dir)
+        shutil.copytree(ctx.project_dir / "position_ground" / "preview", preview_dir)
         preview_points = min(len(recon.points3D), ctx.params["max_preview_points"])
         ctx.progress.info(
             f"preview: {preview_points}/{len(recon.points3D)} points",
@@ -147,28 +202,57 @@ class ExportDataset(Stage):
             for source in model_dir.iterdir():
                 if source.is_file() and source.suffix.lower() in {".bin", ".txt", ".ini"}:
                     shutil.copy2(source, ds_sparse / source.name)
+            if crop_plan is not None:
+                colmap_model.write_cameras_bin(ds_sparse / "cameras.bin", export_recon.cameras)
+                model_crop_span = ProgressSpan(ctx.progress, 0.22, 0.25)
+                colmap_model.write_images_bin(
+                    ds_sparse / "images.bin",
+                    export_recon.images,
+                    progress=lambda current, total: model_crop_span.tick(
+                        current / max(1, total),
+                        message=f"rewrite cropped COLMAP model {current}/{total}",
+                        key="log.export_rewrite_model",
+                        args={"cur": current, "tot": total},
+                    ),
+                )
             # 画像名は images.bin の相対 path をそのまま保つ.
             recon_images = ctx.project_dir / "extract_features" / "images"
             registered_names = {image.name for image in recon.images.values()}
             sorted_names = sorted(registered_names)
             image_copy_span = ProgressSpan(ctx.progress, 0.25, 0.45)
-            for image_number, name in enumerate(sorted_names, 1):
-                source = recon_images / name
-                if not source.is_file():
-                    raise RuntimeError(f"registered training image is missing: {name}")
-                _link_or_copy(source, ds_images / name)
-                image_copy_span.tick(
-                    image_number / max(1, len(sorted_names)),
-                    message=f"copy training image {image_number}/{len(sorted_names)}",
-                    key="log.export_copy_images",
-                    args={"cur": image_number, "tot": len(sorted_names)},
+            if crop_plan is None:
+                for image_number, name in enumerate(sorted_names, 1):
+                    source = recon_images / name
+                    if not source.is_file():
+                        raise RuntimeError(f"registered training image is missing: {name}")
+                    _link_or_copy(source, ds_images / name)
+                    image_copy_span.tick(
+                        image_number / max(1, len(sorted_names)),
+                        message=f"copy training image {image_number}/{len(sorted_names)}",
+                        key="log.export_copy_images",
+                        args={"cur": image_number, "tot": len(sorted_names)},
+                    )
+            else:
+                byte_stats = training_crop.crop_images(
+                    recon_images,
+                    ds_images,
+                    crop_plan,
+                    jpegtran,
+                    progress=lambda current, total: image_copy_span.tick(
+                        current / max(1, total),
+                        message=f"crop training image {current}/{total}",
+                        key="log.export_crop_images",
+                        args={"cur": current, "tot": total},
+                    ),
                 )
+                crop_info.update(byte_stats)
             mask_copy_span = ProgressSpan(ctx.progress, 0.45, 0.55)
             mask_files_copied = _copy_masks(
                 ctx.project_dir,
                 mask_purpose,
                 ds / "masks",
                 registered_names,
+                crop_plan=crop_plan,
                 progress=lambda current, total: mask_copy_span.tick(
                     current / max(1, total),
                     message=f"copy training mask {current}/{total}",
@@ -183,7 +267,7 @@ class ExportDataset(Stage):
             mask_validation_span = ProgressSpan(ctx.progress, 0.75, 0.9)
             validation = _validate_lf_dataset(
                 ds,
-                recon,
+                export_recon,
                 reference_prefix=primary_prefix,
                 progress=lambda phase, current, total: (
                     image_validation_span if phase == "images" else mask_validation_span
@@ -201,13 +285,16 @@ class ExportDataset(Stage):
                 "format": "sphere-reconstruct-export",
                 "version": 2,
                 "load_in_lichtfeld_studio": ".",
-                "camera_models": sorted({camera.model for camera in recon.cameras.values()}),
+                "camera_models": sorted({camera.model for camera in export_recon.cameras.values()}),
                 "images": len(recon.images),
                 "points3D": len(recon.points3D),
                 "masks": validation["matched_mask_count"],
                 "mask_files_copied": mask_files_copied,
                 "mask_source": mask_purpose.value if mask_purpose is not None else None,
-                "image_source": "original",
+                "image_source": "lossless_fisheye_crop" if crop_plan is not None else "original",
+                "training_crop": crop_info,
+                "metric_scale": metric_scale_info,
+                "ground_position": ground_position_info,
                 "validation": validation,
                 "source_registration": source_registration,
             }
@@ -241,9 +328,6 @@ class ExportDataset(Stage):
                 train_profile_data,
                 has_masks=bool(validation and validation["matched_mask_count"] > 0),
             )
-            cfg_info["usage"] = (
-                "LichtFeld-Studio --config train_configs/train_config.mrnf.json --data-path <export_dataset>"
-            )
             cfg_info["gui_integration"] = {
                 "train_configs_auto_applied": False,
                 "warnings": [
@@ -257,6 +341,7 @@ class ExportDataset(Stage):
                     "mask_mode": configs["mrnf"]["mask_mode"],
                     "ppisp": configs["mrnf"]["use_ppisp"],
                     "ppisp_controller": configs["mrnf"]["ppisp_use_controller"],
+                    "max_width": cfg_info["recommended_max_width"],
                 },
             }
             tc_dir = out / "train_configs"
@@ -303,6 +388,9 @@ class ExportDataset(Stage):
             "training_recommendation": cfg_info,
             "lfstudio_training_metrics": "external",
             "source_registration": _source_registration(recon, spec),
+            "training_crop": crop_info,
+            "metric_scale": metric_scale_info,
+            "ground_position": ground_position_info,
         }
         ctx.progress.info("export_dataset done", progress=0.99, key="log.export_done")
         return manifest
@@ -323,24 +411,35 @@ def _copy_masks(
     purpose: MaskPurpose | None,
     destination_dir: Path,
     image_names: set[str],
+    crop_plan: training_crop.CropPlan | None = None,
     progress: Callable[[int, int], None] | None = None,
 ) -> int:
     if purpose is None:
         return 0
     records = records_by_name(load_mask_manifest(project_dir, purpose))
-    count = 0
     sorted_names = sorted(image_names)
-    for image_number, image_name in enumerate(sorted_names, 1):
-        if progress is not None:
-            progress(image_number, len(sorted_names))
+    copies: list[tuple[Path, Path, training_crop.CropRect | None]] = []
+    for image_name in sorted_names:
         record = records.get(image_name)
         if record is None:
             continue
         source = project_dir / record["path"]
         destination = destination_dir / f"{image_name}.png"
-        _link_or_copy(source, destination)
-        count += 1
-    return count
+        rect = crop_plan.images[image_name] if crop_plan is not None else None
+        copies.append((source, destination, rect))
+    workers = min(16, max(1, os.cpu_count() or 1))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = []
+        for source, destination, rect in copies:
+            if rect is None:
+                futures.append(pool.submit(_link_or_copy, source, destination))
+            else:
+                futures.append(pool.submit(training_crop.crop_mask_file, source, destination, rect))
+        for image_number, future in enumerate(as_completed(futures), 1):
+            future.result()
+            if progress is not None:
+                progress(image_number, len(copies))
+    return len(copies)
 
 
 def _validate_lf_dataset(

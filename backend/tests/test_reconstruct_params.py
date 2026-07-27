@@ -37,14 +37,19 @@ def test_matching_defaults_to_mixed_source_auto_pairing():
     assert params["overlap"] == 4
 
 
-def test_reconstruction_defaults_to_global_cpu_when_cudss_is_unknown():
+def test_reconstruction_enables_both_ceres_gpu_solvers_together_by_default():
     params = Reconstruct().normalize_params({})
     assert params["mapper"] == "global"
     assert params["view_graph_calibration"] is True
     assert params["ba_use_gpu"] is False
+    assert params["global_positioning_use_gpu"] is False
     assert params["random_seed"] == 0
     assert params["min_registered_ratio"] == 0.8
     assert params["min_points3D"] == 100
+
+    gpu_params = Reconstruct().normalize_params({"ba_use_gpu": True})
+    assert gpu_params["ba_use_gpu"] is True
+    assert gpu_params["global_positioning_use_gpu"] is True
 
 
 def test_incremental_does_not_run_view_graph_calibration_by_default():

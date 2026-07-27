@@ -16,6 +16,7 @@ def _profile(models, npts=200_000, reproj=0.7):
         "mean_reprojection_error": reproj,
         "scene_scale_point": 3.2,
         "scene_scale_camera": 5.0,
+        "max_camera_dimension": 3840,
     }
 
 
@@ -123,6 +124,8 @@ def test_recommended_mrnf_enables_ppisp_and_novel_view_controller():
     assert recommended["ppisp_freeze_gaussians_on_distill"] is True
     assert recommended["ppisp_controller_activation_step"] == -1
     assert recommended["ppisp_warmup_steps"] == 500
+    assert info["recommended_max_width"] == 2304
+    assert "--max-width 2304" in info["usage"]
 
     for alternative in (configs["mcmc"], configs["igsplus"]):
         assert alternative.get("use_ppisp", False) is False

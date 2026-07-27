@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import struct
 from pathlib import Path
 
@@ -71,10 +72,16 @@ def _write_stationary_rig_model(model_dir: Path) -> None:
 
 
 def _write_preview(project: Path) -> None:
-    preview = project / "align_reconstruction" / "preview"
+    preview = project / "position_ground" / "preview"
     preview.mkdir(parents=True)
     (preview / "reconstruction.json").write_text("{}")
     (preview / "points.bin").write_bytes(b"points")
+    scale = project / "restore_metric_scale" / "scale_restoration.json"
+    scale.parent.mkdir(parents=True)
+    scale.write_text(json.dumps({"metric": True, "scale_factor": 1.0}))
+    (project / "position_ground" / "ground_position.json").write_text(
+        json.dumps({"applied": True, "ground_y": 0.0})
+    )
 
 
 def _write_rgb(path: Path, size: tuple[int, int] = (64, 64)) -> None:
@@ -127,7 +134,7 @@ def _write_mask_artifact(
 def _execute(project: Path, raw_params: dict | None = None) -> Path:
     output = project / ".export_dataset.tmp"
     output.mkdir()
-    reconstruction = colmap_model.read_model(project / "align_reconstruction" / "sparse" / "0")
+    reconstruction = colmap_model.read_model(project / "position_ground" / "sparse" / "0")
     names = [image.name for image in reconstruction.images.values()]
     spec = InputSpec(
         version=3,
@@ -174,7 +181,7 @@ def _execute(project: Path, raw_params: dict | None = None) -> Path:
 
 def test_export_root_is_directly_loadable_by_lf_studio(tmp_path: Path):
     project = tmp_path / "project"
-    _write_model(project / "align_reconstruction" / "sparse" / "0")
+    _write_model(project / "position_ground" / "sparse" / "0")
     _write_preview(project)
     image = project / "extract_features" / "images" / "front" / "frame_000000.jpg"
     _write_rgb(image)
@@ -213,10 +220,47 @@ def test_export_root_is_directly_loadable_by_lf_studio(tmp_path: Path):
     assert config["ppisp_use_controller"] is True
 
 
+def test_export_losslessly_crops_fisheye_training_dataset(tmp_path: Path):
+    if shutil.which("jpegtran") is None:
+        pytest.skip("jpegtran is not installed on this test host")
+    project = tmp_path / "project"
+    _write_model(project / "position_ground" / "sparse" / "0")
+    _write_preview(project)
+    image_name = "front/frame_000000.jpg"
+    _write_rgb(project / "extract_features" / "images" / image_name)
+    _write_mask_artifact(project, "training")
+    catalog = {
+        "images": [
+            {
+                "name": image_name,
+                "width": 64,
+                "height": 64,
+                "valid_region": {"kind": "circle", "cx": 0.5, "cy": 0.5, "r": 0.25},
+            }
+        ]
+    }
+    catalog_path = project / "prepare_images" / "image_catalog.json"
+    catalog_path.parent.mkdir(parents=True)
+    catalog_path.write_text(json.dumps(catalog), encoding="utf-8")
+
+    output = _execute(project)
+    exported = colmap_model.read_model(output / "sparse" / "0")
+
+    assert (exported.cameras[1].width, exported.cameras[1].height) == (32, 32)
+    assert exported.cameras[1].params[2:4] == [16.0, 16.0]
+    with Image.open(output / "images" / image_name) as image:
+        assert image.size == (32, 32)
+    with Image.open(output / "masks" / f"{image_name}.png") as mask:
+        assert mask.size == (32, 32)
+    manifest = json.loads((output / "export_manifest.json").read_text())
+    assert manifest["training_crop"]["enabled"] is True
+    assert manifest["training_crop"]["lossless"] is True
+
+
 @pytest.mark.parametrize("failure", ["corrupt", "wrong_size"])
 def test_export_rejects_invalid_registered_image(tmp_path: Path, failure: str):
     project = tmp_path / "project"
-    _write_model(project / "align_reconstruction" / "sparse" / "0")
+    _write_model(project / "position_ground" / "sparse" / "0")
     _write_preview(project)
     image = project / "extract_features" / "images" / "front" / "frame_000000.jpg"
     image.parent.mkdir(parents=True)
@@ -239,7 +283,7 @@ def test_export_rejects_invalid_registered_image(tmp_path: Path, failure: str):
 @pytest.mark.parametrize("failure", ["corrupt", "wrong_size"])
 def test_export_rejects_invalid_registered_mask(tmp_path: Path, failure: str):
     project = tmp_path / "project"
-    _write_model(project / "align_reconstruction" / "sparse" / "0")
+    _write_model(project / "position_ground" / "sparse" / "0")
     _write_preview(project)
     _write_rgb(project / "extract_features" / "images" / "front" / "frame_000000.jpg")
     _write_mask_artifact(
@@ -262,7 +306,7 @@ def test_export_rejects_invalid_registered_mask(tmp_path: Path, failure: str):
 
 def test_export_rejects_camera_model_unsupported_by_lf_studio(tmp_path: Path):
     project = tmp_path / "project"
-    _write_model(project / "align_reconstruction" / "sparse" / "0", model_id=12)
+    _write_model(project / "position_ground" / "sparse" / "0", model_id=12)
     _write_preview(project)
     _write_rgb(project / "extract_features" / "images" / "front" / "frame_000000.jpg")
 
@@ -279,7 +323,7 @@ def test_export_rejects_camera_model_unsupported_by_lf_studio(tmp_path: Path):
 
 def test_unmatched_mask_does_not_enable_segment_mode(tmp_path: Path):
     project = tmp_path / "project"
-    _write_model(project / "align_reconstruction" / "sparse" / "0")
+    _write_model(project / "position_ground" / "sparse" / "0")
     _write_preview(project)
     _write_rgb(project / "extract_features" / "images" / "front" / "frame_000000.jpg")
     _write_mask_artifact(project, "training", image_name="unrelated.jpg")
@@ -310,7 +354,7 @@ def test_export_uses_one_resolved_mask_channel(
     expected_value: int | None,
 ):
     project = tmp_path / "project"
-    _write_model(project / "align_reconstruction" / "sparse" / "0")
+    _write_model(project / "position_ground" / "sparse" / "0")
     _write_preview(project)
     _write_rgb(project / "extract_features" / "images" / "front" / "frame_000000.jpg")
     _write_mask_artifact(project, "feature", value=64)
@@ -335,7 +379,7 @@ def test_export_uses_one_resolved_mask_channel(
 
 def test_stationary_rig_is_detected_from_reference_sensor_trajectory(tmp_path: Path):
     project = tmp_path / "project"
-    _write_stationary_rig_model(project / "align_reconstruction" / "sparse" / "0")
+    _write_stationary_rig_model(project / "position_ground" / "sparse" / "0")
     _write_preview(project)
     for lens in ("front", "back"):
         for index in range(2):

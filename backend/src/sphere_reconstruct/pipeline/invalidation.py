@@ -63,8 +63,6 @@ def derive_pipeline_state(project_dir: Path) -> PipelineState:
     present = {stage for stage in STAGE_ORDER if manifest_path(project_dir, stage.value).is_file()}
     if StageName.EXPORT_DATASET in present:
         return PipelineState.EXPORTED
-    if StageName.ALIGN_RECONSTRUCTION in present:
-        return PipelineState.ALIGNED
     for stage in reversed(STAGE_ORDER):
         if stage in present:
             return STAGE_TO_STATE[stage]

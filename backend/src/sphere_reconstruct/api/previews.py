@@ -273,9 +273,7 @@ async def source_info(project_id: str) -> dict:
 @router.get("/api/projects/{project_id}/reconstruction", response_class=FileResponse, response_model=None)
 async def reconstruction(project_id: str):
     project_dir = await _project_dir(project_id)
-    path = project_dir / "align_reconstruction" / "preview" / "reconstruction.json"
-    if not path.exists():
-        raise HTTPException(status_code=404, detail="reconstruction not aligned yet")
+    path = _latest_transform_preview(project_dir, "reconstruction.json")
     return FileResponse(path, media_type="application/json")
 
 
@@ -286,10 +284,16 @@ async def reconstruction(project_id: str):
 )
 async def reconstruction_points(project_id: str):
     project_dir = await _project_dir(project_id)
-    path = project_dir / "align_reconstruction" / "preview" / "points.bin"
-    if not path.exists():
-        raise HTTPException(status_code=404, detail="reconstruction not aligned yet")
+    path = _latest_transform_preview(project_dir, "points.bin")
     return FileResponse(path, media_type="application/octet-stream")
+
+
+def _latest_transform_preview(project_dir: Path, filename: str) -> Path:
+    for stage in ("position_ground", "restore_metric_scale", "align_reconstruction"):
+        path = project_dir / stage / "preview" / filename
+        if path.is_file():
+            return path
+    raise HTTPException(status_code=404, detail="reconstruction preview not available")
 
 
 def _catalog_image(project_dir: Path, name: str) -> dict:

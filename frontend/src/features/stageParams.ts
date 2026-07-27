@@ -58,8 +58,11 @@ export interface StageParams {
   minRegisteredRatio: number
   minPoints3D: number
   alignmentMethod: 'auto' | 'imu' | 'none'
+  metricScaleMethod: 'auto' | 'rig' | 'none'
+  groundPositionMethod: 'auto' | 'points' | 'none'
   size: number
   emitTrainConfigs: boolean
+  optimizeFisheyeTrainingImages: boolean
 }
 
 export const QUALITY_PRESETS: Record<Exclude<QualityPreset, 'custom'>, Partial<StageParams>> = {
@@ -147,8 +150,11 @@ export const DEFAULT_PARAMS: StageParams = {
   minRegisteredRatio: 0.8,
   minPoints3D: 100,
   alignmentMethod: 'auto',
+  metricScaleMethod: 'auto',
+  groundPositionMethod: 'auto',
   size: 1024,
   emitTrainConfigs: true,
+  optimizeFisheyeTrainingImages: true,
 }
 
 const sharpnessCandidates = (level: StageParams['sharpnessLevel']) =>
@@ -238,10 +244,15 @@ export const paramsForStage = (
         min_points3D: params.minPoints3D,
       }
     case 'align_reconstruction':
-      return { method: params.alignmentMethod, normalize_scale: true }
+      return { method: params.alignmentMethod }
+    case 'restore_metric_scale':
+      return { method: params.metricScaleMethod }
+    case 'position_ground':
+      return { method: params.groundPositionMethod }
     case 'export_dataset':
       return {
         emit_train_configs: params.emitTrainConfigs,
+        optimize_fisheye_training_images: params.optimizeFisheyeTrainingImages,
         feature_masks_enabled: params.featureMaskEnabled,
         training_masks_enabled: params.trainingMaskEnabled,
       }
@@ -263,6 +274,8 @@ export const allParams = (
     'match_features',
     'reconstruct',
     'align_reconstruction',
+    'restore_metric_scale',
+    'position_ground',
     'export_dataset',
   ]
   return Object.fromEntries(stages.map(stage => [stage, paramsForStage(stage, params, mode)]))

@@ -198,10 +198,15 @@ _RECOMMENDED_PPISP = {
 # max_cap 導出: SfM 点数の倍率. VRAM/品質のダイヤルなので clamp する.
 _CAP_K = 6
 # LFStudio v0.5.3 の再現用 eval preset は 1M。runtime 既定 5M は eager allocation で
-# 12GB 級 GPU に重いため、公式 eval 値を安全な下限にする。
+# 12GB 級 GPU に重い。3840 px GUT + PPISP controller の実測では 2.4M/3M が raster 一時領域で
+# OOM になったため、通常の推奨値は 2M までにする。
 # https://github.com/MrNeRF/LichtFeld-Studio/blob/d8c50c6a3e2273cb74130a6e9023de8d068af52d/eval/mrnf_optimization_params.json
 _CAP_FLOOR = 1_000_000
-_CAP_CEIL = 3_000_000
+_CAP_CEIL = 2_000_000
+# GUT backward は visible splat 数に比例する巨大な連続領域を要求する。12GB / 2.4M splat の
+# parktest では 3072px でも 3.87GiB request で OOM、2304px で継続できた。
+# https://github.com/MrNeRF/LichtFeld-Studio/issues/1091
+_GUT_MAX_WIDTH = 2304
 _SPARSE_POINT_WARNING = 10_000
 
 
@@ -223,6 +228,13 @@ def build_configs(profile: dict, *, has_masks: bool = False) -> tuple[dict[str, 
     cclass = _camera_class(models)
     npts = int(profile.get("num_points3D", 0))
     reproj = float(profile.get("mean_reprojection_error", 0.0))
+    max_camera_dimension = int(profile.get("max_camera_dimension", 0))
+    recommended_max_width = (
+        _GUT_MAX_WIDTH
+        if cclass in {"fisheye", "distorted_pinhole", "equirect"}
+        and max_camera_dimension > _GUT_MAX_WIDTH
+        else 0
+    )
 
     cap = int(min(_CAP_CEIL, max(_CAP_FLOOR, _CAP_K * npts)))
     random_init = npts == 0
@@ -282,8 +294,9 @@ def build_configs(profile: dict, *, has_masks: bool = False) -> tuple[dict[str, 
         "supported_configs": sorted(configs),
         "recommended_config": f"train_config.{_RECOMMENDED_STRATEGY}.json",
         "recommended_strategy": _RECOMMENDED_STRATEGY,
-        "usage": (
-            "LichtFeld-Studio --config train_configs/train_config.mrnf.json --data-path <export_dataset>"
-        ),
+        "recommended_max_width": recommended_max_width,
+        "usage": "LichtFeld-Studio --config train_configs/train_config.mrnf.json "
+        "--data-path <export_dataset>"
+        + (f" --max-width {recommended_max_width}" if recommended_max_width else ""),
     }
     return configs, info

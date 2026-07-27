@@ -40,6 +40,8 @@ def test_mapper_change_preserves_matching(tmp_path):
     assert (tmp_path / StageName.MATCH_FEATURES.value).is_dir()
     assert not (tmp_path / StageName.RECONSTRUCT.value).exists()
     assert not (tmp_path / StageName.ALIGN_RECONSTRUCTION.value).exists()
+    assert not (tmp_path / StageName.RESTORE_METRIC_SCALE.value).exists()
+    assert not (tmp_path / StageName.POSITION_GROUND.value).exists()
     assert not (tmp_path / StageName.EXPORT_DATASET.value).exists()
 
 
@@ -74,6 +76,12 @@ def test_summary_state_follows_last_main_branch_artifact(tmp_path):
     _populate(tmp_path)
     (tmp_path / StageName.EXPORT_DATASET.value).rmdir()
     manifest_path(tmp_path, StageName.EXPORT_DATASET.value).unlink()
+    assert derive_pipeline_state(tmp_path) == PipelineState.GROUNDED
+    (tmp_path / StageName.POSITION_GROUND.value).rmdir()
+    manifest_path(tmp_path, StageName.POSITION_GROUND.value).unlink()
+    assert derive_pipeline_state(tmp_path) == PipelineState.SCALE_RESTORED
+    (tmp_path / StageName.RESTORE_METRIC_SCALE.value).rmdir()
+    manifest_path(tmp_path, StageName.RESTORE_METRIC_SCALE.value).unlink()
     assert derive_pipeline_state(tmp_path) == PipelineState.ALIGNED
     (tmp_path / StageName.ALIGN_RECONSTRUCTION.value).rmdir()
     manifest_path(tmp_path, StageName.ALIGN_RECONSTRUCTION.value).unlink()

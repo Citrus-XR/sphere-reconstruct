@@ -11,6 +11,7 @@ src/colmap/scene/reconstruction.cc / *.h に準拠 (little-endian).
 from __future__ import annotations
 
 import struct
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -128,6 +129,55 @@ class Reconstruction:
 
 
 _INVALID_POINT3D = 2**64 - 1
+
+
+def write_cameras_bin(path: Path, cameras: dict[int, Camera]) -> None:
+    with path.open("wb") as file:
+        file.write(struct.pack("<Q", len(cameras)))
+        for camera_id in sorted(cameras):
+            camera = cameras[camera_id]
+            model_id = camera.model_id
+            if model_id is None:
+                model_id = next(
+                    (candidate for candidate, (name, _) in _CAMERA_MODELS.items() if name == camera.model),
+                    None,
+                )
+            if model_id is None:
+                raise ValueError(f"unsupported COLMAP camera model: {camera.model}")
+            expected_params = _CAMERA_MODELS[model_id][1]
+            if len(camera.params) != expected_params:
+                raise ValueError(
+                    f"camera {camera.camera_id} expects {expected_params} parameters, got {len(camera.params)}"
+                )
+            file.write(struct.pack("<iiQQ", camera.camera_id, model_id, camera.width, camera.height))
+            file.write(struct.pack(f"<{expected_params}d", *camera.params))
+
+
+def write_images_bin(
+    path: Path,
+    images: dict[int, Image],
+    progress: Callable[[int, int], None] | None = None,
+) -> None:
+    with path.open("wb") as file:
+        file.write(struct.pack("<Q", len(images)))
+        for image_number, image_id in enumerate(sorted(images), 1):
+            image = images[image_id]
+            file.write(
+                struct.pack(
+                    "<idddddddi",
+                    image.image_id,
+                    *image.qvec,
+                    *image.tvec,
+                    image.camera_id,
+                )
+            )
+            file.write(image.name.encode("utf-8") + b"\0")
+            file.write(struct.pack("<Q", len(image.points2D)))
+            for point in image.points2D:
+                point3d_id = _INVALID_POINT3D if point.point3D_id == -1 else point.point3D_id
+                file.write(struct.pack("<ddQ", point.x, point.y, point3d_id))
+            if progress is not None:
+                progress(image_number, len(images))
 
 
 def _percentile(sorted_values, fraction: float) -> float:

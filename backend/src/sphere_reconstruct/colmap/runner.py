@@ -382,7 +382,8 @@ def global_mapper(
     output_path: Path,
     refine_intrinsics: bool = True,
     refine_rig: bool = True,
-    use_gpu: bool = True,
+    ba_use_gpu: bool = False,
+    global_positioning_use_gpu: bool = True,
     extra_args: list[str] | None = None,
     log_path: Path | None = None,
     on_line: Callable[[str], None] | None = None,
@@ -397,9 +398,9 @@ def global_mapper(
         "--output_path",
         str(output_path),
         "--GlobalMapper.ba_ceres_use_gpu",
-        "1" if use_gpu else "0",
+        "1" if ba_use_gpu else "0",
         "--GlobalMapper.gp_use_gpu",
-        "1" if use_gpu else "0",
+        "1" if global_positioning_use_gpu else "0",
     ]
     if not refine_intrinsics:
         args += [

@@ -16,7 +16,6 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
-
 VERSION = "4.1.1"
 PACKAGES = {
     "cuda": {

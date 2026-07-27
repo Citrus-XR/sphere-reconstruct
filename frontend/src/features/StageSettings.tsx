@@ -464,6 +464,36 @@ export const StageSettings = ({
         </div>
       )}
 
+      {stage === 'restore_metric_scale' && (
+        <div className="ctl">
+          <label>{t('lbl_metricScale')}</label>
+          <select className="input" value={params.metricScaleMethod}
+            onChange={event => setParams({
+              metricScaleMethod: event.target.value as StageParams['metricScaleMethod'],
+            })}>
+            <option value="auto">{t('metricScaleAuto')}</option>
+            <option value="rig">{t('metricScaleRequired')}</option>
+            <option value="none">{t('disabledOption')}</option>
+          </select>
+          <div className="hint">{t('hint_metricScale')}</div>
+        </div>
+      )}
+
+      {stage === 'position_ground' && (
+        <div className="ctl">
+          <label>{t('lbl_groundPosition')}</label>
+          <select className="input" value={params.groundPositionMethod}
+            onChange={event => setParams({
+              groundPositionMethod: event.target.value as StageParams['groundPositionMethod'],
+            })}>
+            <option value="auto">{t('groundPositionAuto')}</option>
+            <option value="points">{t('groundPositionRequired')}</option>
+            <option value="none">{t('disabledOption')}</option>
+          </select>
+          <div className="hint">{t('hint_groundPosition')}</div>
+        </div>
+      )}
+
       {stage === 'prepare_images' && reconMode === 'pinhole_rig' && (
         <Slider label={t('lblPinholeSize')} hint={t('hintPinholeSize')} min={512} max={2048} step={128}
           value={params.size} onChange={value => setParams({ size: Math.round(value) })} fmt={value => `${value}px`} />
@@ -553,6 +583,15 @@ export const StageSettings = ({
             </label>
             <div className="hint">{t('hint_emitTrainConfigs')}</div>
           </div>
+          <div className="ctl">
+            <label style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
+              <input type="checkbox" checked={params.optimizeFisheyeTrainingImages}
+                onChange={() => setParams({
+                  optimizeFisheyeTrainingImages: !params.optimizeFisheyeTrainingImages,
+                })} /> {t('lbl_optimizeFisheyeTrainingImages')}
+            </label>
+            <div className="hint">{t('hint_optimizeFisheyeTrainingImages')}</div>
+          </div>
           {exportInfo
             ? <div className="ctl">
                 <label>{t('exportDir')}</label>
@@ -566,6 +605,8 @@ export const StageSettings = ({
                       {' · '}mask={exportInfo.gui_integration.required_settings.mask_mode}
                       {' · '}PPISP={String(exportInfo.gui_integration.required_settings.ppisp)}
                       {' · '}controller={String(exportInfo.gui_integration.required_settings.ppisp_controller)}
+                      {exportInfo.gui_integration.required_settings.max_width > 0
+                        ? ` · max-width=${exportInfo.gui_integration.required_settings.max_width}` : ''}
                     </div>
                   </div>
                 )}
@@ -653,13 +694,16 @@ const formatStatistic = (t: (key: string) => string, key: string, value: string 
     return t(value === 'feature' ? 'featureMask' : 'trainingMask')
   if (typeof value === 'boolean') return value ? t('yes') : t('no')
   if (typeof value === 'string') return value
-  if (key === 'file_size' || key === 'footer_size') {
+  if (key === 'file_size' || key === 'footer_size' || key.endsWith('_bytes')) {
     const units = ['B', 'KiB', 'MiB', 'GiB']
     let amount = value, index = 0
     while (amount >= 1024 && index < units.length - 1) { amount /= 1024; index += 1 }
     return `${amount.toFixed(index ? 2 : 0)} ${units[index]}`
   }
   if (key.endsWith('_ratio') || key.endsWith('_coverage')) return `${(value * 100).toFixed(2)}%`
+  if (key === 'relative_mad') return `${(value * 100).toFixed(4)}%`
+  if (key.endsWith('_m')) return `${value.toFixed(3)} m`
+  if (key === 'scale_factor') return `${Number(value.toPrecision(8)).toLocaleString()}×`
   if (key.includes('reprojection_error')) return `${value.toFixed(4)} px`
   if (key.endsWith('_deg')) return `${value.toFixed(3)}°`
   if (key.endsWith('_sec')) return `${value.toFixed(3)} s`

@@ -26,6 +26,7 @@ def diagnose() -> dict:
         "ffmpeg": _ffmpeg_check(),
         "ffprobe": _binary_check(settings.binaries.ffprobe, "ffprobe", ["-version"]),
         "colmap": _colmap_check(),
+        "jpegtran": _jpegtran_check(),
         "sam3": _sam3_check(),
         "cuda_runtime": _cuda_runtime_check(),
     }
@@ -91,6 +92,14 @@ def _ffmpeg_check() -> dict:
     ):
         check["ok"] = False
         check["message"] = f"required hardware decoder is not compiled into FFmpeg: {preference}"
+    return check
+
+
+def _jpegtran_check() -> dict:
+    check = _binary_check(get_settings().binaries.jpegtran, "jpegtran", ["-version"])
+    check["optional"] = True
+    if not check["ok"]:
+        check["message"] = "jpegtran not found; lossless fisheye training crop is unavailable"
     return check
 
 

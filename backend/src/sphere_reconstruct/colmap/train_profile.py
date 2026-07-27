@@ -15,6 +15,12 @@ from .model import Reconstruction
 
 def compute_profile(recon: Reconstruction) -> dict:
     prof: dict = dict(recon.summary())
+    if recon.cameras:
+        prof["max_camera_width"] = max(camera.width for camera in recon.cameras.values())
+        prof["max_camera_height"] = max(camera.height for camera in recon.cameras.values())
+        prof["max_camera_dimension"] = max(
+            max(camera.width, camera.height) for camera in recon.cameras.values()
+        )
 
     cams = np.array([im.camera_center for im in recon.images.values()]) if recon.images else np.zeros((0, 3))
     pts = (

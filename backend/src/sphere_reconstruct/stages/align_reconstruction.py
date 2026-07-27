@@ -23,7 +23,7 @@ from .colmap_progress import hidden_log
 @register
 class AlignReconstruction(Stage):
     name = StageName.ALIGN_RECONSTRUCTION
-    impl_version = "2.1"
+    impl_version = "2.2"
 
     def normalize_params(self, raw: dict) -> dict:
         method = str(raw.get("method", "auto")).lower()
@@ -31,7 +31,6 @@ class AlignReconstruction(Stage):
             raise ValueError(f"unsupported alignment method: {method}")
         return {
             "method": method,
-            "normalize_scale": bool(raw.get("normalize_scale", True)),
             "max_preview_points": int(raw.get("max_preview_points", 500_000)),
         }
 
@@ -68,18 +67,17 @@ class AlignReconstruction(Stage):
         )
         alignment = self._estimate(ctx, input_model, ProgressSpan(ctx.progress, 0.0, 0.55))
 
-        scale = float(alignment["normalization_scale"])
         rotation = alignment.pop("rotation")
         ctx.progress.info(
             "applying reconstruction transform",
             progress=0.55,
             key="log.alignment_transform",
         )
-        if alignment["applied"] or abs(scale - 1.0) > 1e-9:
+        if alignment["applied"]:
             quaternion = gravity_align._R_to_quat(rotation)
             transform_path = ctx.stage_out_dir / "transform.txt"
             transform_path.write_text(
-                f"{scale:.17g} " + " ".join(f"{value:.17g}" for value in quaternion) + " 0 0 0\n",
+                "1 " + " ".join(f"{value:.17g}" for value in quaternion) + " 0 0 0\n",
                 encoding="utf-8",
             )
             colmap_bin = colmap_runner.resolve_colmap_bin(get_settings().binaries.colmap or None)
@@ -156,7 +154,6 @@ class AlignReconstruction(Stage):
         primary = ctx.primary_source
         reference_prefix = f"sources/{primary.id}/" if primary else None
         diameter = gravity_align.reference_trajectory_diameter(reconstruction, reference_prefix)
-        normalization_scale = 1.0 / diameter if ctx.params["normalize_scale"] and diameter > 1e-9 else 1.0
         progress_span.tick(
             0.05,
             message="alignment model loaded",
@@ -168,7 +165,6 @@ class AlignReconstruction(Stage):
                 "applied": False,
                 "method": "none",
                 "reason": "disabled",
-                "normalization_scale": normalization_scale,
                 "source_trajectory_diameter": diameter,
                 "rotation": gravity_align._rotation_aligning(
                     gravity_align.TARGET_UP, gravity_align.TARGET_UP
@@ -186,7 +182,6 @@ class AlignReconstruction(Stage):
                 "applied": False,
                 "method": "none",
                 "reason": "source_has_no_imu",
-                "normalization_scale": normalization_scale,
                 "source_trajectory_diameter": diameter,
                 "rotation": gravity_align._rotation_aligning(
                     gravity_align.TARGET_UP, gravity_align.TARGET_UP
@@ -248,7 +243,6 @@ class AlignReconstruction(Stage):
             "camera_type": recording.camera_type,
             "imu_orientation": recording.orientation,
             "target_dataset_up": [0, -1, 0],
-            "normalization_scale": normalization_scale,
             "source_trajectory_diameter": diameter,
             "reference_image_prefix": f"sources/{primary.id}/",
             "rotation": rotation,

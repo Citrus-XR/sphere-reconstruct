@@ -4,12 +4,14 @@ export type PipelineState =
   | 'created'
   | 'inspected'
   | 'extracted'
-  | 'reprojected'
+  | 'prepared'
   | 'masked'
   | 'features_extracted'
   | 'matched'
   | 'reconstructed'
   | 'aligned'
+  | 'scale_restored'
+  | 'grounded'
   | 'exported'
 
 export type SourceRole = 'primary' | 'supplemental'
@@ -114,6 +116,8 @@ export interface ReconstructionData {
   }
   points_file: string
   points_stride: number
+  metric_scale?: { metric?: boolean; scale_factor?: number }
+  ground_position?: { applied?: boolean; ground_y?: number }
 }
 
 export interface ParsedPoints {
@@ -358,6 +362,7 @@ export interface ExportInfo {
       mask_mode: string
       ppisp: boolean
       ppisp_controller: boolean
+      max_width: number
     }
   } | null
 }
