@@ -32,8 +32,12 @@ $ColmapBuild = Join-Path $BuildRoot "colmap-build"
 $ColmapInstall = Join-Path $BuildRoot "colmap-install"
 
 git clone --depth 1 --branch $ColmapTag https://github.com/colmap/colmap.git $ColmapSource
+$RigPairPatch = Join-Path $PSScriptRoot "patches/colmap-4.1.1-sequential-rig-pairs.patch"
+git -C $ColmapSource apply --check $RigPairPatch
+git -C $ColmapSource apply $RigPairPatch
 git clone https://github.com/ceres-solver/ceres-solver.git $CeresSource
 git -C $CeresSource checkout $CeresCommit
+git -C $CeresSource submodule update --init --depth 1 third_party/abseil-cpp
 git clone https://github.com/microsoft/vcpkg.git $VcpkgRoot
 git -C $VcpkgRoot checkout $VcpkgCommit
 & (Join-Path $VcpkgRoot "bootstrap-vcpkg.bat") -disableMetrics
@@ -202,6 +206,7 @@ $Metadata = @{
     cudss_version = "0.8.0.10"
     ceres_cuda = $true
     cudss = $true
+    sequential_rig_pairing_fix = "COLMAP PR 4591 semantic backport"
     gpu_bundle_adjustment_dense = $true
     gpu_bundle_adjustment_sparse = $true
 }

@@ -76,6 +76,7 @@ jobs:
           body: |
             COLMAP 4.1.1 CLI runtime built with Ceres 2.3.0-dev at
             bac1127f9ef672405bd0d2d9c84e809ae89bd239, CUDA 13.2, and cuDSS 0.8.0.10.
+            Includes the minimal sequential rig-pairing fix from COLMAP PR 4591.
             The archive is intended for sphere-reconstruct's pinned Windows installer.
           files: |
             dist/colmap-4.1.1-x64-windows-cuda-ba.zip

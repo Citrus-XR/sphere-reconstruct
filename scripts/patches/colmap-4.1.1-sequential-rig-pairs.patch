@@ -1,0 +1,69 @@
+diff --git a/src/colmap/controllers/pairing.cc b/src/colmap/controllers/pairing.cc
+index 9daee98ce..9d41c36f2 100644
+--- a/src/colmap/controllers/pairing.cc
++++ b/src/colmap/controllers/pairing.cc
+@@ -473,6 +473,30 @@ bool SequentialPairGenerator::HasFinished() const {
+                                      : true);
+ }
+ 
++bool SequentialPairGenerator::IsValidSequentialNeighbor(
++    image_t image_id1, image_t image_id2) const {
++  if (!options_.expand_rig_images) {
++    return true;
++  }
++  const auto frame_id1_it = image_to_frame_ids_.find(image_id1);
++  const auto frame_id2_it = image_to_frame_ids_.find(image_id2);
++  if (frame_id1_it == image_to_frame_ids_.end() ||
++      frame_id2_it == image_to_frame_ids_.end()) {
++    return true;
++  }
++  const frame_t frame_id1 = frame_id1_it->second;
++  const frame_t frame_id2 = frame_id2_it->second;
++  if (frame_to_image_ids_.at(frame_id1).size() == 1 &&
++      frame_to_image_ids_.at(frame_id2).size() == 1) {
++    return true;
++  }
++  // Folder-major rig images must not become temporal seed pairs across a
++  // sensor boundary. Same-frame pairs and the other sensors of a valid
++  // temporal frame pair are added separately below.
++  return cache_->GetImage(image_id1).CameraId() ==
++         cache_->GetImage(image_id2).CameraId();
++}
++
+ std::vector<std::pair<image_t, image_t>> SequentialPairGenerator::Next() {
+   image_pairs_.clear();
+   if (image_idx_ >= image_ids_.size()) {
+@@ -518,6 +542,9 @@ std::vector<std::pair<image_t, image_t>> SequentialPairGenerator::Next() {
+       const size_t image_idx_2_quadratic = image_idx_ + (1ull << i);
+       if (image_idx_2_quadratic < image_ids_.size()) {
+         const image_t image_id2 = image_ids_.at(image_idx_2_quadratic);
++        if (!IsValidSequentialNeighbor(image_id1, image_id2)) {
++          continue;
++        }
+         image_pairs_.emplace_back(image_id1, image_id2);
+         MaybeExpandRigImages(image_id1, image_id2);
+       } else {
+@@ -529,6 +556,9 @@ std::vector<std::pair<image_t, image_t>> SequentialPairGenerator::Next() {
+       const size_t image_idx_2 = image_idx_ + i + 1;
+       if (image_idx_2 < image_ids_.size()) {
+         const image_t image_id2 = image_ids_.at(image_idx_2);
++        if (!IsValidSequentialNeighbor(image_id1, image_id2)) {
++          continue;
++        }
+         image_pairs_.emplace_back(image_id1, image_id2);
+         MaybeExpandRigImages(image_id1, image_id2);
+       } else {
+diff --git a/src/colmap/controllers/pairing.h b/src/colmap/controllers/pairing.h
+index 229d1dd36..54842c64c 100644
+--- a/src/colmap/controllers/pairing.h
++++ b/src/colmap/controllers/pairing.h
+@@ -326,6 +326,9 @@ class SequentialPairGenerator : public PairGenerator {
+   std::vector<std::pair<image_t, image_t>> Next() override;
+ 
+  private:
++  bool IsValidSequentialNeighbor(image_t image_id1,
++                                 image_t image_id2) const;
++
+   std::vector<image_t> GetOrderedImageIds() const;
+ 
+   const SequentialPairingOptions options_;
