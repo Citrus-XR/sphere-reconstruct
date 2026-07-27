@@ -15,6 +15,7 @@ jobs:
       CUDA_MINOR_VERSION: "2"
       CUDA_PATCH_VERSION: "0"
       VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}\vcpkg-binary-cache
+      SCCACHE_GHA_ENABLED: "true"
     steps:
       - uses: actions/checkout@v4
 
@@ -37,6 +38,9 @@ jobs:
         with:
           path: vcpkg-binary-cache
           key: vcpkg-6d9d7df564a1ccdaa994e4ad39ccd4a32360867b-x64-windows-release-v1
+
+      - name: Enable compiler cache
+        uses: mozilla-actions/sccache-action@v0.0.10
 
       - name: Enter Visual Studio environment and build
         id: build

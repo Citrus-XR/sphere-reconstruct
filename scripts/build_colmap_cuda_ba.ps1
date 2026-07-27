@@ -128,6 +128,9 @@ $Toolchain = Join-Path $VcpkgRoot "scripts/buildsystems/vcpkg.cmake"
 $CudaArchitectures = "75;80;86;89;100;120"
 cmake -S $CeresSource -B $CeresBuild -GNinja `
     "-DCMAKE_BUILD_TYPE=Release" `
+    "-DCMAKE_C_COMPILER_LAUNCHER=sccache" `
+    "-DCMAKE_CXX_COMPILER_LAUNCHER=sccache" `
+    "-DCMAKE_CUDA_COMPILER_LAUNCHER=sccache" `
     "-DCMAKE_TOOLCHAIN_FILE=$Toolchain" `
     "-DVCPKG_TARGET_TRIPLET=$Triplet" `
     "-DVCPKG_MANIFEST_MODE=OFF" `
@@ -146,6 +149,9 @@ cmake --build $CeresBuild --target install
 
 cmake -S $ColmapSource -B $ColmapBuild -GNinja `
     "-DCMAKE_BUILD_TYPE=Release" `
+    "-DCMAKE_C_COMPILER_LAUNCHER=sccache" `
+    "-DCMAKE_CXX_COMPILER_LAUNCHER=sccache" `
+    "-DCMAKE_CUDA_COMPILER_LAUNCHER=sccache" `
     "-DCMAKE_TOOLCHAIN_FILE=$Toolchain" `
     "-DVCPKG_TARGET_TRIPLET=$Triplet" `
     "-DCMAKE_INSTALL_PREFIX=$ColmapInstall" `
