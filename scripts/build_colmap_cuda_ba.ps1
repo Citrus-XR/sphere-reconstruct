@@ -130,7 +130,8 @@ cmake -S $CeresSource -B $CeresBuild -GNinja `
     "-DCMAKE_BUILD_TYPE=Release" `
     "-DCMAKE_C_COMPILER_LAUNCHER=sccache" `
     "-DCMAKE_CXX_COMPILER_LAUNCHER=sccache" `
-    "-DCMAKE_CUDA_COMPILER_LAUNCHER=sccache" `
+    "-DCMAKE_CUDA_STANDARD=17" `
+    "-DCMAKE_CUDA_STANDARD_REQUIRED=ON" `
     "-DCMAKE_TOOLCHAIN_FILE=$Toolchain" `
     "-DVCPKG_TARGET_TRIPLET=$Triplet" `
     "-DVCPKG_MANIFEST_MODE=OFF" `
@@ -151,7 +152,8 @@ cmake -S $ColmapSource -B $ColmapBuild -GNinja `
     "-DCMAKE_BUILD_TYPE=Release" `
     "-DCMAKE_C_COMPILER_LAUNCHER=sccache" `
     "-DCMAKE_CXX_COMPILER_LAUNCHER=sccache" `
-    "-DCMAKE_CUDA_COMPILER_LAUNCHER=sccache" `
+    "-DCMAKE_CUDA_STANDARD=17" `
+    "-DCMAKE_CUDA_STANDARD_REQUIRED=ON" `
     "-DCMAKE_TOOLCHAIN_FILE=$Toolchain" `
     "-DVCPKG_TARGET_TRIPLET=$Triplet" `
     "-DCMAKE_INSTALL_PREFIX=$ColmapInstall" `
