@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import platform
 import re
@@ -102,19 +103,25 @@ def _colmap_check() -> dict:
     commands = _run([binary, "-h"])
     features = _run([binary, "feature_extractor", "-h"])
     matchers = _run([binary, "sequential_matcher", "-h"])
-    combined = "\n".join((commands["output"], features["output"], matchers["output"]))
+    global_mapper = _run([binary, "global_mapper", "-h"])
+    combined = "\n".join(
+        (commands["output"], features["output"], matchers["output"], global_mapper["output"])
+    )
     version_match = re.search(r"COLMAP\s+(\d+)\.(\d+)", version["output"])
     modern_camera_models = bool(
         version_match and (int(version_match.group(1)), int(version_match.group(2))) >= (4, 1)
     )
-    cudss = next(iter(Path(binary).parent.glob("*cudss*")), None) or find_library("cudss")
+    bundle_adjustment = _bundle_adjustment_capabilities(Path(binary))
     capabilities = {
         "global_mapper": "global_mapper" in commands["output"],
         "aliked": "--AlikedExtraction.max_num_features" in features["output"],
         "aliked_bruteforce": "--AlikedMatching.brute_force" in matchers["output"],
         "aliked_lightglue": "--AlikedMatching.lightglue" in matchers["output"],
         "equirectangular": modern_camera_models,
-        "gpu_bundle_adjustment": bool(cudss) and ("ba_use_gpu" in combined or "ba_ceres_use_gpu" in combined),
+        "gpu_bundle_adjustment": bundle_adjustment["sparse"]
+        and "ba_ceres_use_gpu" in combined,
+        "gpu_bundle_adjustment_dense": bundle_adjustment["dense"],
+        "gpu_bundle_adjustment_sparse": bundle_adjustment["sparse"],
     }
     ok = version["returncode"] == 0 and all(
         capabilities[name] for name in ("global_mapper", "aliked", "equirectangular")
@@ -124,8 +131,46 @@ def _colmap_check() -> dict:
         "path": binary,
         "version": version["output"].strip(),
         "capabilities": capabilities,
-        "cudss": str(cudss) if cudss else None,
+        "ceres_cuda": bundle_adjustment["dense"],
+        "cudss": bundle_adjustment["cudss"],
+        "runtime_metadata": bundle_adjustment["metadata"],
         "message": "ok" if ok else "COLMAP 4.1+ capabilities are incomplete",
+    }
+
+
+def _bundle_adjustment_capabilities(binary: Path) -> dict:
+    metadata_paths = (
+        binary.parent / "sphere-colmap-capabilities.json",
+        binary.parent.parent / "sphere-colmap-capabilities.json",
+    )
+    metadata_path = next((path for path in metadata_paths if path.is_file()), None)
+    if metadata_path is not None:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8-sig"))
+        return {
+            "dense": bool(metadata.get("gpu_bundle_adjustment_dense")),
+            "sparse": bool(metadata.get("gpu_bundle_adjustment_sparse")),
+            "cudss": metadata.get("cudss_version"),
+            "metadata": str(metadata_path),
+        }
+
+    ceres_candidates = [
+        *binary.parent.glob("ceres*.dll"),
+        *binary.parent.glob("libceres*.so*"),
+        *binary.parent.glob("libceres*.dylib"),
+    ]
+    ceres = next((path for path in ceres_candidates if path.is_file()), None)
+    cudss = next(iter(binary.parent.glob("*cudss*")), None) or find_library("cudss")
+    if ceres is None:
+        return {"dense": False, "sparse": False, "cudss": None, "metadata": None}
+    binary_strings = ceres.read_bytes()
+    no_cuda = b"Ceres was compiled without support for CUDA" in binary_strings
+    dense = not no_cuda and b"CUDA" in binary_strings
+    sparse = dense and bool(cudss) and b"CERES_NO_CUDSS" not in binary_strings
+    return {
+        "dense": dense,
+        "sparse": sparse,
+        "cudss": str(cudss) if cudss else None,
+        "metadata": None,
     }
 
 

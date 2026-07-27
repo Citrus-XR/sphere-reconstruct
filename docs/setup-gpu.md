@@ -145,6 +145,16 @@ Requested to use GPU for bundle adjustment, but Ceres was compiled without cuDSS
 
 Doctor の `colmap.capabilities.gpu_bundle_adjustment` と UI option が連動する。
 
+COLMAP official Windows CUDA archive は COLMAP の CUDA feature を含むが、vcpkg の Ceres dependency に
+`cuda` feature を指定していないため、Ceres BA 自体は CPU build になる。`with CUDA` という version
+表示だけで BA capability を有効にしない。
+
+Project の pinned CUDA-BA runtime は Ceres 2.3 development commit
+[`bac1127`](https://github.com/ceres-solver/ceres-solver/commit/bac1127f9ef672405bd0d2d9c84e809ae89bd239)、
+CUDA 13.2、cuDSS 0.8.0.10 を使う。Build は `.github/workflows/build-colmap-cuda-ba.yml`、再現用 script は
+`scripts/build_colmap_cuda_ba.ps1`。Runtime metadata と Ceres DLL dependency の両方を Doctor が検査し、
+sparse CUDA BA を確認できた package だけ `ba_use_gpu` を有効にする。
+
 ## Native ALIKED
 
 COLMAP 4.1.1 は ALIKED N16ROT / N32、Brute-force、LightGlue を内蔵する。Model URL と SHA-256 が

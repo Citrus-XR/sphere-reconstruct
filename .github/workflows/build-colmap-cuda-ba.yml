@@ -1,0 +1,60 @@
+name: Build COLMAP CUDA BA runtime
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows-runtime:
+    runs-on: windows-2025
+    timeout-minutes: 180
+    env:
+      CUDA_MAJOR_VERSION: "13"
+      CUDA_MINOR_VERSION: "2"
+      CUDA_PATCH_VERSION: "0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install CUDA toolchain
+        uses: Jimver/cuda-toolkit@v0.2.35
+        with:
+          cuda: ${{ env.CUDA_MAJOR_VERSION }}.${{ env.CUDA_MINOR_VERSION }}.${{ env.CUDA_PATCH_VERSION }}
+          sub-packages: '["nvcc", "crt", "nvvm", "thrust", "nvtx", "cudart", "curand", "curand_dev", "nvrtc_dev", "cublas", "cublas_dev", "cusolver", "cusolver_dev", "cusparse", "cusparse_dev"]'
+          method: network
+
+      - name: Install CMake and Ninja
+        uses: lukka/get-cmake@latest
+        with:
+          cmakeVersion: "4.1.0"
+          ninjaVersion: "1.12.1"
+
+      - name: Enter Visual Studio environment and build
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe"
+          $installation = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          Import-Module "$installation/Common7/Tools/Microsoft.VisualStudio.DevShell.dll"
+          Enter-VsDevShell -VsInstallPath $installation -SkipAutomaticLocation -DevCmdArguments "-arch=x64 -host_arch=x64"
+          ./scripts/build_colmap_cuda_ba.ps1 -OutputDirectory "${{ github.workspace }}/dist"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: colmap-4.1.1-x64-windows-cuda-ba
+          path: dist/*
+
+      - name: Publish pinned runtime release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: runtime-colmap-4.1.1-cuda-ba-v1
+          name: COLMAP 4.1.1 CUDA BA runtime v1
+          prerelease: true
+          body: |
+            COLMAP 4.1.1 CLI runtime built with Ceres 2.3.0-dev at
+            bac1127f9ef672405bd0d2d9c84e809ae89bd239, CUDA 13.2, and cuDSS 0.8.0.10.
+            The archive is intended for sphere-reconstruct's pinned Windows installer.
+          files: |
+            dist/colmap-4.1.1-x64-windows-cuda-ba.zip
+            dist/colmap-4.1.1-x64-windows-cuda-ba.zip.sha256
