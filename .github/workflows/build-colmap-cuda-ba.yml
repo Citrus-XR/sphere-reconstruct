@@ -13,7 +13,7 @@ jobs:
     env:
       CUDA_MAJOR_VERSION: "12"
       CUDA_MINOR_VERSION: "8"
-      CUDA_PATCH_VERSION: "0"
+      CUDA_PATCH_VERSION: "1"
       VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}\vcpkg-binary-cache
       SCCACHE_GHA_ENABLED: "true"
     steps:
