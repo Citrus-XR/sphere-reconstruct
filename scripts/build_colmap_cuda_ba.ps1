@@ -17,6 +17,9 @@ if (Test-Path $BuildRoot) {
 }
 New-Item $BuildRoot -ItemType Directory | Out-Null
 New-Item $OutputDirectory -ItemType Directory -Force | Out-Null
+if ($env:VCPKG_DEFAULT_BINARY_CACHE) {
+    New-Item $env:VCPKG_DEFAULT_BINARY_CACHE -ItemType Directory -Force | Out-Null
+}
 
 $ColmapSource = Join-Path $BuildRoot "colmap"
 $CeresSource = Join-Path $BuildRoot "ceres"
