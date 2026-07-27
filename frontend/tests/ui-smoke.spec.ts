@@ -6,6 +6,8 @@ const MOCK_SOURCE = 'D:\\VID 2026\\clip.insv'
 const MOCK_EXPORT = 'D:\\LFStudio\\export_dataset'
 const MOCK_ENV_PATH = 'D:\\very-long-workspace-directory\\nested-runtime\\models\\and-tools\\current-environment'
 const MOCK_PHONE = 'D:\\mixed-inputs\\Phone photos'
+const TRAINING_MASK_PROMPT = 'person,camera operator,selfie stick,tripod,person shadow,selfie stick shadow,tripod shadow'
+const FEATURE_MASK_PROMPT = `${TRAINING_MASK_PROMPT},animal,sky,tree,vehicle,airplane,water`
 
 interface MockOptions {
   sourceKind?: 'insv' | 'erp_video'
@@ -64,7 +66,10 @@ const installUiMock = async (page: Page, options: MockOptions = {}) => {
       return
     }
     if (path === '/api/settings') {
-      await route.fulfill({ json: { sam3: { default_prompt: '' } } })
+      await route.fulfill({ json: { sam3: {
+        training_prompt: TRAINING_MASK_PROMPT,
+        feature_prompt: FEATURE_MASK_PROMPT,
+      } } })
       return
     }
     if (path === '/api/system/doctor') {
@@ -89,12 +94,13 @@ const installUiMock = async (page: Page, options: MockOptions = {}) => {
     const projectMatch = path.match(/^\/api\/projects\/(p1|p2)/)
     const projectId = projectMatch?.[1]
     if (projectId && path === `/api/projects/${projectId}/stages`) {
-      const names = ['inspect_source', 'extract_frames', 'prepare_images', 'generate_masks', 'extract_features', 'match_features', 'reconstruct', 'align_reconstruction', 'export_dataset']
+      const names = ['inspect_source', 'extract_frames', 'prepare_images', 'generate_feature_masks', 'generate_training_masks', 'extract_features', 'match_features', 'reconstruct', 'align_reconstruction', 'export_dataset']
       const extras: Record<string, Record<string, unknown>> = {
         inspect_source: { kind: 'insv', file_size: 1024, gravity_samples: 42 },
         extract_frames: { frames: 1, selection_mode: 'interval', selected: 1 },
         prepare_images: { images: 2, sources: 1, camera_groups: 1 },
-        generate_masks: { images: 2, average_dynamic_coverage: 0.1, coverage_warnings: 0 },
+        generate_feature_masks: { purpose: 'feature', images: 2, average_dynamic_coverage: 0.2, coverage_warnings: 0 },
+        generate_training_masks: { purpose: 'training', images: 2, average_dynamic_coverage: 0.1, coverage_warnings: 0 },
         extract_features: { images: 2, minimum_keypoints: 100, average_keypoints: 200, maximum_keypoints: 300, descriptor_images: 2 },
         match_features: { raw_pairs: 1, verified_pairs: 1, minimum_inliers: 20, average_inliers: 20, maximum_inliers: 20, total_inliers: 20 },
         reconstruct: { input_images: 2, num_images: 2, num_points3D: 42, registered_ratio: 1, mean_reprojection_error: 0.5 },
@@ -154,12 +160,19 @@ const installUiMock = async (page: Page, options: MockOptions = {}) => {
       await route.fulfill({ json: { count: frames.length, sources: frameSources, frames } })
       return
     }
-    if (projectId && path === `/api/projects/${projectId}/masks`) {
+    const masksMatch = projectId && path.match(new RegExp(`^/api/projects/${projectId}/masks/(feature|training)$`))
+    if (masksMatch) {
+      const purpose = masksMatch[1] as 'feature' | 'training'
       const maskNames = sourceKind === 'insv' && reconMode !== 'pinhole_rig'
         ? ['sources/s1/front/frame_000000.jpg', 'sources/s1/back/frame_000000.jpg']
         : [imageName]
-      await route.fulfill({ json: { version: 2, prompt: ['person'], images: maskNames.map((name, index) => ({
-        name, source_id: 's1', capture_index: 0, path: 'mask.png', coverage: 0.1 + index * 0.1,
+      await route.fulfill({ json: {
+        version: 3, purpose,
+        prompt: (purpose === 'feature' ? FEATURE_MASK_PROMPT : TRAINING_MASK_PROMPT).split(','),
+        max_inference_size: 1024, dilate_px: 8,
+        images: maskNames.map((name, index) => ({
+        name, source_id: 's1', capture_index: 0, path: `${purpose}-mask.png`,
+        coverage: (purpose === 'feature' ? 0.2 : 0.1) + index * 0.1,
         coverage_warning: false,
       })) } })
       return
@@ -378,6 +391,48 @@ test('photo and dataset camera inspectors share capture summary fields', async (
   await expect(summary.getByText('Reconstruction registration', { exact: true })).toBeVisible()
   await expect(summary.getByText('Image 3D points', { exact: true })).toBeVisible()
   await expect(page.getByText('Camera position', { exact: true })).toBeVisible()
+  expect(mock.unexpectedRequests).toEqual([])
+})
+
+test('feature and training masks are independent steps with distinct defaults', async ({ page }) => {
+  const mock = await installUiMock(page)
+  await page.goto('/')
+
+  await page.getByRole('button', { name: /SAM3 feature masks/ }).click()
+  const featureEnabled = page.getByRole('checkbox', { name: 'Enable feature-matching masks' })
+  await expect(featureEnabled).toBeChecked()
+  await expect(page.getByText('Feature-mask prompt', { exact: true }).locator('..').locator('input'))
+    .toHaveValue(FEATURE_MASK_PROMPT)
+  await expect(page.getByText('2048px', { exact: true })).toBeVisible()
+  await featureEnabled.uncheck()
+  await expect(page.getByRole('button', { name: /SAM3 feature masks skip/ })).toBeVisible()
+
+  await page.getByRole('button', { name: /SAM3 training masks/ }).click()
+  await expect(page.getByRole('checkbox', { name: 'Enable training masks' })).toBeChecked()
+  await expect(page.getByText('Training-mask prompt', { exact: true }).locator('..').locator('input'))
+    .toHaveValue(TRAINING_MASK_PROMPT)
+  await expect(page.getByText('2048px', { exact: true })).toBeVisible()
+  expect(mock.unexpectedRequests).toEqual([])
+})
+
+test('photo and dataset camera previews switch between both mask steps', async ({ page }) => {
+  const mock = await installUiMock(page)
+  await page.goto('/')
+
+  await page.getByText('Frame 0', { exact: true }).click()
+  let purpose = page.getByRole('group', { name: 'Mask purpose' })
+  await expect(purpose.getByRole('button', { name: 'Training' })).toHaveAttribute('aria-pressed', 'true')
+  await page.getByRole('tab', { name: 'Mask' }).click()
+  await expect(page.locator('img[alt="Mask"]')).toHaveAttribute('src', /purpose=training/)
+  await purpose.getByRole('button', { name: 'Feature' }).click()
+  await expect(page.locator('img[alt="Mask"]')).toHaveAttribute('src', /purpose=feature/)
+
+  await page.getByText(/Dataset · Cameras/).click()
+  await page.getByText('sources/s1/front/frame_000000.jpg', { exact: true }).click()
+  purpose = page.getByRole('group', { name: 'Mask purpose' })
+  await page.getByRole('tab', { name: 'Mask' }).click()
+  await purpose.getByRole('button', { name: 'Feature' }).click()
+  await expect(page.locator('img[alt="Mask"]')).toHaveAttribute('src', /purpose=feature/)
   expect(mock.unexpectedRequests).toEqual([])
 })
 

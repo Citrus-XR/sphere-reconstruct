@@ -12,6 +12,8 @@ from pathlib import Path
 
 import aiosqlite
 
+from .migrations import migrate_dual_mask_artifacts
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS project (
     id           TEXT PRIMARY KEY,
@@ -152,6 +154,7 @@ class Database:
             """
         )
         await self._conn.execute("UPDATE project SET source_kind=NULL, source_path=NULL")
+        await migrate_dual_mask_artifacts(self._conn, self._path.parent)
         await self._conn.commit()
 
     async def close(self) -> None:

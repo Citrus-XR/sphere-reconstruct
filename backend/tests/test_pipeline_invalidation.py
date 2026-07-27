@@ -51,6 +51,25 @@ def test_feature_change_invalidates_every_consumer(tmp_path):
     assert derive_pipeline_state(tmp_path) == PipelineState.FEATURES_EXTRACTED
 
 
+def test_feature_mask_change_preserves_training_masks_and_invalidates_sfm(tmp_path):
+    _populate(tmp_path)
+    invalidated = invalidate_from(tmp_path, StageName.GENERATE_FEATURE_MASKS, include_self=True)
+
+    assert StageName.EXTRACT_FEATURES in invalidated
+    assert StageName.EXPORT_DATASET in invalidated
+    assert StageName.GENERATE_TRAINING_MASKS not in invalidated
+    assert (tmp_path / StageName.GENERATE_TRAINING_MASKS.value).is_dir()
+
+
+def test_training_mask_change_only_invalidates_export(tmp_path):
+    _populate(tmp_path)
+    invalidated = invalidate_from(tmp_path, StageName.GENERATE_TRAINING_MASKS, include_self=True)
+
+    assert invalidated == [StageName.GENERATE_TRAINING_MASKS, StageName.EXPORT_DATASET]
+    assert (tmp_path / StageName.EXTRACT_FEATURES.value).is_dir()
+    assert (tmp_path / StageName.ALIGN_RECONSTRUCTION.value).is_dir()
+
+
 def test_summary_state_follows_last_main_branch_artifact(tmp_path):
     _populate(tmp_path)
     (tmp_path / StageName.EXPORT_DATASET.value).rmdir()

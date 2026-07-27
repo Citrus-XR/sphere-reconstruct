@@ -22,7 +22,7 @@ _FEATURE_TYPES = {"SIFT", "ALIKED_N16ROT", "ALIKED_N32"}
 @register
 class ExtractFeatures(Stage):
     name = StageName.EXTRACT_FEATURES
-    impl_version = "2.1"
+    impl_version = "3.0"
 
     def normalize_params(self, raw: dict) -> dict:
         feature_type = str(raw.get("feature_type", "SIFT")).upper()
@@ -32,7 +32,7 @@ class ExtractFeatures(Stage):
             "reconstruction_mode": str(raw.get("reconstruction_mode", "native_fisheye")),
             "feature_type": feature_type,
             "use_gpu": bool(raw.get("use_gpu", True)),
-            "use_masks": bool(raw.get("use_masks", True)),
+            "use_feature_masks": bool(raw.get("use_feature_masks", True)),
             "max_image_size": int(raw.get("max_image_size", 2048)),
             "max_num_features": int(raw.get("max_num_features", 8192)),
             "sift_peak_threshold": float(raw.get("sift_peak_threshold", 0.0)),
@@ -44,8 +44,14 @@ class ExtractFeatures(Stage):
         candidates = [
             ctx.project_dir / "manifests" / "prepare_images.json",
             ctx.project_dir / "prepare_images" / "image_catalog.json",
-            ctx.project_dir / "manifests" / "generate_masks.json",
         ]
+        if ctx.params["use_feature_masks"]:
+            candidates.extend(
+                [
+                    ctx.project_dir / "manifests" / "generate_feature_masks.json",
+                    ctx.project_dir / "generate_feature_masks" / "manifest_masks.json",
+                ]
+            )
         return [
             FileRef(
                 path=str(path.relative_to(ctx.project_dir)),
@@ -60,7 +66,9 @@ class ExtractFeatures(Stage):
         manifest = new_manifest(self.name, self.impl_version)
         manifest.inputs = self.collect_inputs(ctx)
         manifest.params = ctx.params
-        spec = input_workspace.build(ctx.project_dir, ctx.stage_out_dir, ctx.params["use_masks"])
+        spec = input_workspace.build(
+            ctx.project_dir, ctx.stage_out_dir, ctx.params["use_feature_masks"]
+        )
         logs_dir = ctx.stage_out_dir / "logs"
         logs_dir.mkdir(parents=True, exist_ok=True)
         database_path = ctx.stage_out_dir / "database.db"
@@ -112,7 +120,8 @@ class ExtractFeatures(Stage):
             {
                 "feature_type": ctx.params["feature_type"],
                 "gpu_enabled": ctx.params["use_gpu"],
-                "masks_enabled": bool(spec.mask_path),
+                "feature_masks_enabled": spec.feature_masks_enabled,
+                "valid_region_masks_enabled": bool(spec.mask_path) and not spec.feature_masks_enabled,
                 "sources": spec.source_count,
                 "camera_groups": len(spec.feature_batches),
                 "camera_models": sorted({batch.camera_model for batch in spec.feature_batches}),

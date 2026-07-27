@@ -35,7 +35,7 @@ const fmtDur = (sec: number): string => {
 // 右パネル「生成設定」: 選択中工程のパラメータ + 再生成 / クリア. 各コントロール下に説明.
 export const StageSettings = ({
   projectId, stage, status, sourceInfo, reconMode, setReconMode, params, setParams, onJob, hasSource,
-  sources, resultMode, primaryProjection, processing, stageIsRunning, onStop, stageDisabled, onToggleStage,
+  sources, resultMode, primaryProjection, processing, stageIsRunning, onStop,
   onSelectSource, onDeleteSource, onMakePrimarySource, sourceMutationError, frameSelection,
   stageProgress, stageStartedAt, stageProgressMsg, blockedReason,
 }: {
@@ -55,8 +55,6 @@ export const StageSettings = ({
   processing: boolean
   stageIsRunning: boolean
   onStop: () => void
-  stageDisabled: boolean
-  onToggleStage: () => void
   onSelectSource: (source: Omit<SourceCreate, 'path'>) => void
   onDeleteSource: (sourceId: string) => void
   onMakePrimarySource: (sourceId: string) => void
@@ -103,15 +101,28 @@ export const StageSettings = ({
 
   const predBase = sourceInfo?.duration_sec ? Math.floor(sourceInfo.duration_sec * params.fps) : null
   const predCapped = predBase != null && params.maxFrames > 0 ? Math.min(predBase, params.maxFrames) : predBase
+  const maskPurpose = stage === 'generate_feature_masks'
+    ? 'feature'
+    : stage === 'generate_training_masks' ? 'training' : null
+  const featureMask = maskPurpose === 'feature'
+  const maskEnabled = maskPurpose === null
+    ? true
+    : featureMask ? params.featureMaskEnabled : params.trainingMaskEnabled
+  const maskDownsample = featureMask ? params.featureMaskDownsampleOn : params.trainingMaskDownsampleOn
+  const maskSize = featureMask ? params.featureMaskSize : params.trainingMaskSize
+  const maskDilateOn = featureMask ? params.featureMaskDilateOn : params.trainingMaskDilateOn
+  const maskDilate = featureMask ? params.featureMaskDilate : params.trainingMaskDilate
+  const maskPrompt = featureMask ? params.featureMaskPrompt : params.trainingMaskPrompt
   return (
     <div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
         <strong style={{ flex: 1 }}>{t(`st_${stage}`)}</strong>
         {processing && stageIsRunning
           ? <button className="btn stop" onClick={onStop}>■ {t('stop')}</button>
-          : <button className="btn" disabled={run.isPending || !hasSource || processing || !!blockedReason}
+          : <button className="btn"
+              disabled={run.isPending || !hasSource || processing || !!blockedReason || !maskEnabled}
               title={!hasSource ? t('noSource') : processing ? t('otherRunning')
-                : blockedReason ?? ''}
+                : !maskEnabled ? t('maskStepDisabled') : blockedReason ?? ''}
               onClick={() => run.mutate()}>
               {status?.has_output ? t('regenerate') : t('generate')}
             </button>}
@@ -226,41 +237,54 @@ export const StageSettings = ({
         </>
       )}
 
-      {stage === 'generate_masks' && (
+      {maskPurpose && (
         <>
           <div className="ctl">
             <label style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
-              <input type="checkbox" checked={!stageDisabled} onChange={onToggleStage} /> {t('enableStage')}
+              <input type="checkbox" checked={maskEnabled} onChange={() => setParams(featureMask
+                ? { featureMaskEnabled: !params.featureMaskEnabled }
+                : { trainingMaskEnabled: !params.trainingMaskEnabled })} />
+              {t(featureMask ? 'enableFeatureMasks' : 'enableTrainingMasks')}
             </label>
-            <div className="hint">{t('hint_sam3enable')}</div>
-            {reconMode === 'native_fisheye' && <div className="hint">{t('hint_sam3circle')}</div>}
+            <div className="hint">{t(featureMask ? 'hintFeatureMasks' : 'hintTrainingMasks')}</div>
+            {featureMask && reconMode === 'native_fisheye' && <div className="hint">{t('hint_sam3circle')}</div>}
           </div>
           <div className="ctl">
             <label style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
-              <input type="checkbox" checked={params.downsampleOn} onChange={() => setParams({ downsampleOn: !params.downsampleOn })} /> {t('lbl_downsample')}
+              <input type="checkbox" checked={maskDownsample} onChange={() => setParams(featureMask
+                ? { featureMaskDownsampleOn: !params.featureMaskDownsampleOn }
+                : { trainingMaskDownsampleOn: !params.trainingMaskDownsampleOn })} /> {t('lbl_downsample')}
             </label>
             <div className="hint">{t('hint_downsample')}</div>
           </div>
-          {params.downsampleOn && (
+          {maskDownsample && (
             <Slider label={t('lbl_masksize')} hint={t('hint_masksize')} min={6} max={14} step={1}
-              value={Math.round(Math.log2(params.maskSize))}
-              onChange={v => setParams({ maskSize: 2 ** v })} fmt={v => `${2 ** v}px`} />
+              value={Math.round(Math.log2(maskSize))}
+              onChange={v => setParams(featureMask
+                ? { featureMaskSize: 2 ** v }
+                : { trainingMaskSize: 2 ** v })} fmt={v => `${2 ** v}px`} />
           )}
           <div className="ctl">
             <label style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
-              <input type="checkbox" checked={params.dilateOn} onChange={() => setParams({ dilateOn: !params.dilateOn })} /> {t('lbl_dilate')}
+              <input type="checkbox" checked={maskDilateOn} onChange={() => setParams(featureMask
+                ? { featureMaskDilateOn: !params.featureMaskDilateOn }
+                : { trainingMaskDilateOn: !params.trainingMaskDilateOn })} /> {t('lbl_dilate')}
             </label>
             <div className="hint">{t('hint_dilate')}</div>
           </div>
-          {params.dilateOn && (
+          {maskDilateOn && (
             <Slider label={t('lbl_dilate')} hint="" min={2} max={40} step={2}
-              value={params.dilate} onChange={v => setParams({ dilate: Math.round(v) })} fmt={v => `${v}px`} />
+              value={maskDilate} onChange={v => setParams(featureMask
+                ? { featureMaskDilate: Math.round(v) }
+                : { trainingMaskDilate: Math.round(v) })} fmt={v => `${v}px`} />
           )}
           <div className="ctl">
-            <label>{t('lbl_prompt')}</label>
-            <input className="input" placeholder="person,tripod,..." value={params.prompt}
-              onChange={e => setParams({ prompt: e.target.value })} />
-            <div className="hint">{t('hint_prompt')}</div>
+            <label>{t(featureMask ? 'lblFeaturePrompt' : 'lblTrainingPrompt')}</label>
+            <input className="input" placeholder="person,tripod,..." value={maskPrompt}
+              onChange={e => setParams(featureMask
+                ? { featureMaskPrompt: e.target.value }
+                : { trainingMaskPrompt: e.target.value })} />
+            <div className="hint">{t(featureMask ? 'hintFeaturePrompt' : 'hintTrainingPrompt')}</div>
           </div>
         </>
       )}
@@ -623,6 +647,8 @@ const statLabel = (t: (key: string) => string, key: string): string => {
 
 const formatStatistic = (t: (key: string) => string, key: string, value: string | number | boolean): string => {
   if (key === 'lfstudio_training_metrics' && value === 'external') return t('notAvailableExternalTraining')
+  if ((key === 'purpose' || key === 'mask_source') && typeof value === 'string')
+    return t(value === 'feature' ? 'featureMask' : 'trainingMask')
   if (typeof value === 'boolean') return value ? t('yes') : t('no')
   if (typeof value === 'string') return value
   if (key === 'file_size' || key === 'footer_size') {

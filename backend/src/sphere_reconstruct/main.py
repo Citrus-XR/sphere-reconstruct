@@ -59,6 +59,7 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
 app = FastAPI(
     title="sphere-reconstruct",
     version="0.0.1",
+    license_info={"name": "GPL-3.0-or-later", "identifier": "GPL-3.0-or-later"},
     lifespan=lifespan,
 )
 
@@ -104,7 +105,7 @@ def _mount_frontend() -> None:
     app.mount("/assets", StaticFiles(directory=dist / "assets"), name="assets")
 
     @app.get("/{full_path:path}")
-    async def spa_fallback(full_path: str) -> FileResponse:
+    async def spa_fallback(full_path: str):
         # API パスはここに来ない (先に登録済みルータが処理する).
         candidate = dist / full_path
         if full_path and candidate.is_file():

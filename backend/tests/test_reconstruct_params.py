@@ -87,7 +87,7 @@ def test_global_mapper_retries_camera_only_result(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(module.colmap_runner, "global_mapper", fake_mapper)
     monkeypatch.setattr(module, "_select_largest_model", fake_select)
     spec = InputSpec(
-        version=2,
+        version=3,
         reconstruction_mode="native_fisheye",
         image_count=10,
         source_count=1,
@@ -98,6 +98,7 @@ def test_global_mapper_retries_camera_only_result(tmp_path: Path, monkeypatch):
         feature_batches=[],
         image_path="images",
         mask_path=None,
+        feature_masks_enabled=False,
         rig_config_path=None,
         refine_intrinsics=True,
         refine_rig=False,

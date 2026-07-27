@@ -80,12 +80,10 @@ Inspect every source
   -> extract video frames / collect still images
   -> confirm source-specific fisheye region
   -> prepare canonical images and camera groups
-  -> generate SAM3 masks
-  -> extract features into one COLMAP database
-  -> create within-source and cross-source matches
-  -> sparse reconstruction
-  -> primary-source IMU gravity alignment
-  -> registered-only LFStudio export
+       ├─> Feature-mask Step ─> feature extraction / matching / SfM
+       └─> Training-mask Step ───────────────────────────────┐
+  -> primary-source IMU gravity alignment                   │
+  -> export registered images + exactly one resolved mask <-┘
 ```
 
 各 stage は個別に生成、再生成、クリアできる。Source 構成を変更すると affected source branch と
@@ -104,13 +102,57 @@ aggregate reconstruction だけを invalidation する。Scene Hierarchy の pho
 Canonical image name は `sources/<source-id>/...`。Source、capture、view、camera group、mask の
 identity を filename parsing に依存させない。
 
-### SAM3 mask
+## Two independent SAM3 mask Steps
 
-SAM3 は prepared canonical image ごとに実行する。Perspective、ERP、cubemap は full valid region、
-native fisheye は source-specific circle と dynamic mask を合成する。Mask は image relative path を
-mirror し、white=keep / black=ignore。Image と mask の orientation / size は常に一致させる。
+Mask は用途別の独立 artifact とする。
 
-### Feature matching
+### Feature masks
+
+Feature extraction / matching の前に適用し、動体や view ごとに変わりやすい領域を広く除外する。
+Default prompt:
+
+```text
+person,camera operator,selfie stick,tripod,person shadow,selfie stick shadow,tripod shadow,
+animal,sky,tree,vehicle,airplane,water
+```
+
+Feature-mask Step の再生成は Feature extraction、matching、reconstruction、alignment、export を
+invalidate するが、Training-mask artifact は保持する。
+
+Native fisheye の物理的な円形有効領域は SAM3 とは別 contract。Feature masks を無効にしても
+COLMAP feature extraction には円形領域を適用する。
+
+### Training masks
+
+Final LFStudio training 用。Feature mask より少ない対象を除外して細部を多く残す。Default prompt は
+従来の prompt をそのまま使う。
+
+```text
+person,camera operator,selfie stick,tripod,person shadow,selfie stick shadow,tripod shadow
+```
+
+Training-mask Step の再生成は Export だけを invalidate し、feature、matching、SfM を再実行しない。
+
+旧 `generate_masks` artifact は startup migration で Training-mask artifact へ移す。旧 feature workspace
+は新しい拡張 prompt contract と異なるため再生成対象になり、runtime に旧 schema の双読み分岐は残さない。
+
+### Enable / export matrix
+
+| Feature masks | Training masks | Feature extraction | Export / LFStudio |
+|---|---|---|---|
+| On | On | Feature masks | Training masks |
+| On | Off | Feature masks | Feature masks |
+| Off | On | Physical valid region only | Training masks |
+| Off | Off | Physical valid region only | No mask |
+
+Export は常に 0 または 1 channel だけを書き出す。Training が有効なら優先し、無効時だけ Feature を
+fallback とする。Photo / Dataset Camera Inspector は両方の artifact がある場合に Feature / Training
+を切り替えて mask と overlay を比較できる。
+
+Mask は prepared image relative path を mirror し、white=keep / black=ignore。Image と mask の
+orientation / size は常に一致させる。
+
+## Feature matching
 
 既定の pairing `Auto`:
 
@@ -121,7 +163,7 @@ mirror し、white=keep / black=ignore。Image と mask の orientation / size �
 Matching result は verified pair、cross-source pair matrix、connected component を記録する。
 COLMAP は同じ database 上で複数 matching mode を累積でき、既処理 pair を再計算しない。
 
-### Reconstruction / alignment
+## Reconstruction / alignment
 
 - Largest model は primary registered image 数を最優先に選ぶ
 - `min_registered_ratio` quality gate は primary source に適用する
@@ -136,14 +178,15 @@ COLMAP は同じ database 上で複数 matching mode を累積でき、既処理
 | 項目 | 既定 |
 |---|---|
 | Frame selection | Sharpness-first、1 fps、候補 5 |
-| SAM3 | 長辺 1024 px、dilation 8 px |
+| Feature masks | On、長辺 2048 px、dilation 8 px、拡張 prompt |
+| Training masks | On、長辺 2048 px、dilation 8 px、従来 prompt |
 | Feature | SIFT、長辺 2048 px、最大 8192 |
 | Matcher | Brute-force、pairing Auto |
 | Pair validation | 最大 16,384 matches、最小 15 inliers、guided off |
 | Mapper | Global Mapper + view-graph calibration |
 | Bundle Adjustment | CPU。Doctor が cuDSS を確認した場合だけ GPU |
 | Alignment | Primary IMU auto、reference trajectory normalization |
-| LFStudio | MRNF + GUT + masks + PPISP/controller、max cap 1M |
+| LFStudio | MRNF + GUT + resolved mask + PPISP/controller、max cap 1M |
 
 Standard / High preset は実写比較で良かった SIFT + Brute-force を基礎にする。High は長辺 3072、
 最大 16,384 features、最大 32,768 matches。ALIKED / LightGlue は弱 texture の alternative。
@@ -183,13 +226,16 @@ Standard / High preset は実写比較で良かった SIFT + Brute-force を基�
 Phone images は独立 model ではなく primary component へ全て接続した。Primary registration は低下せず、
 mean reprojection の増加は 0.007 px。
 
-SAM3 は 80 images 全てを処理し、123 detections、平均 dynamic coverage 7.14%、最大 20.89%、
-coverage warning 0。IMU alignment は primary の 35 exposure を使い、median / P90 residual は
-1.465° / 2.341°、time offset は -0.03 s。
+従来の単一 mask run は 80 images 全てを処理し、123 detections、平均 dynamic coverage 7.14%、最大
+20.89%、coverage warning 0。この artifact は現在の Training-mask prompt 相当。新 Feature-mask の
+拡張 prompt は独立 Step として再生成できる。
+
+IMU alignment は primary の 35 exposure を使い、median / P90 residual は 1.465° / 2.341°、time
+offset は -0.03 s。
 
 Feature database を再生成した repeat run では Global Mapper seed 0 が camera-only model になり、
 quality-gated seed 1 retry が 80/80、11,312 points、64,248 observations、mean reprojection 1.012 px
-を復元した。最終 LFStudio training dataset はこの repeat run を使う。
+を復元した。最終 LFStudio training dataset はこの repeat run を使った。
 
 ## LFStudio export and training
 
@@ -198,7 +244,7 @@ Export Inspector の 1 directory を dataset root として選ぶ。
 ```text
 export_dataset/
 ├── images/sources/<source-id>/...
-├── masks/sources/<source-id>/...
+├── masks/sources/<source-id>/...    # resolved channel がある場合だけ
 ├── sparse/0/{rigs,cameras,frames,images,points3D}.bin
 ├── preview/
 ├── train_configs/
@@ -229,9 +275,10 @@ Mixed distorted camera の推奨 MRNF config は次を有効にする。
 }
 ```
 
-`-1` activation は 30k training の最後 5,000 step、つまり step 25,000 で controller を有効にする。
-Controller distillation 中は Gaussian と per-frame PPISP parameter を固定し、novel view 用 controller
-だけを学習する。MCMC / IGS+ config は PPISP 無しの comparison path として維持する。
+Resolved mask が無ければ `mask_mode=none` を生成する。`-1` activation は 30k training の最後 5,000
+step、つまり step 25,000 で controller を有効にする。Controller distillation 中は Gaussian と
+per-frame PPISP parameter を固定し、novel view 用 controller だけを学習する。MCMC / IGS+ config は
+PPISP 無しの comparison path として維持する。
 
 PPISP は exposure、vignetting、white balance / color、camera response function の差を分離する appearance
 model であり、denoiser ではない。PLY だけでは PPISP correction が無いので、結果を開くときは同名
@@ -253,17 +300,15 @@ LichtFeld Studio v0.5.3 (`d8c50c6a`)、RTX 4070 Ti 12 GB、repeat mixed dataset 
 | Reloadable PLY Gaussians | 517,387 |
 | PLY / PPISP / checkpoint size | 128.3 MB / 2.9 MB / 220.7 MB |
 
-Training は `resize_factor=1`、`max_width=3840`。`Undistort: 3840x3840 -> 768x768` log は optional
-undistortion target の precompute であり、`undistort=false + GUT` の native fisheye training image を
-768 px へ縮小した意味ではない。
+この計測は dual-mask 分離前の Training-mask 相当 artifact を使った。Training は `resize_factor=1`、
+`max_width=3840`。`Undistort: 3840x3840 -> 768x768` log は optional undistortion target の precompute
+であり、`undistort=false + GUT` の native fisheye training image を 768 px へ縮小した意味ではない。
 
 Reload smoke は final PLY、PPISP sidecar、元 dataset を別 process で読み、517,387 Gaussians、3 cameras、
 80 frames、metadata mapping、3 controller を確認して 1 iteration を error 無しで完了した。
 
 この run は全 80 images を training に使うため evaluation split を無効にしている。従って PSNR / SSIM
-は生成されず、この 1 run だけでは PPISP 無しより良いと断定しない。成果は PPISP integration と
-reloadability の end-to-end validation であり、photometric quality の比較には同一 split / seed の A/B
-run が必要。
+は生成されず、この 1 run だけでは PPISP 無しより良いと断定しない。
 
 Mixed COLMAP camera は LFStudio loader / GUT が image ごとに dispatch できるが、upstream に
 mixed-model end-to-end integration test は無い。Conservative fallback は 360° source を pinhole cubemap
@@ -324,6 +369,8 @@ repo_path = ""
 checkpoint_path = ""
 device = "cuda:0"
 dtype = "bfloat16"
+training_prompt = "person,..."
+feature_prompt = "person,...,animal,sky,tree,vehicle,airplane,water"
 ```
 
 ## Architecture
@@ -333,15 +380,16 @@ project_source table
   ├─ primary source
   └─ N supplemental sources
           ↓
-source-scoped inspect / extract / prepare / masks
-          ↓
-camera-group feature batches → one COLMAP database
-          ↓
-matching → primary-aware reconstruction → alignment → registered-only export
+source-scoped inspect / extract / prepare
+          ├─ feature-mask artifact -> feature workspace -> matching -> reconstruction -> alignment
+          └─ training-mask artifact ----------------------------------------------┐
+                                                                                   ↓
+                                                       registered-only resolved export
 ```
 
-Source identity、capture index、camera group、mask path は別 field で保持する。新しい raw camera を追加する
-場合は source adapter、calibration、prepare 処理を追加し、global mode branch を増やさない。
+Source identity、capture index、camera group、mask purpose、mask path は別 field で保持する。新しい raw
+camera を追加する場合は source adapter、calibration、prepare 処理を追加し、global mode branch を
+増やさない。
 
 ## Test
 
@@ -363,7 +411,9 @@ pnpm test:e2e
 
 ## License
 
-Project license は未確定。外部公開前に決定する。
+Project 全体は [GNU General Public License v3.0 or later](LICENSE)、SPDX identifier
+`GPL-3.0-or-later` で提供する。Bundled / downloaded third-party component は各 component 自身の
+license に従う。
 
 ## References / legacy plugin
 

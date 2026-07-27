@@ -12,7 +12,7 @@ token / 自動 DL は使わない (load_from_HF=False).
   2. 各 prompt term について set_text_prompt(term) -> grounding pass
   3. term ごとの mask を集め, 呼び出し側で union する
 
-縮小は呼び出し側 (generate_masks stage) が行い, ここには縮小済み画像が渡る前提.
+縮小は呼び出し側の mask Step が行い, ここには縮小済み画像が渡る前提.
 """
 
 from __future__ import annotations

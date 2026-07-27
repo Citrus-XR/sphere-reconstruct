@@ -52,15 +52,11 @@ class Sam3Config(BaseModel):
     config_path: str = ""
     device: str = "cuda:0"
     dtype: str = "bfloat16"
-    default_prompt: str = ""
+    training_prompt: str = ""
+    feature_prompt: str = ""
     # SAM3 推論前に長辺をこの画素数まで縮小する (0 = 縮小しない).
     max_inference_size: int = 1024
     confidence_threshold: float = 0.5
-
-    def prompt_terms(self) -> list[str]:
-        """default_prompt を comma 区切りで分割し, 空要素を除いたリスト."""
-        return [t.strip() for t in self.default_prompt.split(",") if t.strip()]
-
 
 class LogConfig(BaseModel):
     level: str = "INFO"

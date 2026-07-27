@@ -13,11 +13,18 @@ export interface StageParams {
   minSharpness: number
   minFeatures: number
   maxClip: number
-  maskSize: number
-  downsampleOn: boolean
-  dilate: number
-  dilateOn: boolean
-  prompt: string
+  featureMaskEnabled: boolean
+  featureMaskSize: number
+  featureMaskDownsampleOn: boolean
+  featureMaskDilate: number
+  featureMaskDilateOn: boolean
+  featureMaskPrompt: string
+  trainingMaskEnabled: boolean
+  trainingMaskSize: number
+  trainingMaskDownsampleOn: boolean
+  trainingMaskDilate: number
+  trainingMaskDilateOn: boolean
+  trainingMaskPrompt: string
   qualityPreset: QualityPreset
   featureType: 'SIFT' | 'ALIKED_N16ROT' | 'ALIKED_N32'
   featureUseGpu: boolean
@@ -95,11 +102,18 @@ export const DEFAULT_PARAMS: StageParams = {
   minSharpness: 0,
   minFeatures: 50,
   maxClip: 0.25,
-  maskSize: 1024,
-  downsampleOn: true,
-  dilate: 8,
-  dilateOn: true,
-  prompt: '',
+  featureMaskEnabled: true,
+  featureMaskSize: 2048,
+  featureMaskDownsampleOn: true,
+  featureMaskDilate: 8,
+  featureMaskDilateOn: true,
+  featureMaskPrompt: '',
+  trainingMaskEnabled: true,
+  trainingMaskSize: 2048,
+  trainingMaskDownsampleOn: true,
+  trainingMaskDilate: 8,
+  trainingMaskDilateOn: true,
+  trainingMaskPrompt: '',
   qualityPreset: 'standard',
   featureType: 'SIFT',
   featureUseGpu: true,
@@ -168,18 +182,24 @@ export const paramsForStage = (
       }
     case 'prepare_images':
       return { reconstruction_mode: mode, size: params.size, fov_deg: 90 }
-    case 'generate_masks':
+    case 'generate_feature_masks':
       return {
-        max_inference_size: params.downsampleOn ? params.maskSize : 0,
-        dilate_px: params.dilateOn ? params.dilate : 0,
-        prompt: params.prompt,
+        max_inference_size: params.featureMaskDownsampleOn ? params.featureMaskSize : 0,
+        dilate_px: params.featureMaskDilateOn ? params.featureMaskDilate : 0,
+        prompt: params.featureMaskPrompt,
+      }
+    case 'generate_training_masks':
+      return {
+        max_inference_size: params.trainingMaskDownsampleOn ? params.trainingMaskSize : 0,
+        dilate_px: params.trainingMaskDilateOn ? params.trainingMaskDilate : 0,
+        prompt: params.trainingMaskPrompt,
       }
     case 'extract_features':
       return {
         reconstruction_mode: mode,
         feature_type: params.featureType,
         use_gpu: params.featureUseGpu,
-        use_masks: true,
+        use_feature_masks: params.featureMaskEnabled,
         max_image_size: params.featureMaxImageSize,
         max_num_features: params.featureMaxNumFeatures,
         sift_peak_threshold: params.siftPeakThreshold,
@@ -222,6 +242,8 @@ export const paramsForStage = (
     case 'export_dataset':
       return {
         emit_train_configs: params.emitTrainConfigs,
+        feature_masks_enabled: params.featureMaskEnabled,
+        training_masks_enabled: params.trainingMaskEnabled,
       }
     default:
       return {}
@@ -235,7 +257,8 @@ export const allParams = (
   const stages = [
     'extract_frames',
     'prepare_images',
-    'generate_masks',
+    'generate_feature_masks',
+    'generate_training_masks',
     'extract_features',
     'match_features',
     'reconstruct',

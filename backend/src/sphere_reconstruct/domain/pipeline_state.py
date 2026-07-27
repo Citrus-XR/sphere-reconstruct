@@ -1,8 +1,8 @@
 """パイプライン全体の状態遷移.
 
 Main reconstruction branch は EXTRACTED から FEATURES_EXTRACTED -> MATCHED -> RECONSTRUCTED ->
-ALIGNED -> EXPORTED へ進む。PREPARED / MASKED は camera adapter と optional stage に応じて
-main branch の途中へ入る。
+ALIGNED -> EXPORTED へ進む。Feature mask は SfM branch、training mask は export branch にだけ接続し、
+どちらも独立して生成・破棄できる。
 
 各ステージは冪等。入力が変わった場合は consumer graph だけを transitive invalidate し、独立
 branch の再生成可能 artifact を保持する。PipelineState は UI / DB 用の要約で、artifact の真偽は
@@ -48,12 +48,13 @@ _ORDER: dict[PipelineState, int] = {
 
 
 class StageName(StrEnum):
-    """ステージ名. state と 1:1 対応する (CREATED は入力状態なのでステージなし)."""
+    """Artifact stage 名。Mask branch は同じ summary state を共有する。"""
 
     INSPECT_SOURCE = "inspect_source"
     EXTRACT_FRAMES = "extract_frames"
     PREPARE_IMAGES = "prepare_images"
-    GENERATE_MASKS = "generate_masks"
+    GENERATE_FEATURE_MASKS = "generate_feature_masks"
+    GENERATE_TRAINING_MASKS = "generate_training_masks"
     EXTRACT_FEATURES = "extract_features"
     MATCH_FEATURES = "match_features"
     RECONSTRUCT = "reconstruct"
@@ -65,7 +66,8 @@ STAGE_TO_STATE: dict[StageName, PipelineState] = {
     StageName.INSPECT_SOURCE: PipelineState.INSPECTED,
     StageName.EXTRACT_FRAMES: PipelineState.EXTRACTED,
     StageName.PREPARE_IMAGES: PipelineState.PREPARED,
-    StageName.GENERATE_MASKS: PipelineState.MASKED,
+    StageName.GENERATE_FEATURE_MASKS: PipelineState.MASKED,
+    StageName.GENERATE_TRAINING_MASKS: PipelineState.MASKED,
     StageName.EXTRACT_FEATURES: PipelineState.FEATURES_EXTRACTED,
     StageName.MATCH_FEATURES: PipelineState.MATCHED,
     StageName.RECONSTRUCT: PipelineState.RECONSTRUCTED,
@@ -78,7 +80,8 @@ STAGE_ORDER: tuple[StageName, ...] = (
     StageName.INSPECT_SOURCE,
     StageName.EXTRACT_FRAMES,
     StageName.PREPARE_IMAGES,
-    StageName.GENERATE_MASKS,
+    StageName.GENERATE_FEATURE_MASKS,
+    StageName.GENERATE_TRAINING_MASKS,
     StageName.EXTRACT_FEATURES,
     StageName.MATCH_FEATURES,
     StageName.RECONSTRUCT,
@@ -90,8 +93,13 @@ STAGE_ORDER: tuple[StageName, ...] = (
 _STAGE_CONSUMERS: dict[StageName, tuple[StageName, ...]] = {
     StageName.INSPECT_SOURCE: (StageName.EXTRACT_FRAMES,),
     StageName.EXTRACT_FRAMES: (StageName.PREPARE_IMAGES,),
-    StageName.PREPARE_IMAGES: (StageName.GENERATE_MASKS, StageName.EXTRACT_FEATURES),
-    StageName.GENERATE_MASKS: (StageName.EXTRACT_FEATURES,),
+    StageName.PREPARE_IMAGES: (
+        StageName.GENERATE_FEATURE_MASKS,
+        StageName.GENERATE_TRAINING_MASKS,
+        StageName.EXTRACT_FEATURES,
+    ),
+    StageName.GENERATE_FEATURE_MASKS: (StageName.EXTRACT_FEATURES, StageName.EXPORT_DATASET),
+    StageName.GENERATE_TRAINING_MASKS: (StageName.EXPORT_DATASET,),
     StageName.EXTRACT_FEATURES: (StageName.MATCH_FEATURES,),
     StageName.MATCH_FEATURES: (StageName.RECONSTRUCT,),
     StageName.RECONSTRUCT: (StageName.ALIGN_RECONSTRUCTION,),

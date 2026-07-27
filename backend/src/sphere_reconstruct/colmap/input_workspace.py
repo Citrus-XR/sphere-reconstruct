@@ -8,6 +8,8 @@ import shutil
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from ..domain.mask_artifact import MaskPurpose, load_mask_manifest, mask_manifest_path, records_by_name
+
 
 @dataclass(frozen=True)
 class FeatureBatch:
@@ -34,6 +36,7 @@ class InputSpec:
     feature_batches: list[FeatureBatch]
     image_path: str
     mask_path: str | None
+    feature_masks_enabled: bool
     rig_config_path: str | None
     refine_intrinsics: bool
     refine_rig: bool
@@ -45,33 +48,42 @@ class InputSpec:
     @classmethod
     def read(cls, path: Path) -> InputSpec:
         data = json.loads(path.read_text(encoding="utf-8"))
+        if data.get("version") != 3:
+            raise ValueError(f"unsupported input spec version: {data.get('version')}")
         data["feature_batches"] = [FeatureBatch(**batch) for batch in data["feature_batches"]]
         return cls(**data)
 
 
-def build(project_dir: Path, output_dir: Path, use_masks: bool) -> InputSpec:
+def build(project_dir: Path, output_dir: Path, use_feature_masks: bool) -> InputSpec:
     catalog_path = project_dir / "prepare_images" / "image_catalog.json"
     if not catalog_path.is_file():
         raise RuntimeError("prepare_images must run before feature extraction")
     catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
-    mask_manifest_path = project_dir / "generate_masks" / "manifest_masks.json"
-    generated_masks = {}
-    if use_masks and mask_manifest_path.is_file():
+    generated_masks: dict[str, Path] = {}
+    if use_feature_masks:
+        path = mask_manifest_path(project_dir, MaskPurpose.FEATURE)
+        if not path.is_file():
+            raise RuntimeError("generate_feature_masks must run before masked feature extraction")
+        manifest = load_mask_manifest(project_dir, MaskPurpose.FEATURE)
         generated_masks = {
-            record["name"]: project_dir / record["path"]
-            for record in json.loads(mask_manifest_path.read_text(encoding="utf-8"))["images"]
+            name: project_dir / record["path"] for name, record in records_by_name(manifest).items()
         }
 
     images_dir = output_dir / "images"
     masks_dir = output_dir / "masks"
+    materialize_masks = use_feature_masks or any(
+        image["valid_region"]["kind"] != "full" for image in catalog["images"]
+    )
     for image in catalog["images"]:
         source = project_dir / image["path"]
         _link_or_copy(source, images_dir / image["name"])
-        if use_masks:
+        if materialize_masks:
             destination = masks_dir / f"{image['name']}.png"
             generated = generated_masks.get(image["name"])
             if generated is not None:
                 _link_or_copy(generated, destination)
+            elif use_feature_masks:
+                raise RuntimeError(f"feature mask missing for prepared image: {image['name']}")
             else:
                 _write_valid_region_mask(image, destination)
 
@@ -113,7 +125,7 @@ def build(project_dir: Path, output_dir: Path, use_masks: bool) -> InputSpec:
     ]
     primary_id = catalog["primary_source_id"]
     spec = InputSpec(
-        version=2,
+        version=3,
         reconstruction_mode=catalog["reconstruction_mode"],
         image_count=len(images),
         source_count=len(catalog["sources"]),
@@ -126,7 +138,8 @@ def build(project_dir: Path, output_dir: Path, use_masks: bool) -> InputSpec:
         images=images,
         feature_batches=batches,
         image_path="images",
-        mask_path="masks" if use_masks else None,
+        mask_path="masks" if materialize_masks else None,
+        feature_masks_enabled=use_feature_masks,
         rig_config_path=rig_config_path,
         refine_intrinsics=any(group["refine_intrinsics"] for group in catalog["camera_groups"]),
         refine_rig=False,

@@ -16,6 +16,7 @@ export type SourceRole = 'primary' | 'supplemental'
 export type SourceAdapter = 'insta360_insv' | 'generic_video' | 'generic_images'
 export type MediaKind = 'video' | 'images'
 export type Projection = 'dual_fisheye' | 'equirectangular' | 'perspective'
+export type MaskPurpose = 'feature' | 'training'
 
 export interface ProjectSource {
   id: string
@@ -45,8 +46,8 @@ export interface Project {
   updated_at: string
   sources: ProjectSource[]
   state: PipelineState
-  // 工程に保存された UI 設定 (step パラメータ / モード / 無効化). リロードで復元する.
-  ui_state: { params?: Record<string, unknown>; reconMode?: string; disabled?: string[] } | null
+  // 工程に保存された UI 設定 (step パラメータ / モード). リロードで復元する.
+  ui_state: { params?: Record<string, unknown>; reconMode?: string } | null
 }
 
 export interface Job {
@@ -172,7 +173,8 @@ export const api = {
   getReconstruction: (id: string) =>
     req<ReconstructionData>(`/api/projects/${id}/reconstruction`),
   getFrames: (id: string) => req<FramesManifest>(`/api/projects/${id}/frames`),
-  getMasks: (id: string) => req<MasksManifest>(`/api/projects/${id}/masks`),
+  getMasks: (id: string, purpose: MaskPurpose) =>
+    req<MasksManifest>(`/api/projects/${id}/masks/${purpose}`),
   getExportInfo: (id: string) => req<ExportInfo>(`/api/projects/${id}/export-info`),
   putUiState: (id: string, ui: Record<string, unknown>) =>
     req<Project>(`/api/projects/${id}/ui-state`, {
@@ -320,7 +322,7 @@ export interface FramesManifest {
   frames: FrameInfo[]
 }
 
-// generate_masks の manifest. kind により frame ごとの構造が異なる (fisheye は lenses, pinhole/erp は views).
+// Feature / training mask Step が個別に生成する manifest.
 export interface MaskImageRecord {
   name: string
   source_id: string
@@ -330,8 +332,11 @@ export interface MaskImageRecord {
   coverage_warning: boolean
 }
 export interface MasksManifest {
-  version: number
-  prompt?: string[]
+  version: 3
+  purpose: MaskPurpose
+  prompt: string[]
+  max_inference_size: number
+  dilate_px: number
   images: MaskImageRecord[]
 }
 
@@ -355,11 +360,11 @@ export interface ExportInfo {
 // 抽出フレーム (fisheye) の URL.
 export const frameImageUrl = (id: string, index: number, lens: number) =>
   `/api/projects/${id}/frames/${index}/image?lens=${lens}`
-// native fisheye の生成マスク PNG の URL.
+// 用途別 mask PNG の URL.
 export const preparedImageUrl = (id: string, name: string) =>
   `/api/projects/${id}/prepared-image?name=${encodeURIComponent(name)}`
-export const preparedMaskUrl = (id: string, name: string) =>
-  `/api/projects/${id}/prepared-mask?name=${encodeURIComponent(name)}`
+export const preparedMaskUrl = (id: string, name: string, purpose: MaskPurpose) =>
+  `/api/projects/${id}/prepared-mask?name=${encodeURIComponent(name)}&purpose=${purpose}`
 
 export type ParsedImageName = {
   kind: 'native' | 'pinhole' | 'erp' | 'perspective'

@@ -11,7 +11,15 @@ cv2 = pytest.importorskip("cv2")
 
 from sphere_reconstruct.pipeline.stage import ProgressReporter, StageContext  # noqa: E402
 from sphere_reconstruct.sam3 import engine as sam3_engine  # noqa: E402
-from sphere_reconstruct.stages.generate_masks import GenerateMasks  # noqa: E402
+from sphere_reconstruct.stages.generate_masks import (  # noqa: E402
+    GenerateFeatureMasks,
+    GenerateTrainingMasks,
+)
+
+_TRAINING_PROMPT = (
+    "person,camera operator,selfie stick,tripod,person shadow,selfie stick shadow,tripod shadow"
+)
+_FEATURE_PROMPT = f"{_TRAINING_PROMPT},animal,sky,tree,vehicle,airplane,water"
 
 
 class _FakeEngine:
@@ -39,6 +47,15 @@ class _FakeEngine:
         return detections
 
 
+def test_mask_steps_have_distinct_runtime_default_prompts():
+    training = GenerateTrainingMasks().normalize_params({})
+    feature = GenerateFeatureMasks().normalize_params({})
+    assert training["prompt"] == _TRAINING_PROMPT
+    assert feature["prompt"] == _FEATURE_PROMPT
+    assert training["max_inference_size"] == 2048
+    assert feature["max_inference_size"] == 2048
+
+
 def _make_catalog(project_dir, *, circle: bool) -> list[str]:
     prepared = project_dir / "prepare_images"
     names = ["sources/source-a/main/frame_000000.jpg", "sources/source-a/main/frame_000001.jpg"]
@@ -64,12 +81,12 @@ def _make_catalog(project_dir, *, circle: bool) -> list[str]:
     return names
 
 
-def _execute(project_dir, monkeypatch, *, circle: bool):
+def _execute(project_dir, monkeypatch, stage_type, *, circle: bool):
     names = _make_catalog(project_dir, circle=circle)
     monkeypatch.setattr(sam3_engine, "Sam3Engine", _FakeEngine)
-    output = project_dir / ".generate_masks.tmp"
+    stage = stage_type()
+    output = project_dir / f".{stage.name.value}.tmp"
     output.mkdir()
-    stage = GenerateMasks()
     context = StageContext(
         project_id="p",
         project_dir=project_dir,
@@ -84,10 +101,14 @@ def _execute(project_dir, monkeypatch, *, circle: bool):
     return output, names, manifest
 
 
-def test_generate_masks_for_perspective_images(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    ("stage_type", "purpose"),
+    [(GenerateFeatureMasks, "feature"), (GenerateTrainingMasks, "training")],
+)
+def test_generate_masks_for_perspective_images(tmp_path, monkeypatch, stage_type, purpose):
     project = tmp_path / "project"
     project.mkdir()
-    output, names, manifest = _execute(project, monkeypatch, circle=False)
+    output, names, manifest = _execute(project, monkeypatch, stage_type, circle=False)
 
     for name in names:
         mask = cv2.imread(str(output / f"{name}.png"), cv2.IMREAD_GRAYSCALE)
@@ -95,6 +116,8 @@ def test_generate_masks_for_perspective_images(tmp_path, monkeypatch):
         assert mask[128, 10] == 0
         assert mask[128, 245] == 255
     document = json.loads((output / "manifest_masks.json").read_text())
+    assert document["version"] == 3
+    assert document["purpose"] == purpose
     assert 0.45 < document["images"][0]["coverage"] < 0.55
     assert document["prompt"] == ["person", "tripod"]
     assert len(manifest.outputs) == len(names) + 1
@@ -103,7 +126,7 @@ def test_generate_masks_for_perspective_images(tmp_path, monkeypatch):
 def test_generate_masks_combines_fisheye_valid_circle(tmp_path, monkeypatch):
     project = tmp_path / "project"
     project.mkdir()
-    output, names, _manifest = _execute(project, monkeypatch, circle=True)
+    output, names, _manifest = _execute(project, monkeypatch, GenerateFeatureMasks, circle=True)
 
     mask = cv2.imread(str(output / f"{names[0]}.png"), cv2.IMREAD_GRAYSCALE)
     assert mask[128, 245] == 255

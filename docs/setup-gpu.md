@@ -1,8 +1,8 @@
 # GPU / native runtime setup
 
-Platform ごとの native runtime、GPU capability、mixed-source input、LichtFeld Studio training の要件を
-まとめる。通常は start script に dependency sync と Doctor を任せ、system Python と project venv を
-混在させない。
+Platform ごとの native runtime、GPU capability、mixed-source input、SAM3、LichtFeld Studio training の
+要件をまとめる。通常は start script に dependency sync と Doctor を任せ、system Python と project
+venv を混在させない。
 
 ```text
 GET /api/system/doctor
@@ -107,10 +107,10 @@ matcher_path = "D:/models/aliked-lightglue.onnx"
 
 Windows ONNX CUDA provider は cuDNN 9 を必要とする。Doctor の `cuda_runtime.cudnn` を確認する。
 
-## SAM3
+## SAM3 dual-mask runtime
 
-SAM3 は prepared canonical image 全てに同じ処理を行う。Video frame、phone still、ERP、pinhole view
-は full-image valid region、native fisheye は source-specific circle と dynamic mask を合成する。
+Feature masks と Training masks は別 Step、別 artifact、別 parameter set。どちらも prepared canonical
+image 全てへ同じ projection / orientation で適用する。
 
 ```toml
 [sam3]
@@ -118,11 +118,25 @@ repo_path = "D:/models/sam3-main"
 checkpoint_path = "D:/models/sam3.pt"
 device = "cuda:0"
 dtype = "bfloat16"
-max_inference_size = 1024
+max_inference_size = 2048
+training_prompt = "person,camera operator,selfie stick,tripod,person shadow,selfie stick shadow,tripod shadow"
+feature_prompt = "person,camera operator,selfie stick,tripod,person shadow,selfie stick shadow,tripod shadow,animal,sky,tree,vehicle,airplane,water"
 ```
 
+Feature masks は COLMAP `ImageReader.mask_path` に渡す。Training masks は SfM に入れず、final export で
+優先する。Training が無効なら Feature を export fallback にし、両方無効なら mask directory を
+出力しない。
+
+Native fisheye の circle は camera valid-region であり SAM3 channel ではない。Feature masks が無効でも
+feature extraction には circle を使うが、両 SAM3 channel が無効なら LFStudio export には mask を
+含めない。
+
+2 Step を同時に生成すると SAM3 model を各 process で 1 回ずつ load する。独立性を優先し、Training
+mask の再生成が高価な feature / matching / reconstruction を invalidation しない構成にしている。
+
 Mask は image relative path を mirror し、white=keep / black=ignore。Prepared image と同じ orientation /
-dimensions を保証する。
+dimensions を保証する。Photo / Dataset Camera Inspector では両 channel が存在する場合に切り替えて
+preview できる。
 
 ## FFmpeg
 
@@ -154,14 +168,15 @@ phone camera を undistort する。
 LichtFeld-Studio --config <dataset>/train_configs/train_config.mrnf.json --data-path <dataset>
 ```
 
-Recommended MRNF は GUT、segment masks、PPISP、novel-view controller を有効にする。PPISP controller
-は 30k run の step 25,000 で activation し、最後 5,000 step は Gaussian を固定して distill する。
-PPISP は exposure / color / vignetting / CRF compensation であり denoiser ではない。
+Recommended MRNF は GUT、resolved segment masks、PPISP、novel-view controller を有効にする。Mask が
+無い export では `mask_mode=none`。PPISP controller は 30k run の step 25,000 で activation し、最後
+5,000 step は Gaussian を固定して distill する。PPISP は exposure / color / vignetting / CRF
+compensation であり denoiser ではない。
 
 Final model を開くときは `.ply` と同名 `.ppisp` sidecar の両方を load する。PLY 単体では appearance
 correction と controller が無い。Checkpoint は training resume 用。
 
-LichtFeld Studio v0.5.3 CLI の実効 dataset default は次の通り。
+LichtFeld Studio v0.5.3 CLI の実効 dataset default:
 
 ```text
 resize_factor = 1
@@ -176,7 +191,7 @@ PPISP controller と GUT の buffers を含めた peak を実測で確認する�
 
 Measured mixed run は RTX 4070 Ti 12 GB で 30k / 3,773.552 s、8.0 iter/s、525,433 internal final
 Gaussians。Final PLY は 517,387 Gaussians、PPISP sidecar は 3 cameras / 80 frames / 3 controllers を
-metadata mapping 付きで reload できた。
+metadata mapping 付きで reload できた。この計測は dual-mask 分離前の Training-mask 相当 artifact。
 
 Training output directory は LFStudio 側で選ぶ。本 application は管理しない。Mixed-camera training は
 loader / GUT 上は対応するが upstream end-to-end test が無いため experimental とする。

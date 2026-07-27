@@ -1,4 +1,4 @@
-"""Canonical image catalog の全画像へ SAM3 / valid-region mask を生成する。"""
+"""Canonical image catalog へ独立した feature / training SAM3 mask を生成する。"""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ from pathlib import Path
 import numpy as np
 
 from ..domain.artifacts import FileRef, StageManifest
+from ..domain.mask_artifact import MASK_MANIFEST_VERSION, MaskPurpose
 from ..domain.pipeline_state import StageName
 from ..imaging import masks as mask_utils
 from ..infrastructure.filesystem import sha256_file
@@ -16,15 +17,19 @@ from ..pipeline.stage import Stage, StageContext, new_manifest
 from ..settings import get_settings
 
 
-@register
-class GenerateMasks(Stage):
-    name = StageName.GENERATE_MASKS
+class _GenerateMasks(Stage):
+    purpose: MaskPurpose
     impl_version = "1.0"
 
     def normalize_params(self, raw: dict) -> dict:
         settings = get_settings().sam3
+        default_prompt = (
+            settings.feature_prompt
+            if self.purpose is MaskPurpose.FEATURE
+            else settings.training_prompt
+        )
         return {
-            "prompt": str(raw.get("prompt", settings.default_prompt)),
+            "prompt": str(raw.get("prompt", default_prompt)),
             "max_inference_size": int(raw.get("max_inference_size", settings.max_inference_size)),
             "dilate_px": int(raw.get("dilate_px", 8)),
             "coverage_warn": float(raw.get("coverage_warn", 0.5)),
@@ -51,7 +56,7 @@ class GenerateMasks(Stage):
 
         catalog_path = ctx.project_dir / "prepare_images" / "image_catalog.json"
         if not catalog_path.is_file():
-            raise RuntimeError("prepare_images must run before generate_masks")
+            raise RuntimeError(f"prepare_images must run before {self.name.value}")
         catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
         images = catalog["images"]
         if ctx.params["max_images"] > 0:
@@ -91,20 +96,7 @@ class GenerateMasks(Stage):
                     else mask_utils.upscale_mask(union, width, height)
                 )
                 dynamic = mask_utils.dilate_mask(dynamic, ctx.params["dilate_px"])
-                region = image_record["valid_region"]
-                if region["kind"] == "circle":
-                    circle = (
-                        region["cx"] * width,
-                        region["cy"] * height,
-                        region["r"] * width,
-                    )
-                    valid = mask_utils.valid_region_mask(width, height, circle, exclude=dynamic)
-                    circle_mask = mask_utils.circle_mask(width, height, *circle)
-                    valid_area = int(circle_mask.sum()) or 1
-                    coverage = float(((circle_mask > 0) & (dynamic > 0)).sum()) / valid_area
-                else:
-                    valid = np.where(dynamic > 0, 0, 255).astype(np.uint8)
-                    coverage = mask_utils.coverage_ratio(dynamic)
+                valid, coverage = _compose_valid_mask(image_record["valid_region"], dynamic, width, height)
                 output_path = ctx.stage_out_dir / f"{image_record['name']}.png"
                 mask_utils.write_mask_png(valid, output_path, invert=False)
                 warning = coverage > ctx.params["coverage_warn"]
@@ -122,7 +114,9 @@ class GenerateMasks(Stage):
                         "path": _final_relpath(output_path, ctx),
                         "coverage": coverage,
                         "coverage_warning": warning,
-                        "detections": {detection.prompt: len(detection.masks) for detection in detections},
+                        "detections": {
+                            detection.prompt: len(detection.masks) for detection in detections
+                        },
                     }
                 )
                 outputs.append(_file_ref(output_path, ctx, "image/png"))
@@ -137,32 +131,61 @@ class GenerateMasks(Stage):
                 engine.unload()
 
         mask_manifest = {
-            "version": 2,
+            "version": MASK_MANIFEST_VERSION,
+            "purpose": self.purpose.value,
             "prompt": prompts,
             "max_inference_size": ctx.params["max_inference_size"],
             "dilate_px": ctx.params["dilate_px"],
             "images": records,
         }
         manifest_path = ctx.stage_out_dir / "manifest_masks.json"
-        manifest_path.write_text(json.dumps(mask_manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+        manifest_path.write_text(
+            json.dumps(mask_manifest, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
         outputs.append(_file_ref(manifest_path, ctx, "application/json"))
         manifest = new_manifest(self.name, self.impl_version)
         manifest.inputs = self.collect_inputs(ctx)
         manifest.params = ctx.params
         manifest.outputs = outputs
         manifest.extra = _mask_statistics(mask_manifest)
-        ctx.progress.info("generate_masks done", progress=1.0, key="log.mask_done")
+        ctx.progress.info(f"{self.name.value} done", progress=1.0, key="log.mask_done")
         return manifest
+
+
+@register
+class GenerateFeatureMasks(_GenerateMasks):
+    name = StageName.GENERATE_FEATURE_MASKS
+    purpose = MaskPurpose.FEATURE
+
+
+@register
+class GenerateTrainingMasks(_GenerateMasks):
+    name = StageName.GENERATE_TRAINING_MASKS
+    purpose = MaskPurpose.TRAINING
+
+
+def _compose_valid_mask(region: dict, dynamic: np.ndarray, width: int, height: int) -> tuple[np.ndarray, float]:
+    if region["kind"] == "circle":
+        circle = (region["cx"] * width, region["cy"] * height, region["r"] * width)
+        valid = mask_utils.valid_region_mask(width, height, circle, exclude=dynamic)
+        circle_mask = mask_utils.circle_mask(width, height, *circle)
+        valid_area = int(circle_mask.sum()) or 1
+        coverage = float(((circle_mask > 0) & (dynamic > 0)).sum()) / valid_area
+        return valid, coverage
+    return np.where(dynamic > 0, 0, 255).astype(np.uint8), mask_utils.coverage_ratio(dynamic)
 
 
 def _mask_statistics(manifest: dict) -> dict:
     records = manifest["images"]
     coverages = [float(record["coverage"]) for record in records]
     return {
+        "purpose": manifest["purpose"],
         "images": len(records),
         "sources": len({record["source_id"] for record in records}),
         "prompt_terms": len(manifest["prompt"]),
-        "detections": sum(sum(int(count) for count in record["detections"].values()) for record in records),
+        "detections": sum(
+            sum(int(count) for count in record["detections"].values()) for record in records
+        ),
         "average_dynamic_coverage": sum(coverages) / len(coverages) if coverages else 0.0,
         "maximum_dynamic_coverage": max(coverages) if coverages else 0.0,
         "coverage_warnings": sum(record["coverage_warning"] for record in records),

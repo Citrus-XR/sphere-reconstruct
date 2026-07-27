@@ -5,6 +5,7 @@ import {
   parseImageName,
   preparedImageUrl,
   preparedMaskUrl,
+  type MaskPurpose,
   type ProjectSource,
   type ReconstructionImage,
 } from '../api/client'
@@ -15,10 +16,11 @@ import {
   InspectorField,
   InspectorFields,
   InspectorHeader,
+  MaskPurposeTabs,
   type CaptureView,
 } from './CaptureInspectorParts'
 
-// カメラ選択時に Inspector に表示: 対応フレーム画像 + 適用マスクの重ね表示トグル.
+// カメラ選択時に Inspector に表示: 対応画像 + feature/training マスクの用途・重ね表示.
 export const CameraInspector = ({ projectId, image, sources }: {
   projectId: string
   image: ReconstructionImage
@@ -26,22 +28,39 @@ export const CameraInspector = ({ projectId, image, sources }: {
 }) => {
   const { t } = useSettings()
   const [view, setView] = useState<CaptureView>('orig')
+  const [maskPurpose, setMaskPurpose] = useState<MaskPurpose>('training')
   const parsed = parseImageName(image.name)
   const source = sources.find(item => item.id === parsed?.sourceId)
   const frameMatch = image.name.match(/frame_(\d+)/)
   const frameIndex = parsed?.index ?? (frameMatch ? Number(frameMatch[1]) : null)
   const namedLens = image.name.match(/lens(\d+)/)
   const lens = parsed?.lens ?? (namedLens ? Number(namedLens[1]) : null)
-  const { data: masks } = useQuery({
-    queryKey: ['masks', projectId], queryFn: () => api.getMasks(projectId), retry: false,
+  const { data: featureMasks } = useQuery({
+    queryKey: ['masks', projectId, 'feature'],
+    queryFn: () => api.getMasks(projectId, 'feature'), retry: false,
   })
-  const maskRec = masks?.images.find(record => record.name === image.name)
+  const { data: trainingMasks } = useQuery({
+    queryKey: ['masks', projectId, 'training'],
+    queryFn: () => api.getMasks(projectId, 'training'), retry: false,
+  })
+  const masksByPurpose = {
+    feature: featureMasks?.images.find(record => record.name === image.name),
+    training: trainingMasks?.images.find(record => record.name === image.name),
+  }
+  const availablePurposes = (['feature', 'training'] as MaskPurpose[])
+    .filter(purpose => masksByPurpose[purpose] !== undefined)
+  const effectivePurpose = masksByPurpose[maskPurpose]
+    ? maskPurpose
+    : masksByPurpose.training ? 'training' : 'feature'
+  const maskRec = masksByPurpose[effectivePurpose]
   const originalUrl = parsed ? preparedImageUrl(projectId, image.name) : null
-  const maskUrl = maskRec ? preparedMaskUrl(projectId, image.name) : null
+  const maskUrl = maskRec ? preparedMaskUrl(projectId, image.name, effectivePurpose) : null
 
   return (
     <div>
-      <InspectorHeader title={image.name} />
+      <InspectorHeader title={image.name}
+        actions={<MaskPurposeTabs available={availablePurposes} selected={effectivePurpose}
+          onSelect={setMaskPurpose} />} />
       {parsed && originalUrl ? (
         <CapturePreview originalUrl={originalUrl} maskUrl={maskUrl}
           view={view} onViewChange={setView} alt={image.name} />
@@ -60,7 +79,9 @@ export const CameraInspector = ({ projectId, image, sources }: {
           [{image.position.map(value => value.toFixed(3)).join(', ')}]
         </InspectorField>
         {maskRec && (
-          <InspectorField label={t('maskCoverage')} tone={maskRec.coverage_warning ? 'error' : 'muted'}>
+          <InspectorField
+            label={`${t(effectivePurpose === 'feature' ? 'featureMask' : 'trainingMask')} · ${t('maskCoverage')}`}
+            tone={maskRec.coverage_warning ? 'error' : 'muted'}>
             {(maskRec.coverage * 100).toFixed(1)}%{maskRec.coverage_warning ? ' ⚠' : ''}
           </InspectorField>
         )}

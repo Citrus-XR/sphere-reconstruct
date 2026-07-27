@@ -15,6 +15,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from ..domain import project as project_domain
+from ..domain.mask_artifact import MaskPurpose, load_mask_manifest, mask_manifest_path
 from ..imaging import fisheye_region
 from ..infrastructure.database import get_db
 from ..infrastructure.filesystem import PathNotAllowedError, ensure_within
@@ -77,8 +78,8 @@ async def list_frames(project_id: str) -> dict:
     }
 
 
-@router.get("/api/projects/{project_id}/frames/{index}/image")
-async def frame_image(project_id: str, index: int, lens: int = 0) -> FileResponse:
+@router.get("/api/projects/{project_id}/frames/{index}/image", response_class=FileResponse, response_model=None)
+async def frame_image(project_id: str, index: int, lens: int = 0):
     """抽出フレーム (fisheye) を返す. INSV は lens0/lens1."""
     project_dir = await _project_dir(project_id)
     mf = project_dir / "extract_frames" / "manifest_frames.json"
@@ -102,8 +103,8 @@ async def frame_image(project_id: str, index: int, lens: int = 0) -> FileRespons
     return FileResponse(path, media_type="image/jpeg")
 
 
-@router.get("/api/projects/{project_id}/prepared-image")
-async def prepared_image(project_id: str, name: str) -> FileResponse:
+@router.get("/api/projects/{project_id}/prepared-image", response_class=FileResponse, response_model=None)
+async def prepared_image(project_id: str, name: str):
     project_dir = await _project_dir(project_id)
     record = _catalog_image(project_dir, name)
     path = _safe(project_dir, record["path"])
@@ -112,29 +113,32 @@ async def prepared_image(project_id: str, name: str) -> FileResponse:
     return FileResponse(path, media_type="image/jpeg")
 
 
-@router.get("/api/projects/{project_id}/prepared-mask")
-async def prepared_mask(project_id: str, name: str) -> FileResponse:
+@router.get("/api/projects/{project_id}/prepared-mask", response_class=FileResponse, response_model=None)
+async def prepared_mask(project_id: str, name: str, purpose: MaskPurpose):
     project_dir = await _project_dir(project_id)
-    manifest = project_dir / "generate_masks" / "manifest_masks.json"
+    manifest = mask_manifest_path(project_dir, purpose)
     if not manifest.is_file():
-        raise HTTPException(status_code=404, detail="generate_masks not run yet")
+        raise HTTPException(status_code=404, detail=f"{purpose.value} masks not run yet")
     record = next(
-        (item for item in json.loads(manifest.read_text(encoding="utf-8"))["images"] if item["name"] == name),
+        (item for item in load_mask_manifest(project_dir, purpose)["images"] if item["name"] == name),
         None,
     )
     if record is None:
         raise HTTPException(status_code=404, detail="mask not found")
-    return FileResponse(_safe(project_dir, record["path"]), media_type="image/png")
+    path = _safe(project_dir, record["path"])
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="mask file missing")
+    return FileResponse(path, media_type="image/png")
 
 
-@router.get("/api/projects/{project_id}/masks")
-async def list_masks(project_id: str) -> dict:
-    """generate_masks の manifest (frame ごとの view + coverage) を返す."""
+@router.get("/api/projects/{project_id}/masks/{purpose}")
+async def list_masks(project_id: str, purpose: MaskPurpose) -> dict:
+    """指定用途の mask manifest を返す。"""
     project_dir = await _project_dir(project_id)
-    mf = project_dir / "generate_masks" / "manifest_masks.json"
+    mf = mask_manifest_path(project_dir, purpose)
     if not mf.exists():
-        raise HTTPException(status_code=404, detail="generate_masks not run yet")
-    return json.loads(mf.read_text())
+        raise HTTPException(status_code=404, detail=f"{purpose.value} masks not run yet")
+    return load_mask_manifest(project_dir, purpose)
 
 
 @router.get("/api/projects/{project_id}/export-info")
@@ -231,8 +235,8 @@ async def source_info(project_id: str) -> dict:
     }
 
 
-@router.get("/api/projects/{project_id}/reconstruction")
-async def reconstruction(project_id: str) -> FileResponse:
+@router.get("/api/projects/{project_id}/reconstruction", response_class=FileResponse, response_model=None)
+async def reconstruction(project_id: str):
     project_dir = await _project_dir(project_id)
     path = project_dir / "align_reconstruction" / "preview" / "reconstruction.json"
     if not path.exists():
@@ -240,8 +244,12 @@ async def reconstruction(project_id: str) -> FileResponse:
     return FileResponse(path, media_type="application/json")
 
 
-@router.get("/api/projects/{project_id}/reconstruction/points")
-async def reconstruction_points(project_id: str) -> FileResponse:
+@router.get(
+    "/api/projects/{project_id}/reconstruction/points",
+    response_class=FileResponse,
+    response_model=None,
+)
+async def reconstruction_points(project_id: str):
     project_dir = await _project_dir(project_id)
     path = project_dir / "align_reconstruction" / "preview" / "points.bin"
     if not path.exists():

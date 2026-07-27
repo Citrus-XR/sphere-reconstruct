@@ -1,4 +1,5 @@
 import type { ReactNode } from 'react'
+import type { MaskPurpose } from '../api/client'
 import { useSettings } from '../ui/settings'
 
 export const InspectorHeader = ({ title, actions }: { title: ReactNode; actions?: ReactNode }) => (
@@ -95,6 +96,25 @@ export const CapturePreview = ({
             )}
           </div>}
     </>
+  )
+}
+
+export const MaskPurposeTabs = ({ available, selected, onSelect }: {
+  available: MaskPurpose[]
+  selected: MaskPurpose
+  onSelect: (purpose: MaskPurpose) => void
+}) => {
+  const { t } = useSettings()
+  if (available.length < 2) return null
+  return (
+    <span className="seg" role="group" aria-label={t('maskPurpose')}>
+      {available.map(purpose => (
+        <button type="button" key={purpose} aria-pressed={selected === purpose}
+          className={selected === purpose ? 'on' : ''} onClick={() => onSelect(purpose)}>
+          {t(purpose === 'feature' ? 'featureMask' : 'trainingMask')}
+        </button>
+      ))}
+    </span>
   )
 }
 

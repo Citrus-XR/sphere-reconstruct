@@ -93,7 +93,7 @@ async def update_state(db: Database, project_id: str, state: PipelineState) -> N
 
 
 async def set_ui_state(db: Database, project_id: str, ui: dict) -> None:
-    """工程ごとの UI 設定 (各 step のパラメータ / モード / 無効化) を metadata に永続化する.
+    """工程ごとの UI 設定 (各 step のパラメータ / モード) を metadata に永続化する.
 
     リロードで消えないよう metadata_json["ui"] に丸ごと保存する. 中身の形はフロント任せ.
     """

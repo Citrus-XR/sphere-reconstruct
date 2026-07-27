@@ -18,7 +18,6 @@ import { DEFAULT_PARAMS, paramsForStage, type ReconMode, type StageParams } from
 import { useSettings } from './ui/settings'
 import { translateMsg } from './ui/i18n'
 
-const OPTIONAL = new Set(['generate_masks'])
 type Lvl = 'info' | 'warn' | 'error' | 'debug'
 const LVL_EMOJI: Record<string, string> = { info: 'ℹ️', warn: '⚠️', error: '⛔', debug: '🔍' }
 const LAYOUT_KEY = 'layout.flex.v2'
@@ -72,7 +71,6 @@ export const App = () => {
   const [reconMode, setReconMode] = useState<ReconMode>('native_fisheye')
   const [params, setParamsState] = useState<StageParams>(DEFAULT_PARAMS)
   const setParams = (patch: Partial<StageParams>) => setParamsState(prev => ({ ...prev, ...patch }))
-  const [disabled, setDisabled] = useState<Set<string>>(new Set())
   const [browsing, setBrowsing] = useState(false)
   const [pendingSource, setPendingSource] = useState<Omit<SourceCreate, 'path'> | null>(null)
   const [managerOpen, setManagerOpen] = useState(false)
@@ -132,13 +130,6 @@ export const App = () => {
     })
   }, [lang, model]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  useEffect(() => {
-    if (!settingsData) return
-    const dp = (settingsData as { sam3?: { default_prompt?: string } })?.sam3?.default_prompt
-    // 保存済み prompt があればそれを尊重し, 空のときだけ runtime 既定を入れる.
-    if (dp) setParamsState(prev => prev.prompt ? prev : { ...prev, prompt: dp })
-  }, [settingsData, projectId])
-
   useEffect(() => { if (!projectId && projects?.length) setProjectId(projects[0].id) }, [projects, projectId])
   const project = projects?.find(p => p.id === projectId) ?? null
   const primarySource = project?.sources.find(source => source.role === 'primary') ?? null
@@ -154,23 +145,24 @@ export const App = () => {
   // 工程に保存された UI 設定を復元 (工程ごと 1 回). 復元後の変更は debounce して保存する.
   const hydratedRef = useRef<string | null>(null)
   useEffect(() => {
-    if (!project || hydratedRef.current === project.id) return
+    if (!project || !settingsData || hydratedRef.current === project.id) return
     hydratedRef.current = project.id
     const ui = project.ui_state
-    const defaultPrompt = (settingsData as { sam3?: { default_prompt?: string } } | undefined)
-      ?.sam3?.default_prompt ?? ''
+    const sam3 = (settingsData as {
+      sam3?: { feature_prompt?: string; training_prompt?: string }
+    } | undefined)?.sam3
     const savedParams = (ui?.params ?? {}) as Record<string, unknown>
     const knownParams = Object.fromEntries(
       Object.keys(DEFAULT_PARAMS).filter(key => Object.hasOwn(savedParams, key)).map(key => [key, savedParams[key]]),
     ) as Partial<StageParams>
     setParamsState({
       ...DEFAULT_PARAMS,
-      ...(defaultPrompt ? { prompt: defaultPrompt } : {}),
+      featureMaskPrompt: sam3?.feature_prompt ?? '',
+      trainingMaskPrompt: sam3?.training_prompt ?? '',
       ...knownParams,
     })
     setReconMode((ui?.reconMode as ReconMode | undefined)
       ?? (primarySource?.projection === 'equirectangular' ? 'equirectangular' : 'native_fisheye'))
-    setDisabled(new Set(Array.isArray(ui?.disabled) ? ui.disabled : []))
     setSelectedStage(project.sources.length ? 'extract_frames' : 'inspect_source')
     setSelectedCameraId(null)
     setSelectedFrameIndex(null)
@@ -184,11 +176,11 @@ export const App = () => {
     if (!projectId || hydratedRef.current !== projectId) return  // 復元前は保存しない (既定で上書きしない).
     clearTimeout(saveTimer.current)
     saveTimer.current = setTimeout(() => {
-      api.putUiState(projectId, { params, reconMode, disabled: [...disabled] })
+      api.putUiState(projectId, { params, reconMode })
         .catch(e => console.warn('ui-state save failed', e))
     }, 600)
     return () => clearTimeout(saveTimer.current)
-  }, [params, reconMode, disabled, projectId])
+  }, [params, reconMode, projectId])
 
   const { data: stagesData } = useQuery({
     queryKey: ['stages', projectId], queryFn: () => api.getStages(projectId as string),
@@ -217,7 +209,8 @@ export const App = () => {
     'extract_frames',
     ...(isFisheye ? ['fisheye_region'] : []),
     'prepare_images',
-    ...(!disabled.has('generate_masks') ? ['generate_masks'] : []),
+    ...(params.featureMaskEnabled ? ['generate_feature_masks'] : []),
+    ...(params.trainingMaskEnabled ? ['generate_training_masks'] : []),
     'extract_features',
     'match_features',
     'reconstruct',
@@ -337,8 +330,6 @@ export const App = () => {
   })
 
   const onJob = (jobId: string) => { setActiveJobId(jobId); qc.invalidateQueries({ queryKey: ['stages', projectId] }) }
-  const toggleStage = (key: string) =>
-    setDisabled(prev => { const n = new Set(prev); n.has(key) ? n.delete(key) : n.add(key); return n })
   const selectStep = (stage: string) => { setSelectedStage(stage); setSelectedCameraId(null); setSelectedFrameIndex(null) }
   const selectCamera = (id: number) => { setSelectedCameraId(id); setSelectedStage(''); setSelectedFrameIndex(null) }
   const selectFrame = (index: number) => { setSelectedFrameIndex(index); setSelectedStage(''); setSelectedCameraId(null) }
@@ -354,7 +345,10 @@ export const App = () => {
 
   const items: HierItem[] = []
   for (const s of stagesData?.stages ?? []) {
-    const en = !disabled.has(s.stage)
+    const en = s.stage === 'generate_feature_masks'
+      ? params.featureMaskEnabled
+      : s.stage === 'generate_training_masks' ? params.trainingMaskEnabled : true
+    const toggleable = s.stage === 'generate_feature_masks' || s.stage === 'generate_training_masks'
     const done = stageIsFresh(s)
     const stale = s.status === 'stale' || (s.has_output && !done)
     items.push({
@@ -362,7 +356,7 @@ export const App = () => {
       badgeColor: s.status === 'failed' ? 'var(--error)' : stale ? '#d69a2a' : done ? '#4caf50' : 'var(--border)',
       statusLabel: s.status === 'running' ? t('running') : s.status === 'failed' ? t('failed')
         : stale ? t('stale') : done ? t('done') : t('notrun'),
-      toggleable: OPTIONAL.has(s.stage), enabled: en, dim: !en, running: s.status === 'running',
+      toggleable, enabled: en, dim: !en, running: s.status === 'running',
       progress: progressByStage[s.stage]?.progress ?? 0,
     })
     // 魚眼有効領域は魚眼ソース (native 魚眼 + INSV) を選んだ時点で pipeline に出す.
@@ -448,7 +442,6 @@ export const App = () => {
                   sourceInfo={sourceInfo} reconMode={reconMode} setReconMode={changeReconMode} params={params} setParams={setParams}
                   onJob={onJob} hasSource={!!project?.sources.length} sources={project?.sources ?? []} resultMode={resultMode}
                   primaryProjection={primarySource?.projection ?? null} processing={processing} stageIsRunning={stageStatus?.status === 'running'} onStop={stopJob}
-                  stageDisabled={disabled.has(selectedStage)} onToggleStage={() => toggleStage(selectedStage)}
                   onSelectSource={source => { addSource.reset(); setPendingSource(source); setBrowsing(true) }}
                   onDeleteSource={sourceId => deleteSource.mutate(sourceId)}
                   onMakePrimarySource={sourceId => makePrimarySource.mutate(sourceId)}

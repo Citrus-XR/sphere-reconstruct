@@ -82,9 +82,46 @@ def _write_rgb(path: Path, size: tuple[int, int] = (64, 64)) -> None:
     Image.new("RGB", size, (40, 80, 120)).save(path, format="JPEG")
 
 
-def _write_mask(path: Path, size: tuple[int, int] = (64, 64)) -> None:
+def _write_mask(path: Path, size: tuple[int, int] = (64, 64), value: int = 255) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    Image.new("L", size, 255).save(path, format="PNG")
+    Image.new("L", size, value).save(path, format="PNG")
+
+
+def _write_mask_artifact(
+    project: Path,
+    purpose: str,
+    *,
+    image_name: str = "front/frame_000000.jpg",
+    size: tuple[int, int] = (64, 64),
+    value: int = 255,
+    corrupt: bool = False,
+) -> None:
+    stage = f"generate_{purpose}_masks"
+    mask = project / stage / f"{image_name}.png"
+    mask.parent.mkdir(parents=True, exist_ok=True)
+    if corrupt:
+        mask.write_bytes(b"not a mask")
+    else:
+        _write_mask(mask, size, value)
+    manifest = {
+        "version": 3,
+        "purpose": purpose,
+        "prompt": ["person"],
+        "max_inference_size": 1024,
+        "dilate_px": 8,
+        "images": [
+            {
+                "name": image_name,
+                "source_id": "primary",
+                "capture_index": 0,
+                "path": str(mask.relative_to(project)),
+                "coverage": 0.1,
+                "coverage_warning": False,
+                "detections": {"person": 1},
+            }
+        ],
+    }
+    (project / stage / "manifest_masks.json").write_text(json.dumps(manifest))
 
 
 def _execute(project: Path, raw_params: dict | None = None) -> Path:
@@ -93,7 +130,7 @@ def _execute(project: Path, raw_params: dict | None = None) -> Path:
     reconstruction = colmap_model.read_model(project / "align_reconstruction" / "sparse" / "0")
     names = [image.name for image in reconstruction.images.values()]
     spec = InputSpec(
-        version=2,
+        version=3,
         reconstruction_mode="native_fisheye",
         image_count=len(names),
         source_count=1,
@@ -113,6 +150,7 @@ def _execute(project: Path, raw_params: dict | None = None) -> Path:
         feature_batches=[],
         image_path="images",
         mask_path="masks",
+        feature_masks_enabled=True,
         rig_config_path="rig_config.json",
         refine_intrinsics=True,
         refine_rig=False,
@@ -140,8 +178,8 @@ def test_export_root_is_directly_loadable_by_lf_studio(tmp_path: Path):
     _write_preview(project)
     image = project / "extract_features" / "images" / "front" / "frame_000000.jpg"
     _write_rgb(image)
-    mask = project / "extract_features" / "masks" / "front" / "frame_000000.jpg.png"
-    _write_mask(mask)
+    _write_mask_artifact(project, "feature", value=64)
+    _write_mask_artifact(project, "training", value=192)
 
     output = _execute(project)
 
@@ -156,6 +194,9 @@ def test_export_root_is_directly_loadable_by_lf_studio(tmp_path: Path):
     assert export_manifest["validation"]["loadable"] is True
     assert export_manifest["validation"]["unique_camera_centers"] == 1
     assert export_manifest["validation"]["matched_mask_count"] == 1
+    assert export_manifest["mask_source"] == "training"
+    with Image.open(output / "masks" / "front" / "frame_000000.jpg.png") as exported_mask:
+        assert exported_mask.getpixel((0, 0)) == 192
 
     recommendation = json.loads((output / "train_configs" / "recommendations.json").read_text())
     assert "--data-path <export_dataset>" in recommendation["usage"]
@@ -185,7 +226,14 @@ def test_export_rejects_invalid_registered_image(tmp_path: Path, failure: str):
         _write_rgb(image, (32, 64))
 
     with pytest.raises(RuntimeError, match="LFStudio export"):
-        _execute(project, {"emit_train_configs": False})
+        _execute(
+            project,
+            {
+                "emit_train_configs": False,
+                "feature_masks_enabled": False,
+                "training_masks_enabled": False,
+            },
+        )
 
 
 @pytest.mark.parametrize("failure", ["corrupt", "wrong_size"])
@@ -194,15 +242,22 @@ def test_export_rejects_invalid_registered_mask(tmp_path: Path, failure: str):
     _write_model(project / "align_reconstruction" / "sparse" / "0")
     _write_preview(project)
     _write_rgb(project / "extract_features" / "images" / "front" / "frame_000000.jpg")
-    mask = project / "extract_features" / "masks" / "front" / "frame_000000.jpg.png"
-    mask.parent.mkdir(parents=True)
-    if failure == "corrupt":
-        mask.write_bytes(b"not a mask")
-    else:
-        _write_mask(mask, (63, 64))
+    _write_mask_artifact(
+        project,
+        "training",
+        corrupt=failure == "corrupt",
+        size=(63, 64) if failure == "wrong_size" else (64, 64),
+    )
 
     with pytest.raises(RuntimeError, match="LFStudio export"):
-        _execute(project, {"emit_train_configs": False})
+        _execute(
+            project,
+            {
+                "emit_train_configs": False,
+                "feature_masks_enabled": False,
+                "training_masks_enabled": True,
+            },
+        )
 
 
 def test_export_rejects_camera_model_unsupported_by_lf_studio(tmp_path: Path):
@@ -212,7 +267,14 @@ def test_export_rejects_camera_model_unsupported_by_lf_studio(tmp_path: Path):
     _write_rgb(project / "extract_features" / "images" / "front" / "frame_000000.jpg")
 
     with pytest.raises(RuntimeError, match="unsupported_camera_models"):
-        _execute(project, {"emit_train_configs": False})
+        _execute(
+            project,
+            {
+                "emit_train_configs": False,
+                "feature_masks_enabled": False,
+                "training_masks_enabled": False,
+            },
+        )
 
 
 def test_unmatched_mask_does_not_enable_segment_mode(tmp_path: Path):
@@ -220,7 +282,7 @@ def test_unmatched_mask_does_not_enable_segment_mode(tmp_path: Path):
     _write_model(project / "align_reconstruction" / "sparse" / "0")
     _write_preview(project)
     _write_rgb(project / "extract_features" / "images" / "front" / "frame_000000.jpg")
-    _write_mask(project / "extract_features" / "masks" / "unrelated.png")
+    _write_mask_artifact(project, "training", image_name="unrelated.jpg")
 
     output = _execute(project)
 
@@ -231,6 +293,46 @@ def test_unmatched_mask_does_not_enable_segment_mode(tmp_path: Path):
     assert not (output / "masks" / "unrelated.png").exists()
 
 
+@pytest.mark.parametrize(
+    ("feature_enabled", "training_enabled", "expected_source", "expected_value"),
+    [
+        (True, True, "training", 192),
+        (True, False, "feature", 64),
+        (False, True, "training", 192),
+        (False, False, None, None),
+    ],
+)
+def test_export_uses_one_resolved_mask_channel(
+    tmp_path: Path,
+    feature_enabled: bool,
+    training_enabled: bool,
+    expected_source: str | None,
+    expected_value: int | None,
+):
+    project = tmp_path / "project"
+    _write_model(project / "align_reconstruction" / "sparse" / "0")
+    _write_preview(project)
+    _write_rgb(project / "extract_features" / "images" / "front" / "frame_000000.jpg")
+    _write_mask_artifact(project, "feature", value=64)
+    _write_mask_artifact(project, "training", value=192)
+
+    output = _execute(
+        project,
+        {
+            "feature_masks_enabled": feature_enabled,
+            "training_masks_enabled": training_enabled,
+        },
+    )
+
+    manifest = json.loads((output / "export_manifest.json").read_text())
+    exported = output / "masks" / "front" / "frame_000000.jpg.png"
+    assert manifest["mask_source"] == expected_source
+    assert exported.exists() is (expected_source is not None)
+    if expected_value is not None:
+        with Image.open(exported) as mask:
+            assert mask.getpixel((0, 0)) == expected_value
+
+
 def test_stationary_rig_is_detected_from_reference_sensor_trajectory(tmp_path: Path):
     project = tmp_path / "project"
     _write_stationary_rig_model(project / "align_reconstruction" / "sparse" / "0")
@@ -239,7 +341,14 @@ def test_stationary_rig_is_detected_from_reference_sensor_trajectory(tmp_path: P
         for index in range(2):
             _write_rgb(project / "extract_features" / "images" / lens / f"frame_{index:06d}.jpg")
 
-    output = _execute(project, {"emit_train_configs": False})
+    output = _execute(
+        project,
+        {
+            "emit_train_configs": False,
+            "feature_masks_enabled": False,
+            "training_masks_enabled": False,
+        },
+    )
 
     validation = json.loads((output / "export_manifest.json").read_text())["validation"]
     assert validation["loadable"] is True

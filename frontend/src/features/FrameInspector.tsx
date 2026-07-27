@@ -6,6 +6,8 @@ import {
   frameReconMap,
   preparedMaskUrl,
   type FrameInfo,
+  type MaskPurpose,
+  type MasksManifest,
   type ProjectSource,
   type ReconstructionData,
 } from '../api/client'
@@ -16,11 +18,12 @@ import {
   InspectorField,
   InspectorFields,
   InspectorHeader,
+  MaskPurposeTabs,
   type CaptureView,
 } from './CaptureInspectorParts'
 
 // Hierarchy で写真を選んだときの Inspector: フレーム画像 + 抽出スコア + 処理結果 (再構成の
-// 登録可否 / 3D 点数) + SAM3 マスク (あれば 原画/マスク/重ね を切替, 動体被覆率も表示).
+// 登録可否 / 3D 点数) + feature/training SAM3 マスクの用途・重ね表示を揃える.
 export const FrameInspector = ({
   projectId, frameIndex, frames, recon, sources,
 }: {
@@ -33,35 +36,62 @@ export const FrameInspector = ({
   const { t } = useSettings()
   const [lens, setLens] = useState(0)
   const [view, setView] = useState<CaptureView>('orig')
+  const [maskPurpose, setMaskPurpose] = useState<MaskPurpose>('training')
   const info = frames?.find(f => f.index === frameIndex)
   const source = sources.find(item => item.id === info?.source_id)
   const isInsv = source?.projection === 'dual_fisheye'
   const reg = recon ? frameReconMap(recon).get(frameIndex) : undefined
 
-  // SAM3 マスク (native fisheye). 無ければ 404 で undefined.
-  const { data: masks } = useQuery({
-    queryKey: ['masks', projectId], queryFn: () => api.getMasks(projectId), retry: false,
+  const { data: featureMasks } = useQuery({
+    queryKey: ['masks', projectId, 'feature'],
+    queryFn: () => api.getMasks(projectId, 'feature'), retry: false,
   })
-  const maskCandidates = masks?.images.filter(
-    record => record.source_id === info?.source_id && record.capture_index === frameIndex,
-  ) ?? []
-  const maskRec = isInsv
-    ? maskCandidates.find(record => record.name.includes(lens === 0 ? '/front/' : '/back/'))
-    : maskCandidates[0]
-  // マスクが無い時は必ず原画表示 (壊れた画像を防ぐ).
+  const { data: trainingMasks } = useQuery({
+    queryKey: ['masks', projectId, 'training'],
+    queryFn: () => api.getMasks(projectId, 'training'), retry: false,
+  })
+  const findMask = (manifest: MasksManifest | undefined) => {
+    const candidates = manifest?.images.filter(
+      record => record.source_id === info?.source_id && record.capture_index === info?.source_index,
+    ) ?? []
+    return isInsv
+      ? candidates.find(record => new RegExp(`(^|/)${lens === 0 ? 'front' : 'back'}/`).test(record.name))
+      : candidates[0]
+  }
+  const masksByPurpose = {
+    feature: findMask(featureMasks),
+    training: findMask(trainingMasks),
+  }
+  const availablePurposes = (['feature', 'training'] as MaskPurpose[])
+    .filter(purpose => masksByPurpose[purpose] !== undefined)
+  const effectivePurpose = masksByPurpose[maskPurpose]
+    ? maskPurpose
+    : masksByPurpose.training ? 'training' : 'feature'
+  const maskRec = masksByPurpose[effectivePurpose]
   const eff = maskRec ? view : 'orig'
+  const actions = isInsv || availablePurposes.length > 1 ? (
+    <span style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+      {isInsv && (
+        <span className="seg" role="group" aria-label={t('lensLabel')}>
+          <button type="button" aria-pressed={lens === 0} className={lens === 0 ? 'on' : ''}
+            onClick={() => setLens(0)}>L0</button>
+          <button type="button" aria-pressed={lens === 1} className={lens === 1 ? 'on' : ''}
+            onClick={() => setLens(1)}>L1</button>
+        </span>
+      )}
+      <MaskPurposeTabs available={availablePurposes} selected={effectivePurpose}
+        onSelect={setMaskPurpose} />
+    </span>
+  ) : undefined
 
   return (
     <div>
-      <InspectorHeader title={`${source?.label ?? t('frameLabel')} · ${t('frameLabel')} ${info?.source_index ?? frameIndex}`} actions={isInsv ? (
-          <span className="seg" role="group" aria-label={t('lensLabel')}>
-            <button type="button" aria-pressed={lens === 0} className={lens === 0 ? 'on' : ''} onClick={() => setLens(0)}>L0</button>
-            <button type="button" aria-pressed={lens === 1} className={lens === 1 ? 'on' : ''} onClick={() => setLens(1)}>L1</button>
-          </span>
-        ) : undefined} />
+      <InspectorHeader
+        title={`${source?.label ?? t('frameLabel')} · ${t('frameLabel')} ${info?.source_index ?? frameIndex}`}
+        actions={actions} />
 
       <CapturePreview originalUrl={frameImageUrl(projectId, frameIndex, lens)}
-        maskUrl={maskRec ? preparedMaskUrl(projectId, maskRec.name) : null}
+        maskUrl={maskRec ? preparedMaskUrl(projectId, maskRec.name, effectivePurpose) : null}
         view={eff} onViewChange={setView} alt={`${t('frameLabel')} ${frameIndex}`} />
 
       <CaptureSummary frameIndex={info?.source_index ?? frameIndex} lens={isInsv ? lens : null}
@@ -74,7 +104,9 @@ export const FrameInspector = ({
 
       {maskRec && (
         <InspectorFields>
-          <InspectorField label={t('maskCoverage')} tone={maskRec.coverage_warning ? 'error' : 'muted'}>
+          <InspectorField
+            label={`${t(effectivePurpose === 'feature' ? 'featureMask' : 'trainingMask')} · ${t('maskCoverage')}`}
+            tone={maskRec.coverage_warning ? 'error' : 'muted'}>
             {(maskRec.coverage * 100).toFixed(1)}%{maskRec.coverage_warning ? ' ⚠' : ''}
           </InspectorField>
         </InspectorFields>

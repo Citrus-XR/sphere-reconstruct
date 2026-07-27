@@ -12,6 +12,8 @@ aligned reconstruction を LFStudio が直接選択できる dataset root とし
   max_preview_points: int   プレビュー点群の上限 (default 500000)
   include_dataset: bool     標準データセットも書き出す (default True)
   emit_train_configs: bool  LFStudio 推奨設定を書き出す (default True)
+  feature_masks_enabled: bool   training mask 無効時の export fallback
+  training_masks_enabled: bool  export で優先する mask
 """
 
 from __future__ import annotations
@@ -27,6 +29,14 @@ from ..colmap import gravity_align, lichtfeld_config, train_profile
 from ..colmap import model as colmap_model
 from ..colmap.input_workspace import InputSpec
 from ..domain.artifacts import FileRef, StageManifest
+from ..domain.mask_artifact import (
+    MaskPurpose,
+    export_purpose,
+    load_mask_manifest,
+    mask_manifest_path,
+    records_by_name,
+    stage_for,
+)
 from ..domain.pipeline_state import StageName
 from ..infrastructure.filesystem import sha256_file
 from ..pipeline.manifest import register
@@ -36,7 +46,7 @@ from ..pipeline.stage import Stage, StageContext, new_manifest
 @register
 class ExportDataset(Stage):
     name = StageName.EXPORT_DATASET
-    impl_version = "1.2"
+    impl_version = "2.0"
 
     def collect_inputs(self, ctx: StageContext) -> list[FileRef]:
         candidates = [
@@ -50,6 +60,18 @@ class ExportDataset(Stage):
             ctx.project_dir / "align_reconstruction" / "sparse" / "0" / "images.bin",
             ctx.project_dir / "align_reconstruction" / "sparse" / "0" / "points3D.bin",
         ]
+        purpose = export_purpose(
+            feature_enabled=ctx.params["feature_masks_enabled"],
+            training_enabled=ctx.params["training_masks_enabled"],
+        )
+        if purpose is not None:
+            stage = stage_for(purpose)
+            candidates.extend(
+                [
+                    ctx.project_dir / "manifests" / f"{stage.value}.json",
+                    mask_manifest_path(ctx.project_dir, purpose),
+                ]
+            )
         return [
             FileRef(
                 path=str(path.relative_to(ctx.project_dir)),
@@ -65,6 +87,8 @@ class ExportDataset(Stage):
             "max_preview_points": int(raw.get("max_preview_points", 500_000)),
             "include_dataset": bool(raw.get("include_dataset", True)),
             "emit_train_configs": bool(raw.get("emit_train_configs", True)),
+            "feature_masks_enabled": bool(raw.get("feature_masks_enabled", True)),
+            "training_masks_enabled": bool(raw.get("training_masks_enabled", True)),
         }
 
     def execute(self, ctx: StageContext) -> StageManifest:
@@ -81,6 +105,12 @@ class ExportDataset(Stage):
         out = ctx.stage_out_dir
         outputs: list[FileRef] = []
         train_profile_data = train_profile.compute_profile(recon)
+        mask_purpose = export_purpose(
+            feature_enabled=ctx.params["feature_masks_enabled"],
+            training_enabled=ctx.params["training_masks_enabled"],
+        )
+        if mask_purpose is not None and not mask_manifest_path(ctx.project_dir, mask_purpose).is_file():
+            raise RuntimeError(f"{stage_for(mask_purpose).value} must run before export_dataset")
 
         # 1) alignment stage が作った viewer preview を同梱する.
         preview_dir = out / "preview"
@@ -123,7 +153,8 @@ class ExportDataset(Stage):
                     raise RuntimeError(f"registered training image is missing: {name}")
                 _link_or_copy(source, ds_images / name)
             mask_files_copied = _copy_masks(
-                ctx.project_dir / "extract_features" / "masks",
+                ctx.project_dir,
+                mask_purpose,
                 ds / "masks",
                 registered_names,
             )
@@ -140,13 +171,14 @@ class ExportDataset(Stage):
                 raise RuntimeError("LFStudio export 検証に失敗しました: " + ", ".join(validation["errors"]))
             export_manifest = {
                 "format": "sphere-reconstruct-export",
-                "version": 1,
+                "version": 2,
                 "load_in_lichtfeld_studio": ".",
                 "camera_models": sorted({camera.model for camera in recon.cameras.values()}),
                 "images": len(recon.images),
                 "points3D": len(recon.points3D),
                 "masks": validation["matched_mask_count"],
                 "mask_files_copied": mask_files_copied,
+                "mask_source": mask_purpose.value if mask_purpose is not None else None,
                 "image_source": "original",
                 "validation": validation,
                 "source_registration": source_registration,
@@ -237,6 +269,7 @@ class ExportDataset(Stage):
             **recon.summary(),
             "camera_models": sorted({camera.model for camera in recon.cameras.values()}),
             "mask_files": validation["matched_mask_count"] if validation else 0,
+            "mask_source": mask_purpose.value if mask_purpose is not None else None,
             "validation": validation,
             "training_profile": train_profile_data,
             "training_recommendation": cfg_info,
@@ -257,16 +290,22 @@ def _link_or_copy(src: Path, dst: Path) -> None:
         shutil.copy2(src, dst)
 
 
-def _copy_masks(source_dir: Path, destination_dir: Path, image_names: set[str]) -> int:
-    if not source_dir.exists():
+def _copy_masks(
+    project_dir: Path,
+    purpose: MaskPurpose | None,
+    destination_dir: Path,
+    image_names: set[str],
+) -> int:
+    if purpose is None:
         return 0
+    records = records_by_name(load_mask_manifest(project_dir, purpose))
     count = 0
     for image_name in sorted(image_names):
-        source = _find_mask_path(source_dir, Path(image_name))
-        if source is None:
+        record = records.get(image_name)
+        if record is None:
             continue
-        destination = destination_dir / source.relative_to(source_dir)
-        destination.parent.mkdir(parents=True, exist_ok=True)
+        source = project_dir / record["path"]
+        destination = destination_dir / f"{image_name}.png"
         _link_or_copy(source, destination)
         count += 1
     return count
