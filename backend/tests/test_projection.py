@@ -140,6 +140,27 @@ def test_project_mei_back_hemisphere_rejected():
     assert uv.shape == (1, 2)
 
 
+def test_x5_mei_calibration_fits_forward_opencv_fisheye():
+    results = []
+    for index, lens in enumerate((_make_lens_a(), _make_lens_b())):
+        intr = proj.lens_to_intrinsics(
+            lens,
+            lens_index=index,
+            single_lens_native_width=5376,
+            target_width=3840,
+            target_height=3840,
+        )
+        results.append(proj.approximate_opencv_fisheye(intr))
+
+    assert results[0].rms_error_px < 0.6
+    assert results[0].maximum_error_px < 1.7
+    assert results[1].rms_error_px < 1.6
+    assert results[1].maximum_error_px < 4.6
+    assert 0.44 < results[0].forward_radius_px / 3840 < 0.46
+    assert 0.44 < results[1].forward_radius_px / 3840 < 0.46
+    assert results[0].params != results[1].params
+
+
 def test_pinhole_backproject_center_ray_is_optical_axis():
     view = proj.PinholeView("front", fov_deg=90.0, width=64, height=64, yaw_deg=0.0, pitch_deg=0.0)
     rays = proj.pinhole_backproject(view)

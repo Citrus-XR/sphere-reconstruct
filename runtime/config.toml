@@ -37,8 +37,8 @@ checkpoint_path = ""
 config_path = ""
 device = "cuda:0"
 dtype = "bfloat16"
-training_prompt = "person,camera operator,selfie stick,tripod,person shadow,selfie stick shadow,tripod shadow"
-feature_prompt = "person,camera operator,selfie stick,tripod,person shadow,selfie stick shadow,tripod shadow,animal,sky,tree,vehicle,airplane,water"
+training_prompt = "person,camera operator,person's shadow"
+feature_prompt = "person,camera operator,person's shadow,animal,sky,tree,vehicle,airplane,water"
 max_inference_size = 2048
 confidence_threshold = 0.5
 

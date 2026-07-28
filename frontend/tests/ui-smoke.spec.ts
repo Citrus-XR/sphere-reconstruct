@@ -6,7 +6,7 @@ const MOCK_SOURCE = 'D:\\VID 2026\\clip.insv'
 const MOCK_EXPORT = 'D:\\LFStudio\\export_dataset'
 const MOCK_ENV_PATH = 'D:\\very-long-workspace-directory\\nested-runtime\\models\\and-tools\\current-environment'
 const MOCK_PHONE = 'D:\\mixed-inputs\\Phone photos'
-const TRAINING_MASK_PROMPT = 'person,camera operator,selfie stick,tripod,person shadow,selfie stick shadow,tripod shadow'
+const TRAINING_MASK_PROMPT = "person,camera operator,person's shadow"
 const FEATURE_MASK_PROMPT = `${TRAINING_MASK_PROMPT},animal,sky,tree,vehicle,airplane,water`
 
 interface MockOptions {
@@ -126,7 +126,14 @@ const installUiMock = async (page: Page, options: MockOptions = {}) => {
         generate_training_masks: { purpose: 'training', images: 2, average_dynamic_coverage: 0.1, coverage_warnings: 0 },
         extract_features: { images: 2, minimum_keypoints: 100, average_keypoints: 200, maximum_keypoints: 300, descriptor_images: 2 },
         match_features: { raw_pairs: 1, verified_pairs: 1, minimum_inliers: 20, average_inliers: 20, maximum_inliers: 20, total_inliers: 20 },
-        reconstruct: { input_images: 2, num_images: 2, num_points3D: 42, registered_ratio: 1, mean_reprojection_error: 0.5 },
+        reconstruct: {
+          input_images: 2, num_images: 2, num_points3D: 42, registered_ratio: 1,
+          mean_reprojection_error: 0.5,
+          primary_trajectory: {
+            available: true, passed: false, maximum_to_p95_ratio: 56.6,
+            largest_steps: [{ from_capture: 261, to_capture: 262, distance: 62.9 }],
+          },
+        },
         align_reconstruction: { applied: true, spread_deg: 0.4, preview_points: 42 },
         restore_metric_scale: { applied: true, metric: true, scale_factor: 445, baseline_pairs: 2 },
         position_ground: { applied: true, ground_y: 5, support_points: 1200 },
@@ -585,6 +592,7 @@ test('feature, matching, and mapper controls have localized names and explanatio
   await expect(page.getByText('Image-pair strategy (pairing)', { exact: true })).toBeVisible()
   await page.getByText('Image-pair strategy (pairing)', { exact: true }).locator('..').locator('select').selectOption('sequential')
   await expect(page.getByText('Loop closure (loop_closure)', { exact: true })).toBeVisible()
+  await expect(page.getByText('Transitive matching (transitive_matching)', { exact: true })).toBeVisible()
   await expect(page.getByText('Matches per image pair (max_num_matches)', { exact: true })).toBeVisible()
   await expect(page.getByText('Two-view minimum inliers (two-view min_num_inliers)', { exact: true })).toBeVisible()
   await expect(page.getByText('Geometry-guided matching (guided_matching)', { exact: true })).toBeVisible()
@@ -593,10 +601,16 @@ test('feature, matching, and mapper controls have localized names and explanatio
   await expect(page.getByText('Reconstruction solver (mapper)', { exact: true })).toBeVisible()
   await expect(page.getByText('View-graph calibration (view_graph_calibration)', { exact: true })).toBeVisible()
   await expect(page.getByText('GPU bundle adjustment (ba_use_gpu)', { exact: true })).toBeVisible()
+  const reconstructionStatistics = page.getByRole('button', { name: 'Stage statistics', exact: true })
+  await reconstructionStatistics.click()
+  await expect(page.getByText('Maximum / P95 ratio', { exact: true })).toBeVisible()
+  await expect(page.getByText('56.6×', { exact: true })).toBeVisible()
+  await expect(page.getByText('Largest jumps #1 · From capture', { exact: true })).toBeVisible()
+  await expect(page.getByText('Largest jumps #1 · To capture', { exact: true })).toBeVisible()
   await page.getByText('Restore metric scale', { exact: true }).click()
   await expect(page.getByText('Metric-scale restoration', { exact: true })).toBeVisible()
   await page.getByText('Position from predicted ground', { exact: true }).click()
-  await expect(page.getByText('Finds a broadly supported horizontal ground mode in the gravity-aligned point cloud and moves it to dataset Y=0.', { exact: true })).toBeVisible()
+  await expect(page.getByText('Predicts local ground near the primary camera path with equal weight per camera sample, then moves its median height to dataset Y=0.', { exact: true })).toBeVisible()
   await page.getByText('Export', { exact: true }).click()
   await expect(page.getByText('Optimize fisheye training images', { exact: true })).toBeVisible()
   await page.getByText('Sparse reconstruction', { exact: true }).click()
@@ -610,7 +624,7 @@ test('feature, matching, and mapper controls have localized names and explanatio
   await page.getByText('恢复真实大小', { exact: true }).click()
   await expect(page.getByText('真实大小恢复方式', { exact: true })).toBeVisible()
   await page.getByText('根据地面预测矫正位置', { exact: true }).first().click()
-  await expect(page.getByText('从已完成重力对齐的点云中预测具有大范围水平支撑的地面高度，并把它移动到数据集 Y=0。', { exact: true })).toBeVisible()
+  await expect(page.getByText('在主相机路径附近按每个相机样本等权预测局部地面，并把其中位高度移动到数据集 Y=0。', { exact: true })).toBeVisible()
   await page.getByText('特征匹配', { exact: true }).click()
   await expect(page.getByText('特征匹配器 (matcher_type)', { exact: true })).toBeVisible()
   await expect(page.getByText('图像配对策略 (pairing)', { exact: true })).toBeVisible()

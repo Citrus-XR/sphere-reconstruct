@@ -21,7 +21,7 @@ from .colmap_progress import matching_progress
 @register
 class MatchFeatures(Stage):
     name = StageName.MATCH_FEATURES
-    impl_version = "2.1"
+    impl_version = "2.2"
 
     def normalize_params(self, raw: dict) -> dict:
         feature_type = str(raw.get("feature_type", "SIFT")).upper()
@@ -31,12 +31,18 @@ class MatchFeatures(Stage):
         pairing = str(raw.get("pairing", "auto")).lower()
         if pairing not in {"auto", "sequential", "exhaustive", "vocab_tree"}:
             raise ValueError(f"unsupported pairing strategy: {pairing}")
+        overlap = int(raw.get("overlap", 4))
+        transitive_iterations = int(raw.get("transitive_iterations", 1))
+        if overlap <= 0 or transitive_iterations <= 0:
+            raise ValueError("matching overlap and transitive iterations must be positive")
         return {
             "feature_type": feature_type,
             "matcher_type": matcher,
             "pairing": pairing,
-            "overlap": int(raw.get("overlap", 4)),
-            "loop_closure": bool(raw.get("loop_closure", False)),
+            "overlap": overlap,
+            "loop_closure": bool(raw.get("loop_closure", True)),
+            "transitive_matching": bool(raw.get("transitive_matching", True)),
+            "transitive_iterations": transitive_iterations,
             "use_gpu": bool(raw.get("use_gpu", True)),
             "max_num_matches": int(raw.get("max_num_matches", 16384)),
             "guided_matching": bool(raw.get("guided_matching", False)),
@@ -76,6 +82,7 @@ class MatchFeatures(Stage):
         settings = get_settings()
         spec = InputSpec.read(ctx.project_dir / "extract_features" / "input_spec.json")
         colmap_bin = colmap_runner.resolve_colmap_bin(settings.binaries.colmap or None)
+        vocab_tree = colmap_runner.resolve_vocab_tree_path(settings.binaries.vocab_tree or None)
         matching_type = _matching_type(ctx.params["feature_type"], ctx.params["matcher_type"])
         extra_args = [
             "--FeatureMatching.max_num_matches",
@@ -94,37 +101,66 @@ class MatchFeatures(Stage):
             key="log.matching_start",
             args={"type": matching_type, "pairing": ctx.params["pairing"]},
         )
+        pairing = _resolve_pairing(ctx.params["pairing"], spec, vocab_tree, ctx.params["feature_type"])
+        run_transitive = bool(ctx.params["transitive_matching"] and pairing == "sequential")
+        pairing_extra_args = [
+            *extra_args,
+            *_rig_verification_args(bool(spec.rig_config_path), enabled=not run_transitive),
+        ]
         common = {
             "database_path": database_path,
             "use_gpu": ctx.params["use_gpu"],
             "matching_type": matching_type,
-            "extra_args": extra_args,
+            "extra_args": pairing_extra_args,
             "log_path": logs_dir / "matcher.log",
-            "on_line": matching_progress(ctx, low=0.05, high=0.9),
+            "on_line": matching_progress(ctx, low=0.05, high=0.7 if run_transitive else 0.9),
         }
-        pairing = _resolve_pairing(ctx.params["pairing"], spec, settings, ctx.params["feature_type"])
         if pairing == "exhaustive":
             colmap_runner.exhaustive_matcher(colmap_bin, **common)
         elif pairing == "vocab_tree":
             if not ctx.params["feature_type"].startswith("SIFT"):
                 raise ValueError("the configured vocabulary tree is only valid for SIFT")
-            if not settings.binaries.vocab_tree:
+            if vocab_tree is None:
                 raise RuntimeError("vocab_tree pairing requires binaries.vocab_tree")
             colmap_runner.vocab_tree_matcher(
                 colmap_bin,
-                vocab_tree_path=Path(settings.binaries.vocab_tree),
+                vocab_tree_path=vocab_tree,
                 **common,
             )
         else:
             loop = ctx.params["loop_closure"]
-            if loop and not settings.binaries.vocab_tree:
+            if loop and not ctx.params["feature_type"].startswith("SIFT"):
+                raise ValueError("loop closure vocabulary tree is only valid for SIFT")
+            if loop and vocab_tree is None:
                 raise RuntimeError("loop closure requires binaries.vocab_tree")
             colmap_runner.sequential_matcher(
                 colmap_bin,
                 overlap=ctx.params["overlap"],
                 loop_detection=loop,
-                vocab_tree_path=Path(settings.binaries.vocab_tree) if loop else None,
+                vocab_tree_path=vocab_tree if loop else None,
                 **common,
+            )
+
+        if run_transitive:
+            # Global positioning は 3-view 以上の track を必要とするため、sequential edge を推移的に展開する。
+            # https://github.com/colmap/glomap/issues/145#issuecomment-2517143850
+            ctx.progress.info(
+                "expanding transitive feature tracks",
+                progress=0.7,
+                key="log.matching_transitive",
+            )
+            colmap_runner.transitive_matcher(
+                colmap_bin,
+                database_path=database_path,
+                num_iterations=ctx.params["transitive_iterations"],
+                use_gpu=ctx.params["use_gpu"],
+                matching_type=matching_type,
+                extra_args=[
+                    *extra_args,
+                    *_rig_verification_args(bool(spec.rig_config_path), enabled=True),
+                ],
+                log_path=logs_dir / "transitive_matcher.log",
+                on_line=matching_progress(ctx, low=0.7, high=0.9),
             )
 
         ctx.progress.tick(0.92, message="feature matching complete", key="log.matching_compute_done")
@@ -135,6 +171,9 @@ class MatchFeatures(Stage):
                 "pairing": pairing,
                 "requested_pairing": ctx.params["pairing"],
                 "loop_closure": ctx.params["loop_closure"] if pairing == "sequential" else False,
+                "transitive_matching": run_transitive,
+                "transitive_iterations": (ctx.params["transitive_iterations"] if run_transitive else 0),
+                "rig_verification": bool(spec.rig_config_path),
                 "gpu_enabled": ctx.params["use_gpu"],
             }
         )
@@ -157,14 +196,23 @@ def _matching_type(feature_type: str, matcher_type: str) -> str:
     return f"{family}_{suffix}"
 
 
-def _resolve_pairing(requested: str, spec: InputSpec, settings, feature_type: str) -> str:
+def _rig_verification_args(has_rig: bool, *, enabled: bool) -> list[str]:
+    return ["--FeatureMatching.rig_verification", "1"] if has_rig and enabled else []
+
+
+def _resolve_pairing(
+    requested: str,
+    spec: InputSpec,
+    vocab_tree: Path | None,
+    feature_type: str,
+) -> str:
     if requested != "auto":
         return requested
     if spec.source_count <= 1:
         return "sequential"
     if spec.image_count <= 500:
         return "exhaustive"
-    if feature_type.startswith("SIFT") and settings.binaries.vocab_tree:
+    if feature_type.startswith("SIFT") and vocab_tree is not None:
         return "vocab_tree"
     raise RuntimeError(
         "500 枚を超える mixed-source dataset には SIFT vocab tree を設定するか、"

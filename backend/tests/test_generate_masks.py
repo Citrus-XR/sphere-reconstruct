@@ -16,9 +16,7 @@ from sphere_reconstruct.stages.generate_masks import (  # noqa: E402
     GenerateTrainingMasks,
 )
 
-_TRAINING_PROMPT = (
-    "person,camera operator,selfie stick,tripod,person shadow,selfie stick shadow,tripod shadow"
-)
+_TRAINING_PROMPT = "person,camera operator,person's shadow"
 _FEATURE_PROMPT = f"{_TRAINING_PROMPT},animal,sky,tree,vehicle,airplane,water"
 
 
@@ -94,7 +92,7 @@ def _execute(project_dir, monkeypatch, stage_type, *, circle: bool):
         project_dir=project_dir,
         stage_out_dir=output,
         params=stage.normalize_params(
-            {"prompt": "person,tripod", "max_inference_size": 128, "coverage_warn": 0.9}
+            {"prompt": "person,animal", "max_inference_size": 128, "coverage_warn": 0.9}
         ),
         sources=(),
         progress=ProgressReporter(lambda *_args: None),
@@ -125,7 +123,7 @@ def test_generate_masks_for_perspective_images(tmp_path, monkeypatch, stage_type
     assert document["total_images"] == len(names)
     assert document["revision"]
     assert 0.45 < document["images"][0]["coverage"] < 0.55
-    assert document["prompt"] == ["person", "tripod"]
+    assert document["prompt"] == ["person", "animal"]
     assert len(manifest.outputs) == len(names) + 1
     assert not (output / ".preview-mask-header.json").exists()
     assert not (output / ".preview-mask-records.jsonl").exists()

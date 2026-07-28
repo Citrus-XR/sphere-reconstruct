@@ -38,6 +38,7 @@ export interface StageParams {
   matchingUseGpu: boolean
   overlap: number
   loopClosure: boolean
+  transitiveMatching: boolean
   maxNumMatches: number
   guidedMatching: boolean
   twoViewMinInliers: number
@@ -129,7 +130,8 @@ export const DEFAULT_PARAMS: StageParams = {
   pairing: 'auto',
   matchingUseGpu: true,
   overlap: 4,
-  loopClosure: false,
+  loopClosure: true,
+  transitiveMatching: true,
   maxNumMatches: 16384,
   guidedMatching: false,
   twoViewMinInliers: 15,
@@ -220,6 +222,7 @@ export const paramsForStage = (
         use_gpu: params.matchingUseGpu,
         overlap: params.overlap,
         loop_closure: params.loopClosure,
+        transitive_matching: params.transitiveMatching,
         max_num_matches: params.maxNumMatches,
         guided_matching: params.guidedMatching,
         min_num_inliers: params.twoViewMinInliers,

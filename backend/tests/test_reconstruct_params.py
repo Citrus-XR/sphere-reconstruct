@@ -7,10 +7,11 @@ import pytest
 from sphere_reconstruct.colmap.input_workspace import InputSpec
 from sphere_reconstruct.pipeline.stage import ProgressReporter
 from sphere_reconstruct.stages.extract_features import ExtractFeatures
-from sphere_reconstruct.stages.match_features import MatchFeatures
+from sphere_reconstruct.stages.match_features import MatchFeatures, _rig_verification_args
 from sphere_reconstruct.stages.reconstruct import (
     Reconstruct,
     _run_global_mapper_with_retries,
+    _summary_passes,
     _validate_summary,
 )
 
@@ -35,6 +36,18 @@ def test_matching_defaults_to_mixed_source_auto_pairing():
     assert params["matcher_type"] == "bruteforce"
     assert params["pairing"] == "auto"
     assert params["overlap"] == 4
+    assert params["loop_closure"] is True
+    assert params["transitive_matching"] is True
+    assert params["transitive_iterations"] == 1
+
+
+def test_rig_verification_runs_once_after_transitive_matching():
+    assert _rig_verification_args(True, enabled=False) == []
+    assert _rig_verification_args(True, enabled=True) == [
+        "--FeatureMatching.rig_verification",
+        "1",
+    ]
+    assert _rig_verification_args(False, enabled=True) == []
 
 
 def test_reconstruction_enables_both_ceres_gpu_solvers_together_by_default():
@@ -46,6 +59,8 @@ def test_reconstruction_enables_both_ceres_gpu_solvers_together_by_default():
     assert params["random_seed"] == 0
     assert params["min_registered_ratio"] == 0.8
     assert params["min_points3D"] == 100
+    assert params["incremental_fallback"] is True
+    assert params["max_adjacent_step_ratio"] == 10.0
 
     gpu_params = Reconstruct().normalize_params({"ba_use_gpu": True})
     assert gpu_params["ba_use_gpu"] is True
@@ -57,12 +72,45 @@ def test_incremental_does_not_run_view_graph_calibration_by_default():
     assert params["view_graph_calibration"] is False
 
 
+def test_continuity_ratio_must_be_disabled_explicitly_or_greater_than_one():
+    assert Reconstruct().normalize_params({"max_adjacent_step_ratio": 0})[
+        "max_adjacent_step_ratio"
+    ] == 0
+    with pytest.raises(ValueError, match="greater than one"):
+        Reconstruct().normalize_params({"max_adjacent_step_ratio": 1})
+
+
 def test_quality_gate_rejects_camera_only_reconstruction():
     with pytest.raises(RuntimeError, match="points3D=0"):
         _validate_summary(
             {"registered_ratio": 1.0, "num_points3D": 0},
             {"min_registered_ratio": 0.8, "min_points3D": 100},
         )
+
+
+def test_continuity_gate_rejects_fully_registered_teleporting_trajectory():
+    trajectory = {
+        "available": True,
+        "passed": False,
+        "maximum_to_p95_ratio": 56.6,
+        "outlier_threshold": 10.0,
+        "largest_steps": [{"from_capture": 261, "to_capture": 262, "distance": 62.9}],
+    }
+    summary = {
+        "registered_ratio": 1.0,
+        "num_points3D": 1000,
+        "primary_trajectory": trajectory,
+        "source_registration": {"primary": {"total": 100, "registered": 100, "role": "primary"}},
+    }
+    params = {
+        "min_registered_ratio": 0.8,
+        "min_points3D": 100,
+        "max_adjacent_step_ratio": 10.0,
+    }
+
+    with pytest.raises(RuntimeError, match="261->262"):
+        _validate_summary(summary, params, require_trajectory_continuity=True)
+    assert _summary_passes(summary, params, "primary", require_trajectory_continuity=True) is False
 
 
 def test_global_mapper_retries_camera_only_result(tmp_path: Path, monkeypatch):
@@ -77,7 +125,7 @@ def test_global_mapper_retries_camera_only_result(tmp_path: Path, monkeypatch):
         model.mkdir(parents=True)
         (model / "cameras.bin").write_bytes(b"camera")
 
-    def fake_select(output_path, _spec):
+    def fake_select(output_path, _spec, **_kwargs):
         seed = calls[-1]
         points = 0 if seed == 0 else 1000
         return output_path / "0", {
@@ -87,6 +135,7 @@ def test_global_mapper_retries_camera_only_result(tmp_path: Path, monkeypatch):
             "source_registration": {
                 "primary": {"total": 10, "registered": 10, "ratio": 1.0, "connected": True}
             },
+            "primary_trajectory": {"available": False, "passed": True},
         }
 
     monkeypatch.setattr(module.colmap_runner, "global_mapper", fake_mapper)

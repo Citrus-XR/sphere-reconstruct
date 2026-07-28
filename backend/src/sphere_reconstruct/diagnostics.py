@@ -13,7 +13,7 @@ import tempfile
 from ctypes.util import find_library
 from pathlib import Path
 
-from .colmap.runner import resolve_colmap_bin
+from .colmap.runner import resolve_colmap_bin, resolve_vocab_tree_path
 from .sam3.settings import quick_check as sam3_quick_check
 from .settings import get_settings, workspace_root
 
@@ -26,6 +26,7 @@ def diagnose() -> dict:
         "ffmpeg": _ffmpeg_check(),
         "ffprobe": _binary_check(settings.binaries.ffprobe, "ffprobe", ["-version"]),
         "colmap": _colmap_check(),
+        "vocab_tree": _vocab_tree_check(),
         "jpegtran": _jpegtran_check(),
         "sam3": _sam3_check(),
         "cuda_runtime": _cuda_runtime_check(),
@@ -85,11 +86,7 @@ def _ffmpeg_check() -> dict:
     }:
         check["ok"] = False
         check["message"] = "hardware decode is required but disabled"
-    elif (
-        settings.frame_extraction.require_hwaccel
-        and preference != "auto"
-        and preference not in methods
-    ):
+    elif settings.frame_extraction.require_hwaccel and preference != "auto" and preference not in methods:
         check["ok"] = False
         check["message"] = f"required hardware decoder is not compiled into FFmpeg: {preference}"
     return check
@@ -101,6 +98,21 @@ def _jpegtran_check() -> dict:
     if not check["ok"]:
         check["message"] = "jpegtran not found; lossless fisheye training crop is unavailable"
     return check
+
+
+def _vocab_tree_check() -> dict:
+    try:
+        path = resolve_vocab_tree_path(get_settings().binaries.vocab_tree or None)
+    except (FileNotFoundError, ValueError) as error:
+        return {"ok": False, "optional": True, "path": None, "message": str(error)}
+    if path is None:
+        return {
+            "ok": False,
+            "optional": True,
+            "path": None,
+            "message": "vocabulary tree not found; loop closure is unavailable",
+        }
+    return {"ok": True, "optional": True, "path": str(path), "message": "ok"}
 
 
 def _colmap_check() -> dict:
@@ -127,8 +139,7 @@ def _colmap_check() -> dict:
         "aliked_bruteforce": "--AlikedMatching.brute_force" in matchers["output"],
         "aliked_lightglue": "--AlikedMatching.lightglue" in matchers["output"],
         "equirectangular": modern_camera_models,
-        "gpu_bundle_adjustment": bundle_adjustment["sparse"]
-        and "ba_ceres_use_gpu" in combined,
+        "gpu_bundle_adjustment": bundle_adjustment["sparse"] and "ba_ceres_use_gpu" in combined,
         "gpu_bundle_adjustment_dense": bundle_adjustment["dense"],
         "gpu_bundle_adjustment_sparse": bundle_adjustment["sparse"],
     }
@@ -218,6 +229,17 @@ def _sam3_check() -> dict:
 
 def _cuda_runtime_check() -> dict:
     nvidia_smi = shutil.which("nvidia-smi")
+    gpu_inventory: list[dict] = []
+    if nvidia_smi:
+        query = _run(
+            [
+                nvidia_smi,
+                "--query-gpu=name,driver_version,compute_cap",
+                "--format=csv,noheader,nounits",
+            ]
+        )
+        if query["returncode"] == 0:
+            gpu_inventory = _parse_nvidia_smi_inventory(query["output"])
     torch_lib = (
         Path(sys.prefix) / "Lib" / "site-packages" / "torch" / "lib"
         if os.name == "nt"
@@ -230,10 +252,41 @@ def _cuda_runtime_check() -> dict:
         "ok": nvidia_smi is not None,
         "optional": True,
         "nvidia_smi": nvidia_smi,
+        "gpus": gpu_inventory,
+        "pinned_cuda_ba_compatible": _pinned_cuda_ba_compatible(gpu_inventory),
         "torch_library_dir": str(torch_lib) if torch_lib else None,
         "cudnn": str(cudnn) if cudnn else None,
         "message": "ok" if nvidia_smi else "NVIDIA GPU not detected; CPU mode remains available",
     }
+
+
+def _parse_nvidia_smi_inventory(output: str) -> list[dict]:
+    inventory = []
+    for line in output.splitlines():
+        fields = [field.strip() for field in line.split(",")]
+        if len(fields) != 3:
+            continue
+        name, driver_version, compute_capability_text = fields
+        try:
+            driver_major = int(driver_version.split(".", 1)[0])
+            compute_capability = float(compute_capability_text)
+        except ValueError:
+            continue
+        inventory.append(
+            {
+                "name": name,
+                "driver_version": driver_version,
+                "driver_major": driver_major,
+                "compute_capability": compute_capability,
+            }
+        )
+    return inventory
+
+
+def _pinned_cuda_ba_compatible(inventory: list[dict]) -> bool:
+    return bool(inventory) and (
+        inventory[0]["driver_major"] >= 580 and inventory[0]["compute_capability"] >= 7.5
+    )
 
 
 def _run(command: list[str]) -> dict:

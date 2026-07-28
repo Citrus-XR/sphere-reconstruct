@@ -30,7 +30,7 @@ FULL_FRAME_DIAGONAL_MM = math.hypot(36.0, 24.0)
 @register
 class PrepareImages(Stage):
     name = StageName.PREPARE_IMAGES
-    impl_version = "1.1"
+    impl_version = "1.2"
 
     def collect_inputs(self, ctx: StageContext) -> list[FileRef]:
         candidates = [
@@ -78,6 +78,7 @@ class PrepareImages(Stage):
         groups: list[dict] = []
         rigs: list[dict] = []
         outputs: list[FileRef] = []
+        source_calibrations: list[dict] = []
         source_documents = frames_document["sources"]
         for source_number, source in enumerate(source_documents):
             source_span = ProgressSpan(
@@ -99,13 +100,9 @@ class PrepareImages(Stage):
             projection_name = Projection(source["projection"])
             if projection_name == Projection.DUAL_FISHEYE:
                 if ctx.params["reconstruction_mode"] == "pinhole_rig":
-                    result = self._prepare_dual_fisheye_pinhole(
-                        ctx, source, inspection, source_span
-                    )
+                    result = self._prepare_dual_fisheye_pinhole(ctx, source, inspection, source_span)
                 else:
-                    result = self._prepare_dual_fisheye_native(
-                        ctx, source, inspection, source_span
-                    )
+                    result = self._prepare_dual_fisheye_native(ctx, source, inspection, source_span)
             elif projection_name == Projection.EQUIRECTANGULAR:
                 if ctx.params["reconstruction_mode"] == "pinhole_rig":
                     result = self._prepare_equirectangular_pinhole(ctx, source, source_span)
@@ -117,6 +114,8 @@ class PrepareImages(Stage):
             groups.extend(result["camera_groups"])
             rigs.extend(result["rigs"])
             outputs.extend(result["outputs"])
+            if result.get("calibration") is not None:
+                source_calibrations.append({"source_id": source["id"], **result["calibration"]})
 
         primary = next(
             (source for source in frames_document["sources"] if source["role"] == SourceRole.PRIMARY.value),
@@ -144,6 +143,7 @@ class PrepareImages(Stage):
             "camera_groups": groups,
             "rig_config_path": rig_path,
             "images": images,
+            "source_calibrations": source_calibrations,
         }
         catalog_path = ctx.stage_out_dir / "image_catalog.json"
         catalog_path.write_text(json.dumps(catalog, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -157,6 +157,7 @@ class PrepareImages(Stage):
             "camera_models": sorted({group["camera_model"] for group in groups}),
             "perspective_images": sum(image["projection"] == "perspective" for image in images),
             "spherical_images": sum(image["projection"] != "perspective" for image in images),
+            "source_calibrations": source_calibrations,
         }
         ctx.progress.info(
             f"prepare_images done: {len(images)} images, {len(groups)} camera groups",
@@ -174,17 +175,53 @@ class PrepareImages(Stage):
         progress_span: ProgressSpan,
     ) -> dict:
         width, height = int(source["width"]), int(source["height"])
-        focal = width / 2.0 / 1.75
-        params = [focal, focal, width / 2.0, height / 2.0, 0.0, 0.0, 0.0, 0.0]
+        calibration = inspection.get("offset_v3") or {}
+        if not calibration.get("valid") or len(calibration.get("lenses", [])) < 2:
+            raise RuntimeError(f"source {source['label']}: valid dual-fisheye calibration is required")
+        lenses = [calib.MeiLensCalibration(**lens) for lens in calibration["lenses"][:2]]
+        if (
+            lenses[0].ref_image_width != lenses[1].ref_image_width
+            or lenses[0].ref_image_height != lenses[1].ref_image_height
+            or lenses[0].ref_image_width <= 0
+        ):
+            raise RuntimeError(f"source {source['label']}: inconsistent dual-lens reference sizes")
+        native_width = lenses[0].ref_image_width // 2
+        intrinsics = [
+            projection.lens_to_intrinsics(
+                lens,
+                lens_index=index,
+                single_lens_native_width=native_width,
+                target_width=width,
+                target_height=height,
+            )
+            for index, lens in enumerate(lenses)
+        ]
+        approximations = [projection.approximate_opencv_fisheye(intr) for intr in intrinsics]
+        if any(approximation.maximum_error_px > 8.0 for approximation in approximations):
+            raise RuntimeError(
+                f"source {source['label']}: MEI to OPENCV_FISHEYE fit exceeds 8 px; "
+                "use pinhole_rig instead"
+            )
+        params_by_sensor = {
+            sensor: list(approximations[index].params) for index, sensor in enumerate(("front", "back"))
+        }
         prefix = f"sources/{source['id']}/"
-        group_id = f"{source['id']}:native-fisheye"
+        group_ids = {sensor: f"{source['id']}:native-fisheye:{sensor}" for sensor in ("front", "back")}
         region = fisheye_region.load_region(ctx.project_dir, source["id"])
+        effective_regions = {}
+        for index in range(2):
+            requested = region[f"lens{index}"]
+            safe_radius = approximations[index].forward_radius_px / width * 0.995
+            effective_regions[f"lens{index}"] = {
+                **requested,
+                "r": min(float(requested["r"]), safe_radius),
+            }
         images = []
-        image_names = []
+        image_names = {"front": [], "back": []}
         for frame in source["frames"]:
             for lens, sensor in ((0, "front"), (1, "back")):
                 name = f"{prefix}{sensor}/frame_{frame['index']:06d}.jpg"
-                image_names.append(name)
+                image_names[sensor].append(name)
                 images.append(
                     _catalog_image(
                         source,
@@ -193,16 +230,13 @@ class PrepareImages(Stage):
                         path=frame[f"lens{lens}"],
                         width=width,
                         height=height,
-                        camera_group_id=group_id,
+                        camera_group_id=group_ids[sensor],
                         sensor_id=sensor,
                         projection_name="dual_fisheye",
-                        valid_region={"kind": "circle", **region[f"lens{lens}"]},
+                        valid_region={"kind": "circle", **effective_regions[f"lens{lens}"]},
                     )
                 )
-        calibration = inspection.get("offset_v3") or {}
-        baseline = native_rig.DEFAULT_BASELINE_M
-        if calibration.get("valid") and calibration.get("lenses"):
-            baseline = native_rig.baseline_from_lens_centers(calibration["lenses"])
+        baseline = native_rig.baseline_from_lens_centers(calibration["lenses"])
         progress_span.tick(
             1.0,
             message=f"{source['label']}: {len(images)} native fisheye images catalogued",
@@ -213,18 +247,35 @@ class PrepareImages(Stage):
             "images": images,
             "camera_groups": [
                 _camera_group(
-                    group_id,
+                    group_ids[sensor],
                     source["id"],
                     "OPENCV_FISHEYE",
-                    params,
-                    image_names,
-                    single_camera=False,
-                    single_camera_per_folder=True,
-                    refine_intrinsics=True,
+                    params_by_sensor[sensor],
+                    image_names[sensor],
+                    single_camera=True,
+                    single_camera_per_folder=False,
+                    refine_intrinsics=False,
                 )
+                for sensor in ("front", "back")
             ],
-            "rigs": native_rig.build_physical_rig_config("OPENCV_FISHEYE", params, baseline, prefix=prefix),
+            "rigs": native_rig.build_physical_rig_config(
+                "OPENCV_FISHEYE", params_by_sensor, baseline, prefix=prefix
+            ),
             "outputs": [],
+            "calibration": {
+                "method": "offset_v3_mei_to_opencv_fisheye",
+                "forward_hemisphere_only": True,
+                "lenses": [
+                    {
+                        "sensor": sensor,
+                        "rms_error_px": approximations[index].rms_error_px,
+                        "maximum_error_px": approximations[index].maximum_error_px,
+                        "forward_radius_px": approximations[index].forward_radius_px,
+                        "effective_valid_radius_ratio": effective_regions[f"lens{index}"]["r"],
+                    }
+                    for index, sensor in enumerate(("front", "back"))
+                ],
+            },
         }
 
     def _prepare_dual_fisheye_pinhole(
@@ -412,9 +463,7 @@ class PrepareImages(Stage):
             "outputs": outputs,
         }
 
-    def _prepare_perspective(
-        self, ctx: StageContext, source: dict, progress_span: ProgressSpan
-    ) -> dict:
+    def _prepare_perspective(self, ctx: StageContext, source: dict, progress_span: ProgressSpan) -> dict:
         groups_by_signature: dict[tuple, dict] = {}
         images = []
         outputs = []

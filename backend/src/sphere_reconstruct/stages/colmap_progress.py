@@ -37,14 +37,31 @@ def counted_progress(ctx: StageContext, prefix: str, pattern: str, *, low: float
 
 
 def matching_progress(ctx: StageContext, *, low: float, high: float):
+    index_pattern = re.compile(r"Indexing image \[(\d+)/(\d+)\]", re.I)
+    iteration_pattern = re.compile(r"Iteration \[(\d+)/(\d+)\]", re.I)
+    batch_pattern = re.compile(r"Processing batch \[(\d+)/(\d+)\]", re.I)
     image_pattern = re.compile(r"(?:Processing|Matching) (?:image|file) \[(\d+)/(\d+)\]", re.I)
     block_pattern = re.compile(
         r"(?:Processing|Matching) block \[(\d+)/(\d+)\s*,\s*(\d+)/(\d+)\]", re.I
     )
-    state = {"fraction": 0.0}
+    state = {
+        "fraction": 0.0,
+        "indexing_seen": False,
+        "iteration": 1,
+        "iteration_total": 1,
+    }
+    indexing_weight = 0.3
 
-    def emit_fraction(fraction: float, message: str) -> None:
-        state["fraction"] = max(state["fraction"], min(1.0, fraction))
+    def emit_fraction(fraction: float, message: str, *, indexing: bool = False) -> None:
+        phase_fraction = min(1.0, fraction)
+        if indexing:
+            state["indexing_seen"] = True
+            combined = indexing_weight * phase_fraction
+        elif state["indexing_seen"]:
+            combined = indexing_weight + (1.0 - indexing_weight) * phase_fraction
+        else:
+            combined = phase_fraction
+        state["fraction"] = max(state["fraction"], combined)
         ctx.progress.tick(
             progress=low + (high - low) * state["fraction"],
             message=message,
@@ -56,6 +73,28 @@ def matching_progress(ctx: StageContext, *, low: float, high: float):
         if not line.strip():
             return
         ctx.progress.tick(message=f"[matching] {line}")
+        index = index_pattern.search(line)
+        if index is not None:
+            current, total = map(int, index.groups())
+            emit_fraction(current / max(1, total), line, indexing=True)
+            return
+        iteration = iteration_pattern.search(line)
+        if iteration is not None:
+            current, total = map(int, iteration.groups())
+            state["iteration"] = current
+            state["iteration_total"] = max(1, total)
+            emit_fraction((current - 1) / state["iteration_total"], line)
+            return
+        batch = batch_pattern.search(line)
+        if batch is not None:
+            current, total = map(int, batch.groups())
+            fraction = (
+                state["iteration"]
+                - 1
+                + current / max(1, total)
+            ) / state["iteration_total"]
+            emit_fraction(fraction, line)
+            return
         block = block_pattern.search(line)
         if block is not None:
             first, first_total, second, second_total = map(int, block.groups())

@@ -45,7 +45,7 @@ def baseline_from_lens_centers(lenses: list[dict]) -> float:
 
 def build_physical_rig_config(
     camera_model_name: str,
-    camera_params: list[float],
+    camera_params_by_sensor: dict[str, list[float]],
     baseline_m: float,
     *,
     prefix: str = "",
@@ -59,12 +59,12 @@ def build_physical_rig_config(
                     "image_prefix": f"{prefix}{FRONT_PREFIX}",
                     "ref_sensor": True,
                     "camera_model_name": camera_model_name,
-                    "camera_params": list(camera_params),
+                    "camera_params": list(camera_params_by_sensor["front"]),
                 },
                 {
                     "image_prefix": f"{prefix}{BACK_PREFIX}",
                     "camera_model_name": camera_model_name,
-                    "camera_params": list(camera_params),
+                    "camera_params": list(camera_params_by_sensor["back"]),
                     "cam_from_rig_rotation": list(BACK_QUAT_WXYZ),
                     "cam_from_rig_translation": [0.0, 0.0, -b],
                 },

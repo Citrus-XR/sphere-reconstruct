@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import struct
 import subprocess
 import sys
 from collections.abc import Callable
@@ -28,14 +29,14 @@ def resolve_colmap_bin(explicit: str | None) -> str:
         if not p.exists():
             raise FileNotFoundError(f"colmap binary not found: {explicit}")
         return str(p)
-    found = shutil.which("colmap")
-    if found:
-        return found
     record = _auto_installed_colmap_record()
     if record.is_file():
         installed = Path(record.read_text(encoding="utf-8").strip())
         if installed.is_file():
             return str(installed)
+    found = shutil.which("colmap")
+    if found:
+        return found
     raise FileNotFoundError(
         "colmap not found in PATH or .runtime installer record; "
         "set binaries.colmap in config.toml or use the start script"
@@ -44,6 +45,40 @@ def resolve_colmap_bin(explicit: str | None) -> str:
 
 def _auto_installed_colmap_record() -> Path:
     return Path(__file__).resolve().parents[4] / ".runtime" / "colmap-path.txt"
+
+
+def resolve_vocab_tree_path(explicit: str | None) -> Path | None:
+    if explicit:
+        path = Path(explicit)
+        if not path.is_file():
+            raise FileNotFoundError(f"vocabulary tree not found: {explicit}")
+        _validate_vocab_tree(path)
+        return path
+    record = _auto_installed_vocab_tree_record()
+    if not record.is_file():
+        return None
+    installed = Path(record.read_text(encoding="utf-8").strip())
+    if not installed.is_file():
+        return None
+    _validate_vocab_tree(installed)
+    return installed
+
+
+def _auto_installed_vocab_tree_record() -> Path:
+    return Path(__file__).resolve().parents[4] / ".runtime" / "vocab-tree-path.txt"
+
+
+def _validate_vocab_tree(path: Path) -> None:
+    with path.open("rb") as source:
+        header = source.read(12)
+    if len(header) != 12:
+        raise ValueError(f"vocabulary tree header is truncated: {path}")
+    version, descriptor_dimension, embedding_dimension = struct.unpack("<iii", header)
+    if version not in {1, 2} or descriptor_dimension != 128 or embedding_dimension != 64:
+        raise ValueError(
+            "vocabulary tree is incompatible with COLMAP 4.1 FAISS SIFT retrieval: "
+            f"{path}; header=({version}, {descriptor_dimension}, {embedding_dimension})"
+        )
 
 
 @dataclass
@@ -303,6 +338,33 @@ def exhaustive_matcher(
         "exhaustive_matcher",
         "--database_path",
         str(database_path),
+        "--FeatureMatching.use_gpu",
+        "1" if use_gpu else "0",
+        "--FeatureMatching.type",
+        matching_type,
+    ]
+    if extra_args:
+        args += extra_args
+    return run_command(colmap_bin, args, log_path=log_path, on_line=on_line)
+
+
+def transitive_matcher(
+    colmap_bin: str,
+    *,
+    database_path: Path,
+    num_iterations: int = 1,
+    use_gpu: bool = True,
+    matching_type: str = "SIFT_BRUTEFORCE",
+    extra_args: list[str] | None = None,
+    log_path: Path | None = None,
+    on_line: Callable[[str], None] | None = None,
+) -> CommandResult:
+    args = [
+        "transitive_matcher",
+        "--database_path",
+        str(database_path),
+        "--TransitiveMatching.num_iterations",
+        str(num_iterations),
         "--FeatureMatching.use_gpu",
         "1" if use_gpu else "0",
         "--FeatureMatching.type",

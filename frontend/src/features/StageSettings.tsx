@@ -282,7 +282,7 @@ export const StageSettings = ({
           )}
           <div className="ctl">
             <label>{t(featureMask ? 'lblFeaturePrompt' : 'lblTrainingPrompt')}</label>
-            <input className="input" placeholder="person,tripod,..." value={maskPrompt}
+            <input className="input" placeholder="person,animal,..." value={maskPrompt}
               onChange={e => setParams(featureMask
                 ? { featureMaskPrompt: e.target.value }
                 : { trainingMaskPrompt: e.target.value })} />
@@ -316,7 +316,10 @@ export const StageSettings = ({
           <div className="ctl">
             <label>{t('lbl_backend')}</label>
             <select className="input" value={params.featureType}
-              onChange={e => setParams({ featureType: e.target.value as StageParams['featureType'], qualityPreset: 'custom' })}>
+              onChange={e => {
+                const featureType = e.target.value as StageParams['featureType']
+                setParams({ featureType, loopClosure: featureType === 'SIFT', qualityPreset: 'custom' })
+              }}>
               <option value="ALIKED_N16ROT">ALIKED N16ROT</option>
               <option value="ALIKED_N32">ALIKED N32</option>
               <option value="SIFT">SIFT</option>
@@ -369,7 +372,7 @@ export const StageSettings = ({
             </select>
             <div className="hint">{t('hint_pairing')}</div>
           </div>
-          {params.pairing === 'sequential' && <>
+          {(params.pairing === 'sequential' || (params.pairing === 'auto' && sources.length === 1)) && <>
             <Slider label={t('lbl_overlap')} hint={t('hint_overlap')} min={2} max={20} step={1}
               value={params.overlap} onChange={value => setParams({ overlap: Math.round(value) })} fmt={value => `${value}`} />
             <div className="ctl">
@@ -378,6 +381,13 @@ export const StageSettings = ({
                   onChange={() => setParams({ loopClosure: !params.loopClosure })} /> {t('lbl_loopClosure')}
               </label>
               <div className="hint">{t('hint_loopClosure')}</div>
+            </div>
+            <div className="ctl">
+              <label style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
+                <input type="checkbox" checked={params.transitiveMatching}
+                  onChange={() => setParams({ transitiveMatching: !params.transitiveMatching })} /> {t('lbl_transitiveMatching')}
+              </label>
+              <div className="hint">{t('hint_transitiveMatching')}</div>
             </div>
           </>}
           <NumField label={t('f_maxMatches')} hint={t('hint_maxMatches')} value={params.maxNumMatches}
@@ -638,17 +648,16 @@ const StageResult = ({ stage, extra }: { stage: string; extra: Record<string, un
   const { t } = useSettings()
   const [expanded, setExpanded] = useState(false)
   const statisticsId = useId()
-  const seen = new Set<string>()
   const rows: Array<[string, string, string]> = []
   const visit = (value: unknown, path: string[]) => {
     if (value == null) return
     if (Array.isArray(value)) {
-      const leaf = path.at(-1) ?? ''
-      const signature = `${leaf}:${JSON.stringify(value)}`
-      if (seen.has(signature)) return
-      seen.add(signature)
       const simple = value.every(item => ['string', 'number', 'boolean'].includes(typeof item))
-      rows.push([path.join('.'), statLabel(t, leaf), simple ? (value.length ? value.join(', ') : '0') : String(value.length)])
+      if (simple) {
+        rows.push([path.join('.'), statPathLabel(t, path), value.length ? value.join(', ') : '0'])
+        return
+      }
+      value.forEach((item, index) => visit(item, [...path, `#${index + 1}`]))
       return
     }
     if (typeof value === 'object') {
@@ -657,10 +666,7 @@ const StageResult = ({ stage, extra }: { stage: string; extra: Record<string, un
     }
     if (typeof value !== 'string' && typeof value !== 'number' && typeof value !== 'boolean') return
     const leaf = path.at(-1) ?? ''
-    const signature = `${leaf}:${String(value)}`
-    if (seen.has(signature)) return
-    seen.add(signature)
-    rows.push([path.join('.'), statLabel(t, leaf), formatStatistic(t, leaf, value)])
+    rows.push([path.join('.'), statPathLabel(t, path), formatStatistic(t, leaf, value)])
   }
   visit(extra, [stage])
   if (!rows.length) return null
@@ -678,6 +684,14 @@ const StageResult = ({ stage, extra }: { stage: string; extra: Record<string, un
         ))}
       </dl>}
   </div>
+}
+
+const statPathLabel = (t: (key: string) => string, path: string[]): string => {
+  const contexts = path.slice(1, -1).flatMap((segment, index, segments) => {
+    if (!segment.startsWith('#') || index === 0) return []
+    return [`${statLabel(t, segments[index - 1])} ${segment}`]
+  })
+  return [...contexts, statLabel(t, path.at(-1) ?? '')].join(' · ')
 }
 
 const statLabel = (t: (key: string) => string, key: string): string => {
@@ -700,11 +714,15 @@ const formatStatistic = (t: (key: string) => string, key: string, value: string 
     while (amount >= 1024 && index < units.length - 1) { amount /= 1024; index += 1 }
     return `${amount.toFixed(index ? 2 : 0)} ${units[index]}`
   }
+  if (key === 'maximum_to_p95_ratio' || key === 'trajectory_maximum_to_p95_ratio'
+    || key === 'max_step_ratio_limit')
+    return `${Number(value.toPrecision(6)).toLocaleString()}×`
   if (key.endsWith('_ratio') || key.endsWith('_coverage')) return `${(value * 100).toFixed(2)}%`
   if (key === 'relative_mad') return `${(value * 100).toFixed(4)}%`
   if (key.endsWith('_m')) return `${value.toFixed(3)} m`
   if (key === 'scale_factor') return `${Number(value.toPrecision(8)).toLocaleString()}×`
   if (key.includes('reprojection_error')) return `${value.toFixed(4)} px`
+  if (key.endsWith('_px')) return `${value.toFixed(3)} px`
   if (key.endsWith('_deg')) return `${value.toFixed(3)}°`
   if (key.endsWith('_sec')) return `${value.toFixed(3)} s`
   if (Number.isInteger(value)) return value.toLocaleString()

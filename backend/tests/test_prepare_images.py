@@ -9,6 +9,46 @@ from sphere_reconstruct.pipeline.stage import ProgressReporter, StageContext
 from sphere_reconstruct.stages.prepare_images import PrepareImages
 
 
+def _valid_x5_calibration() -> dict:
+    common = {
+        "xi": 2.0,
+        "yaw": 0.0,
+        "pitch": 0.0,
+        "roll": 90.0,
+        "tx": 0.0,
+        "ty": 0.0,
+        "k1": 0.183,
+        "k2": 2.06,
+        "k3": -3.27,
+        "p1": 0.0,
+        "p2": 0.0,
+        "ref_image_width": 10752,
+        "ref_image_height": 5376,
+        "lens_flags": 113,
+    }
+    return {
+        "valid": True,
+        "lenses": [
+            {
+                **common,
+                "fx": 4278.3,
+                "fy": 4277.33,
+                "cx": 2694.63,
+                "cy": 2681.84,
+                "tz": 0.0,
+            },
+            {
+                **common,
+                "fx": 4296.81,
+                "fy": 4298.54,
+                "cx": 8064.92,
+                "cy": 2686.41,
+                "tz": -0.032273,
+            },
+        ],
+    }
+
+
 def test_perspective_exif_orientation_and_focal_are_normalized(tmp_path):
     project = tmp_path / "project"
     source = project / "phone.jpg"
@@ -93,6 +133,7 @@ def test_native_fisheye_and_phone_create_separate_camera_groups(tmp_path):
                 "width": 100,
                 "height": 100,
                 "count": 1,
+                "offset_v3": _valid_x5_calibration(),
                 "frames": [
                     {
                         "index": 0,
@@ -149,6 +190,15 @@ def test_native_fisheye_and_phone_create_separate_camera_groups(tmp_path):
         "SIMPLE_RADIAL",
     }
     assert len(json.loads((output / "rig_config.json").read_text())) == 1
+    native_groups = [group for group in catalog["camera_groups"] if group["camera_model"] == "OPENCV_FISHEYE"]
+    assert len(native_groups) == 2
+    assert native_groups[0]["camera_params"] != native_groups[1]["camera_params"]
+    assert all(group["refine_intrinsics"] is False for group in native_groups)
+    assert all(
+        image["valid_region"]["r"] < 0.46
+        for image in catalog["images"]
+        if image["projection"] == "dual_fisheye"
+    )
     numeric = [call[1] for call in progress_calls if call[1] is not None]
     assert numeric == sorted(numeric)
     assert numeric[-1] == 0.99
@@ -164,7 +214,7 @@ def _write_documents(project, *, sources):
     for source in sources:
         inspection = {key: value for key, value in source.items() if key != "frames"}
         if source["projection"] == "dual_fisheye":
-            inspection["offset_v3"] = {"valid": False}
+            inspection["offset_v3"] = source.get("offset_v3", {"valid": False})
         inspections.append(inspection)
     (inspect / "sources.json").write_text(json.dumps({"version": 2, "sources": inspections}))
     (extract / "manifest_frames.json").write_text(

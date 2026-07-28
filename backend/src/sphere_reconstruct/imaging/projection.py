@@ -54,6 +54,14 @@ class LensIntrinsics:
     height: int  # 実画像の高さ
 
 
+@dataclass(frozen=True)
+class OpenCVFisheyeApproximation:
+    params: tuple[float, float, float, float, float, float, float, float]
+    rms_error_px: float
+    maximum_error_px: float
+    forward_radius_px: float
+
+
 def lens_to_intrinsics(
     lens: MeiLensCalibration,
     *,
@@ -92,6 +100,56 @@ def lens_to_intrinsics(
         p2=lens.p2,
         width=target_width,
         height=target_height,
+    )
+
+
+def approximate_opencv_fisheye(
+    intr: LensIntrinsics,
+    *,
+    maximum_theta_rad: float = math.pi / 2,
+    theta_samples: int = 120,
+    azimuth_samples: int = 96,
+) -> OpenCVFisheyeApproximation:
+    """MEI calibration を COLMAP の forward-hemisphere OPENCV_FISHEYE へ近似する。"""
+    # COLMAP の perspective fisheye ray は FOV <= 180° の時だけ正しく、常に rz > 0 を返す。
+    # https://github.com/colmap/colmap/blob/a0d785fba74b2664f31edc4a29026a8b27c00f67/src/colmap/sensor/models.h#L290-L347
+    if not 0 < maximum_theta_rad <= math.pi / 2:
+        raise ValueError("OPENCV_FISHEYE approximation must stay within the forward hemisphere")
+    theta_values = np.linspace(1e-4, maximum_theta_rad, theta_samples)
+    azimuth_values = np.linspace(0.0, 2.0 * math.pi, azimuth_samples, endpoint=False)
+    theta, azimuth = np.meshgrid(theta_values, azimuth_values, indexing="ij")
+    rays = np.stack(
+        (
+            np.sin(theta) * np.cos(azimuth),
+            np.sin(theta) * np.sin(azimuth),
+            np.cos(theta),
+        ),
+        axis=-1,
+    )
+    projected, _valid = project_mei(rays.reshape(-1, 3), intr)
+    if not np.all(np.isfinite(projected)):
+        raise ValueError("MEI calibration produced non-finite forward-hemisphere coordinates")
+    u = projected[:, 0].reshape(theta.shape)
+    v = projected[:, 1].reshape(theta.shape)
+    powers = np.stack([theta**power for power in (1, 3, 5, 7, 9)], axis=-1)
+    horizontal_design = (np.cos(azimuth)[..., np.newaxis] * powers).reshape(-1, 5)
+    vertical_design = (np.sin(azimuth)[..., np.newaxis] * powers).reshape(-1, 5)
+    horizontal = np.linalg.lstsq(horizontal_design, (u - intr.cx).reshape(-1), rcond=None)[0]
+    vertical = np.linalg.lstsq(vertical_design, (v - intr.cy).reshape(-1), rcond=None)[0]
+    fx, fy = float(horizontal[0]), float(vertical[0])
+    distortion = tuple(float((horizontal[index] / fx + vertical[index] / fy) * 0.5) for index in range(1, 5))
+    radial = 1.0 + sum(distortion[index] * theta ** (2 * (index + 1)) for index in range(4))
+    predicted_u = intr.cx + fx * np.cos(azimuth) * theta * radial
+    predicted_v = intr.cy + fy * np.sin(azimuth) * theta * radial
+    error = np.hypot(predicted_u - u, predicted_v - v)
+    edge_radial = maximum_theta_rad * (
+        1.0 + sum(distortion[index] * maximum_theta_rad ** (2 * (index + 1)) for index in range(4))
+    )
+    return OpenCVFisheyeApproximation(
+        params=(fx, fy, intr.cx, intr.cy, *distortion),
+        rms_error_px=float(np.sqrt(np.mean(error**2))),
+        maximum_error_px=float(np.max(error)),
+        forward_radius_px=min(fx, fy) * edge_radial,
     )
 
 
