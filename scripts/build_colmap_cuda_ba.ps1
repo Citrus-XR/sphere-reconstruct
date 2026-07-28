@@ -355,7 +355,7 @@ Assert-NativeSuccess "COLMAP build"
 
 $InstallBin = Join-Path $ColmapInstall "bin"
 Copy-Item (Join-Path $CeresInstall "bin/*.dll") $InstallBin -Force
-Copy-Item (Join-Path $CudssPackageRoot "bin/cudss64_0.dll") $InstallBin -Force
+Copy-Item (Join-Path $CudssPackageRoot "bin/*.dll") $InstallBin -Force
 
 $VcpkgBinDirectories = @(
     (Join-Path $VcpkgRoot "installed/$Triplet/bin"),
@@ -382,6 +382,20 @@ foreach ($Pattern in $CudaRuntimePatterns) {
     Get-ChildItem $CudaBin -Filter $Pattern | Copy-Item -Destination $InstallBin -Force
 }
 
+if (-not $env:VCToolsRedistDir) {
+    throw "VCToolsRedistDir が設定されていません。Visual Studio Developer Shell から実行してください"
+}
+$MsvcRuntimeDirectories = @(
+    (Join-Path $env:VCToolsRedistDir "x64/Microsoft.VC143.CRT"),
+    (Join-Path $env:VCToolsRedistDir "x64/Microsoft.VC143.OpenMP")
+)
+foreach ($Directory in $MsvcRuntimeDirectories) {
+    if (-not (Test-Path $Directory)) {
+        throw "MSVC runtime directory がありません: $Directory"
+    }
+    Copy-Item (Join-Path $Directory "*.dll") $InstallBin -Force
+}
+
 $CeresDll = Join-Path $InstallBin "ceres.dll"
 $Dependencies = & dumpbin /DEPENDENTS $CeresDll | Out-String
 Assert-NativeSuccess "dumpbin Ceres dependency inspection"
@@ -389,8 +403,15 @@ if ($Dependencies -notmatch "cudss64_0.dll") {
     throw "The generated Ceres library is not linked to cuDSS"
 }
 $ColmapExecutable = Join-Path $InstallBin "colmap.exe"
-& $ColmapExecutable version
-Assert-NativeSuccess "COLMAP runtime smoke test"
+$OriginalPath = $env:PATH
+try {
+    $env:PATH = "$InstallBin;$env:SystemRoot\System32;$env:SystemRoot"
+    & $ColmapExecutable version
+    Assert-NativeSuccess "standalone COLMAP runtime smoke test"
+}
+finally {
+    $env:PATH = $OriginalPath
+}
 
 $Metadata = @{
     colmap_version = $ColmapTag
@@ -405,6 +426,7 @@ $Metadata = @{
     sequential_rig_pairing_fix = "COLMAP PR 4591 semantic backport"
     gpu_bundle_adjustment_dense = $true
     gpu_bundle_adjustment_sparse = $true
+    msvc_runtime_bundled = $true
 }
 $Metadata | ConvertTo-Json | Set-Content (Join-Path $ColmapInstall "sphere-colmap-capabilities.json") -Encoding utf8
 
