@@ -80,7 +80,8 @@ Doctor は次を独立した capability として表示する。
 - Ceres dense CUDA solver と cuDSS sparse CUDA solver
 - NVIDIA GPU name、driver、compute capability
 - FAISS SIFT vocabulary tree header
-- Optional SAM3 / cuDNN と jpegtran
+- COLMAP native ALIKED 用 ONNX CUDA / cuDNN runtime
+- Optional SAM3 と jpegtran
 
 `COLMAP ... with CUDA` は GPU SIFT を示すだけで、Ceres CUDA / cuDSS BA を保証しない。
 
@@ -108,6 +109,7 @@ Pinned CUDA-BA runtime:
 - Ceres 2.3 development commit `bac1127f9ef672405bd0d2d9c84e809ae89bd239`
 - CUDA 12.8
 - cuDSS 0.8.0.10
+- cuDNN 9.20.0.48、cuFFT、NVRTC、ONNX Runtime CUDA provider
 - vcpkg commit `6d9d7df564a1ccdaa994e4ad39ccd4a32360867b`
 - Native SASS: sm75 / sm80 / sm86 / sm89 / sm90、forward PTX: compute75
 - CLI only、GUI / MVS / CGAL / OpenGL off
@@ -144,12 +146,15 @@ Developer machine で失敗後の同一 build root を明示的に再利用す�
 
 Script は利用可能な最も新しい CMake 3.30+ を選び、Release try-compile を固定し、すべての native command
 終了 code を検査する。Source は pinned revision だけを shallow fetch する。Vcpkg manifest の CPU Ceres を
-除外し、custom Ceres を CUDA / CHOLMOD / SPQR / LAPACK / cuDSS 付きで 1 回だけ build する。Runtime archive
-には executable / DLL、capability metadata、COLMAP / Ceres / NVIDIA license だけを入れ、development header
-や static library は含めない。
+除外し、custom Ceres を CUDA / CHOLMOD / SPQR / LAPACK / cuDSS 付きで 1 回だけ build する。ONNX CUDA の
+transitive dependency である cuFFT / cuDNN / NVRTC と、cuSPARSE が必要とする nvJitLink も app-local にする。
+Runtime archive には executable / DLL、capability metadata、COLMAP / Ceres / NVIDIA license だけを入れ、
+development header や static library は含めない。
 
-GitHub Actions definition は `.github/workflows/build-colmap-cuda-ba.yml`。CUDA 12.8 Windows installer に存在
-しない CUDA 13 専用 component 名 `crt` / `nvvm` は指定しない。
+GitHub Actions definition は `.github/workflows/build-colmap-cuda-ba.yml`。Build job は全 PE の通常・delay-load
+import を再帰検査し、Ceres、cuDSS、ONNX CUDA provider を明示的に `LoadLibraryExW` する。次の clean Windows
+job が archive だけを展開して同じ検査と `colmap version` を再実行し、両方通った artifact だけを release
+する。CUDA 12.8 Windows installer に存在しない CUDA 13 専用 component 名 `crt` / `nvvm` は指定しない。
 
 ## FFmpeg hardware decode
 
@@ -218,8 +223,8 @@ SHA-256 96ca8ec8ea60b1f73465aaf2c401fd3b3ca75cdba2d3c50d6a2f6f760f275ddc
 
 3,388 images 級では 32K より識別力の高い 256K tier を使う。Indexing は COLMAP の逐次外側 loop と
 FAISS CPU search であり、この phase の GPU utilization が低いのは正常。GPU SIFT matching は indexing
-完了後に始まる。Transitive matching を使う rig では、最終 graph に対する rig verification だけを 1 回
-実行する。
+完了後に始まる。Rig verification は小さい sequential / loop graph に 1 回だけ適用し、その後の transitive
+extension では individual two-view geometry を使って generalized RANSAC の爆発を避ける。
 
 ## SAM3
 
@@ -292,6 +297,8 @@ colmap.capabilities.gpu_bundle_adjustment_dense = true
 colmap.capabilities.gpu_bundle_adjustment_sparse = true
 colmap.ceres_cuda = true
 colmap.cudss = 0.8.0.10
+colmap.cudnn = 9.20.0.48
+colmap.capabilities.onnx_cuda_runtime = true
 ```
 
 Remote deployment は scheduled listener とその worker process tree だけを停止し、machine 上の無関係な

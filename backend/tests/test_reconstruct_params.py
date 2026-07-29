@@ -1,6 +1,7 @@
 """分割した SfM stages の parameter contract を検証する."""
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -41,13 +42,98 @@ def test_matching_defaults_to_mixed_source_auto_pairing():
     assert params["transitive_iterations"] == 1
 
 
-def test_rig_verification_runs_once_after_transitive_matching():
+def test_rig_verification_args_are_only_emitted_for_a_rig():
     assert _rig_verification_args(True, enabled=False) == []
     assert _rig_verification_args(True, enabled=True) == [
         "--FeatureMatching.rig_verification",
         "1",
     ]
     assert _rig_verification_args(False, enabled=True) == []
+
+
+def test_rig_verification_runs_on_pairing_graph_before_transitive(tmp_path: Path, monkeypatch):
+    from sphere_reconstruct.stages import match_features as module
+
+    extract_dir = tmp_path / "extract_features"
+    extract_dir.mkdir()
+    (extract_dir / "database.db").write_bytes(b"features")
+    output = tmp_path / ".match_features.tmp"
+    output.mkdir()
+    spec = InputSpec(
+        version=3,
+        reconstruction_mode="native_fisheye",
+        image_count=10,
+        source_count=1,
+        primary_source_id="primary",
+        primary_image_names=[],
+        sources=[{"id": "primary", "label": "Primary", "role": "primary"}],
+        images=[],
+        feature_batches=[],
+        image_path="images",
+        mask_path=None,
+        feature_masks_enabled=False,
+        rig_config_path="rig_config.json",
+        refine_intrinsics=False,
+        refine_rig=False,
+        multiple_models=False,
+    )
+    calls = {}
+
+    monkeypatch.setattr(module.InputSpec, "read", lambda _path: spec)
+    monkeypatch.setattr(
+        module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            binaries=SimpleNamespace(colmap="colmap", vocab_tree="tree"),
+            aliked=SimpleNamespace(matcher_path=""),
+        ),
+    )
+    monkeypatch.setattr(module.colmap_runner, "resolve_colmap_bin", lambda _value: "colmap")
+    monkeypatch.setattr(
+        module.colmap_runner,
+        "resolve_vocab_tree_path",
+        lambda _value: tmp_path / "tree.bin",
+    )
+    monkeypatch.setattr(
+        module.colmap_runner,
+        "sequential_matcher",
+        lambda _binary, **kwargs: calls.setdefault("pairing", kwargs),
+    )
+    monkeypatch.setattr(
+        module.colmap_runner,
+        "transitive_matcher",
+        lambda _binary, **kwargs: calls.setdefault("transitive", kwargs),
+    )
+    monkeypatch.setattr(
+        module,
+        "_matching_summary",
+        lambda *_args: {
+            "raw_pairs": 10,
+            "verified_pairs": 8,
+            "minimum_inliers": 20,
+            "average_inliers": 30.0,
+            "maximum_inliers": 40,
+            "total_inliers": 240,
+            "cross_source_verified_pairs": 0,
+            "source_pair_counts": {},
+        },
+    )
+    context = SimpleNamespace(
+        project_dir=tmp_path,
+        stage_out_dir=output,
+        params=MatchFeatures().normalize_params({"pairing": "sequential"}),
+        progress=ProgressReporter(lambda *_args: None),
+        inputs_for=lambda _stage: [],
+    )
+
+    manifest = MatchFeatures().execute(context)
+
+    assert calls["pairing"]["extra_args"][-2:] == [
+        "--FeatureMatching.rig_verification",
+        "1",
+    ]
+    assert "--FeatureMatching.rig_verification" not in calls["transitive"]["extra_args"]
+    assert manifest.extra["rig_verification_scope"] == "pairing_graph"
 
 
 def test_reconstruction_enables_both_ceres_gpu_solvers_together_by_default():

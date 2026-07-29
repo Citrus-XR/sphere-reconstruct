@@ -1,31 +1,13 @@
 # sphere-reconstruct
 
-Insta360 INSV、equirectangular 360° video/image、perspective video、phone photo を同じ
-COLMAP reconstruction に統合し、LichtFeld Studio が直接読める dataset を生成する local Web
-application。
+Insta360 INSV、stitch 済み 360° video / image、通常 video、phone photo を同じ COLMAP
+reconstruction へ統合し、LichtFeld Studio が直接 load できる dataset を作る local Web application。
 
-Project は 1 個の primary source と任意個の detail source を持つ。Container、media、projection、
-camera group、mask purpose を別 field として保持するため、異なる camera model を 1 個の COLMAP
-database と reconstruction に混在できる。
+Project は 1 個の primary source と任意個の supplemental source を持つ。Media container、projection、
+physical camera、rig、mask purpose を別 data として保持するため、魚眼、ERP、通常 camera を同じ scene に
+混在できる。処理は独立 Step に分かれ、重い成果物だけを個別に clear / regenerate できる。
 
-## Supported sources
-
-| Input | Media | Projection / COLMAP | Role |
-|---|---|---|---|
-| Insta360 `.insv` | Video | 2× `OPENCV_FISHEYE` + physical rig | Primary / detail |
-| Stitched 360° video | Video | `EQUIRECTANGULAR` | Primary / detail |
-| Stitched 360° image folder | Images | `EQUIRECTANGULAR` | Primary / detail |
-| Perspective / phone video | Video | `SIMPLE_RADIAL` | Primary / detail |
-| Perspective / phone image folder | Images | EXIF group ごとの `SIMPLE_RADIAL` | Primary / detail |
-
-別メーカーの 360 camera は stitched ERP として追加できる。Raw dual-fisheye container は camera 固有の
-calibration adapter が必要で、native adapter は現在 Insta360 INSV に対応する。
-
-離散 phone photo に時間同期は不要だが、primary source と重なる texture と parallax が必要。Detail が
-primary component へ接続しない場合は source registration statistics に表示し、primary の quality gate
-とは分離する。
-
-## Install and start
+## Quick start
 
 ### Windows
 
@@ -33,16 +15,23 @@ primary component へ接続しない場合は source registration statistics に
 .\scripts\start-windows.ps1
 ```
 
-または:
+Command Prompt では `scripts\start-windows.cmd`。NVIDIA GPU / driver / compute capability を診断し、
+必要な COLMAP runtime、jpegtran、FAISS vocabulary tree を固定 SHA-256 で自動導入する。
 
-```cmd
-scripts\start-windows.cmd
+SAM3 も導入する場合:
+
+```powershell
+$env:SPHERE_WITH_SAM3="1"
+.\scripts\start-windows.ps1
 ```
 
 ### Linux
 
+COLMAP 4.1+、FFmpeg、FFprobe を system package で用意する。
+
 ```bash
 ./scripts/start-linux.sh
+SPHERE_WITH_SAM3=1 ./scripts/start-linux.sh
 ```
 
 ### macOS
@@ -52,73 +41,116 @@ brew install colmap ffmpeg
 ./scripts/start-macos.sh
 ```
 
-`http://127.0.0.1:8787` を開く。Start script は frontend build、uv dependency sync、Doctor、server
-起動を行う。Windows で COLMAP が無ければ official archive を固定 SHA-256 で導入する。独立した
-`glomap` executable は使わず、COLMAP 4.1 の `global_mapper` を使う。
-
-SAM3 を使う場合:
-
-```bash
-SPHERE_WITH_SAM3=1 ./scripts/start-linux.sh
-```
-
-```powershell
-$env:SPHERE_WITH_SAM3="1"
-.\scripts\start-windows.ps1
-```
-
-Platform / GPU の詳細は [docs/setup-gpu.md](docs/setup-gpu.md) を参照する。
-
-## Workflow and independent Steps
-
-Source Inspector で source type と projection を確認して path を選ぶ。拡張子だけで普通の MP4 を
-360° と判定しない。最初の source は primary、追加 source は detail になり、primary は後から
-切り替えられる。
+起動後は `http://127.0.0.1:8787` を開く。Start script は frontend build、uv sync、dependency install、
+Doctor、server の順に実行し、native command が失敗した時点で停止する。
 
 ```text
-Inspect every source
-  -> extract video frames / collect still images
-  -> confirm source-specific fisheye region
-  -> prepare canonical images and camera groups
-       ├─> Feature-mask Step ─> feature extraction / matching / SfM
-       └─> Training-mask Step ───────────────────────────────┐
-  -> primary-source IMU gravity alignment                   │
-  -> export registered images + exactly one resolved mask <-┘
+GET /api/system/doctor
+cd backend && uv run sphere-doctor
 ```
 
-各 Step は個別に生成、再生成、クリアできる。Source 構成を変更すると source branch と aggregate
-reconstruction を dependency graph に従って invalidate する。Scene Hierarchy の photo は source ごとに
-独立して折り畳める。Step statistics は Inspector で既定折り畳み。
+Doctor は workspace、filesystem roots、actual FFmpeg decoder、COLMAP 4.1、Ceres CUDA / cuDSS、FAISS tree、
+jpegtran、SAM3 を検査する。Platform / GPU の詳細は [docs/setup-gpu.md](docs/setup-gpu.md)。
 
-Frame extraction は video source だけを decode する。離散画像 folder は original file を capture として
-直接 catalog し、混合 project でも video source だけに frame-selection parameter を適用する。
+独立 `glomap.exe` は不要。COLMAP 4.1 に統合された `global_mapper` を使い、Windows start script が
+COLMAP runtime 自体を取得する。
+
+## Supported sources
+
+| Input | Media | COLMAP camera | Role |
+|---|---|---|---|
+| Insta360 `.insv` | Video | 2× `OPENCV_FISHEYE` + physical rig | Primary / supplemental |
+| Stitch 済み 360° video | Video | `EQUIRECTANGULAR` | Primary / supplemental |
+| Stitch 済み 360° image folder | Images | `EQUIRECTANGULAR` | Primary / supplemental |
+| 通常 / phone video | Video | `SIMPLE_RADIAL` | Primary / supplemental |
+| 通常 / phone image folder | Images | EXIF group ごとの `SIMPLE_RADIAL` | Primary / supplemental |
+
+別メーカーの 360 camera は stitched ERP としてすぐ追加できる。Raw dual-fisheye は camera 固有の
+calibration adapter が必要で、native adapter は現在 Insta360 INSV に対応する。
+
+Still folder は frame extraction を通らない。混合 project では video source だけを decode / select し、
+still は original file を capture として catalog する。Source group は Scene Hierarchy で個別に折り畳める。
+Phone photo に time sync は不要だが、primary source と共通 texture、parallax、cross-source match が必要。
+
+## Pipeline Steps
+
+```text
+Sources
+  -> inspect_source
+  -> extract_frames                 # video だけ。still folder は収集
+  -> fisheye valid-region editor    # 任意 frame / front / back
+  -> prepare_images                 # canonical images、camera groups、rigs
+       ├─ generate_feature_masks -> extract_features -> match_features -> reconstruct
+       └─ generate_training_masks ---------------------------------------------┐
+  -> align_reconstruction           # rotation only                            │
+  -> restore_metric_scale           # physical rig baseline -> meters          │
+  -> position_ground                # trajectory-local ground -> Y=0           │
+  -> export_dataset <---------------- resolved training / feature mask ---------┘
+```
+
+| Step | Output | 下流 invalidation |
+|---|---|---|
+| Source inspection | container、calibration、IMU、source metadata | Source branch 全体 |
+| Frame extraction | selected captures | Prepare 以降 |
+| Image preparation | canonical images、camera catalog、rig | Masks / feature / SfM 以降 |
+| Feature masks | SfM 用 mask artifact | Feature / match / SfM / export |
+| Training masks | final training 用 mask artifact | Export だけ |
+| Feature extraction | database、descriptors、input workspace | Match 以降 |
+| Matching | verified two-view graph | SfM 以降 |
+| Sparse reconstruction | registered cameras / points | Alignment 以降 |
+| Gravity alignment | rotation 済み sparse model | Scale 以降 |
+| Restore real size | meter-scale sparse model | Ground / export |
+| Position from predicted ground | origin 補正済み model | Export |
+| Export | LFStudio dataset root、preview、configs | なし |
+
+Artifact は temporary directory へ書き、成功時だけ atomic replace する。Inspector statistics は default で
+折り畳む。Object array を含む全統計を展開でき、Photo / Dataset Camera Inspector は共通 field と mask
+channel を同じ形式で表示する。
 
 ## Progress contract
 
-Progress は process memory ではなく SQLite event stream を正とする。Page refresh、WebSocket reconnect、
-別 browser から開始した job でも `/stages` snapshot から現在値と activity message を復元する。総量が
-まだ分からない処理は 0% と偽装せず indeterminate ring を表示する。数値 progress は Step 全体で単調、
-artifact の atomic publish が完了するまでは 99%、manifest / state 更新後だけ 100% になる。
+Progress の正本は SQLite event stream。Page refresh、WebSocket reconnect、別 browser で開始した job でも
+`/stages` snapshot から percentage と activity を復元する。
 
-| Step | Reported phases |
-|---|---|
-| Inspect | source fingerprint activity、MP4/footer、calibration、IMU、source completion |
-| Frame extraction | decoder probe、candidate decode、candidate score、optical flow、final output |
-| Image preparation | source、image、cubemap view rendering |
-| Feature / Training masks | model load、image、prompt、mask write、生成済み画像の live preview |
-| Feature extraction | input workspace、camera-group weighted COLMAP extraction、rig setup |
-| Matching | database copy、image/block counters、summary |
-| Reconstruction | database copy、view-graph calibration、Mapper phase / retry、quality gate |
-| Alignment | model / IMU load、coarse/fine time-offset search、transform、preview |
-| Export | registered image/mask copy、image/mask validation、config、atomic publish |
+- 数値 progress は Step 全体で単調
+- 総量不明 phase は 0% と偽装せず indeterminate 表示
+- Artifact publish 前は最大 99%、manifest / project state 更新後だけ 100%
+- Late event は job ID で分離
+- FFmpeg / COLMAP の image、block、batch、iteration counter を解析
+- FAISS indexing、transitive iteration、SAM3 prompt / image を個別表示
+- SAM3 PNG は atomic write 後すぐ preview index へ公開
 
-細かい counter は Console を埋めない `progress` event、開始・完了・警告・失敗は残る `log` event とする。
-Late event は job ID で分離し、前の run の percentage を新しい run へ混ぜない。
+## Default workflow
 
-## Fast frame extraction
+General default は X5 indoor / outdoor と mixed phone-photo test の実測を基準にする。
 
-`frame_extraction.hwaccel=auto` は FFmpeg が列挙した backend を信用するだけでなく、実 source の 1 frame
-を decode して成功した backend を選ぶ。専用 NVIDIA machine では次を推奨する。
+| Category | Default | Reason |
+|---|---|---|
+| Reconstruction mode | Native fisheye | Derived pinhole を作らず source pixel を維持 |
+| Feature | SIFT | ALIKED より速く、再投影誤差も良かった |
+| Matcher | Brute-force | SIFT の安定経路 |
+| Pairing | Auto | Single=Sequential、small mixed=Exhaustive、large mixed=Vocab-tree |
+| Loop closure | On | 周回 video の drift を抑える |
+| Transitive | 1 iteration | 3-view track を作り、候補 pair の指数的膨張を避ける |
+| View-graph calibration | Auto | Unknown intrinsics のみ。固定 physical calibration は skip |
+| Mapper | Global + gated fallback | Global を試し、失敗時は original DB から Incremental |
+| BA GPU | Capability dependent | Ceres CUDA + cuDSS の両方がある時だけ On |
+| Alignment | IMU rotation | Scale を変更しない |
+| Scale | Physical rig baseline | IMU 二重積分を使わない |
+| Ground | Trajectory-local median | 水面 / roof / point density bias を抑える |
+| LFStudio | MRNF + GUT + masks + PPISP controller | Distorted camera と appearance 差を扱う |
+
+### Quality presets
+
+| Preset | Feature max edge | Features / image | Matches / pair | BA local / global |
+|---|---:|---:|---:|---:|
+| Draft | 1536 | 4096 | 8192 | 15 / 50 |
+| Standard | 2048 | 8192 | 16384 | 25 / 100 |
+| High | 3072 | 16384 | 32768 | 40 / 200 |
+
+Standard が general default。High は large outdoor / weak texture の final run 用で、時間と memory が増える。
+
+## Frame extraction and speed
 
 ```toml
 [frame_extraction]
@@ -127,145 +159,234 @@ require_hwaccel = true
 score_workers = 0
 ```
 
-`require_hwaccel=true` は hardware probe failure を明示的な Step error にし、software へ silently fallback
-しない。`score_workers=0` は logical CPU 全数を candidate scoring に使う。OpenCV worker は各 1 thread、
-SIFT instance は worker-local とし、nested oversubscription と thread-unsafe sharing を避ける。Optical flow
-phase では OpenCV の machine-wide thread count を復元する。
+`auto` は FFmpeg の method list だけを信用せず actual source の 1 frame で decoder を probe する。
+`require_hwaccel=true` は failure を明示 error にし、software fallback を隠さない。INSV は 2 video stream を
+1 process / 1 demux pass で decode し、採用 candidate JPEG を再 encode しない。
 
-INSV spatial mode は candidate decode の時点で 2 stream を同じ FFmpeg / demux pass から出力する。
-Selection 後は採用 pair を rename して正式 output にするため、同じ巨大 INSV を final output 用に再走査
-しない。Interval / non-cached path も 2 個の FFmpeg process ではなく、1 process / 1 file read で両 lens
-を出力する。
+RTX 4070 Ti、3840×3840 HEVC、35.96 s sample:
 
-### Measured decode evidence
+| Decoder | Speed | CUDA / software pixel difference |
+|---|---:|---:|
+| CUDA | **8.98× realtime** | MAE 0、maximum 0 |
+| Software HEVC | 0.85× realtime | reference |
 
-RTX 4070 Ti、3840×3840 HEVC stream、35.96 s sample の同条件 decode:
+旧 parktest extraction は software decode と lens ごとの重複 I/O により 1694 captures で 3509.906 s。
+これは修正前 baseline で、現在の expected path ではない。
 
-| Decoder | Speed |
-|---|---:|
-| CUDA | **8.98× realtime** |
-| FFmpeg software HEVC | 0.85× realtime |
+## Camera calibration and valid region
 
-同じ source frame を CUDA / software で JPEG (`-q:v 3`) にした逐 pixel 比較は 3840×3840×3 全値が一致し、
-MAE 0、maximum error 0。Hardware decode によるこの sample の quality loss は無い。
+INSV native は heuristic `f=W/3.5、k=0` を使わない。`offset_v3` の front / back MEI calibration を別々の
+8-parameter `OPENCV_FISHEYE` へ least-squares fit し、source ごとの 2-camera physical rig にする。
 
-旧実装の 1133.43 s / 26.804 GB INSV spatial run は 1700 candidates から 1694 pairs を選び、candidate
-decode 後に lens ごとの FFmpeg が同じ file をもう 2 回走査したため 58 min 30 s かかった。この値は
-software decode + duplicate I/O の baseline であり、現在の実装の expected behavior ではない。
+COLMAP perspective fisheye は 180° 以下の forward hemisphere 専用。Physical circle が 180° を越える
+場合、feature / training valid radius を calibrated forward radius の 99.5% へ clamp する。Parktest fit:
 
-## Image preparation
+| Lens | RMS | Maximum | Effective radius / width |
+|---|---:|---:|---:|
+| Front | 0.525 px | 1.564 px | 0.444993 |
+| Back | 1.541 px | 4.464 px | 0.446542 |
 
-- INSV native: front/back を source 固有の 2-camera rig にする
-- ERP native: `EQUIRECTANGULAR` を維持する
-- Pinhole mode: 360° source を cubemap rig にする
-- Phone still: EXIF orientation を pixel に適用して orientation tag を除去する
-- Phone still: model、resolution、35 mm-equivalent focal が異なる場合は camera group を分ける
-- Phone video: 同一 lens/zoom の frame を 1 camera group にし、focal prior を refinement する
-
-Canonical image name は `sources/<source-id>/...`。Source、capture、view、camera group、mask の identity を
-filename parsing に依存させない。
-
-Native fisheye の valid-region editor は抽出済み frame 全体を slider / previous / next で切り替えられる。
-Front/back lens も独立して選び、複数 frame の edge glare / dirt を確認してから source 固有の円を保存する。
+Valid-region editor は抽出済みの任意 frame と lens を切り替えられる。SAM3 は circle 外を含む full image で
+object context を認識し、推論後に valid region と合成する。円外に胴体、円内に腕だけ見える人物でも context
+を失わない。
 
 ## Two independent SAM3 mask Steps
 
-### Feature masks
-
-Feature extraction / matching の前に適用し、動体や view ごとに変わる領域を広く除外する。Default:
+両 Step の default long-edge inference limit は 2048 px、dilation は 8 px。
 
 ```text
-person,camera operator,selfie stick,tripod,person shadow,selfie stick shadow,tripod shadow,
-animal,sky,tree,vehicle,airplane,water
+Feature:  person,camera operator,person's shadow,animal,sky,tree,vehicle,airplane,water
+Training: person,camera operator,person's shadow
 ```
 
-Feature-mask の再生成は feature、matching、reconstruction、alignment、export を invalidate するが、
-Training-mask artifact は保持する。Native fisheye の物理的円形領域は SAM3 とは別 contract で、Feature
-mask を無効にしても COLMAP feature extraction へ適用する。
+Feature prompt は特徴照合から除外する対象。風で動く tree、sky / cloud、water、animal、vehicle を広く除外。
+Training prompt は final detail を残す。Scene に存在しない追加 object prompt は誤検出を増やすため
+含めない。
 
-### Training masks
-
-Final LFStudio training 用。Feature mask より少ない対象を除外し、細部を多く残す。Default:
-
-```text
-person,camera operator,selfie stick,tripod,person shadow,selfie stick shadow,tripod shadow
-```
-
-Training-mask の再生成は Export だけを invalidate し、feature / SfM を再実行しない。両 Step の default
-long-edge inference limit は 2048 px。
-
-| Feature masks | Training masks | Feature extraction | Export / LFStudio |
+| Feature | Training | Feature / match | Export |
 |---|---|---|---|
-| On | On | Feature masks | Training masks |
-| On | Off | Feature masks | Feature masks |
-| Off | On | Physical valid region only | Training masks |
-| Off | Off | Physical valid region only | No mask |
+| On | On | Feature mask | Training mask |
+| On | Off | Feature mask | Feature mask |
+| Off | On | Physical valid region | Training mask |
+| Off | Off | Physical valid region | No mask |
 
-Export は常に 0 または 1 mask channel だけを書く。Training が有効なら優先し、無効時だけ Feature を
-fallback とする。Photo / Dataset Camera Inspector は両 artifact がある場合に channel を切り替えて
-mask / overlay を比較できる。White=keep / black=ignore、image と mask の orientation / size は一致する。
+Export は 0 または 1 mask channel だけを書く。White=keep、black=ignore。
 
-Mask Step は各 PNG を完全に書いた直後、append-only preview index へ record を公開する。Photo Inspector
-は running Step を 1 s 間隔で更新するため、全画像の完了を待たず、生成済みの選択画像を mask / overlay
-で確認できる。Preview index は running stage だけから読み、成功時の atomic publish 後は final manifest
-へ切り替える。両 Step の downsample default は backend / runtime / UI とも 2048 px。
+### Video propagation decision
 
-## Feature matching and reconstruction
+Parktest front 64 frames / person prompt:
 
-Pairing `Auto`:
+| Method | Time | Missed frames |
+|---|---:|---:|
+| Independent images、shared embedding | 約 55 s / 13 prompts 相当 | 8 |
+| Forward propagation | 21.20 s / 1 prompt | 14 |
+| Bidirectional 16-frame | 20.44 s / 1 prompt | 7 |
+| Bidirectional 8-frame | 23.06 s / 1 prompt | 4 |
 
-- Single source: Sequential
-- Mixed source、500 images 以下: Exhaustive
-- 500 images 超: SIFT Vocab-tree。Tree 未設定時は曖昧な fallback をせず error
+Propagation は prompt ごとに再実行するため multi-prompt では遅く、8-frame でも独立 detection より漏れる。
+速度と recall の両方で default にできないため採用しない。
 
-Matching result は verified pair、cross-source matrix、connected component を記録する。同じ database 上で
-複数 matching mode を累積でき、既処理 pair を再計算しない。
+## Feature extraction and matching
 
-- Largest model は primary registered image 数を最優先に選ぶ
-- `min_registered_ratio` は primary source に適用する
-- Global Mapper が camera-only / quality gate 未達の場合は deterministic seed を最大 3 回試す
-- Retry ごとに独立 progress span を割り当て、percentage を巻き戻さない
-- Detail source は total / registered / ratio / connected を個別記録する
-- IMU alignment は primary INSV の exposure timestamp と accelerometer だけを使う
-- Dataset は `-Y up`、Web Scene View は表示時に `+Y up` へ変換する
-- GPS の無い SfM scale は primary reference trajectory diameter を 1 model unit に正規化する
+UI parameter:
 
-## Recommended defaults
+| Display | Current name | Meaning |
+|---|---|---|
+| Feature image limit | `max_image_size` | 長辺上限。正しい COLMAP 4.1 flag は `FeatureExtraction.max_image_size` |
+| Features / image | `max_num_features` | Keypoint 上限 |
+| Affine shape + DSP | `affine_shape + DSP` | Viewpoint robustness、CPU cost 大 |
+| SIFT thresholds | `peak_threshold` / `edge_threshold` | Response / edge-like keypoint filter |
+| Feature matcher | `matcher_type` | Brute-force / LightGlue |
+| Image pairing | `pairing` | Sequential / Exhaustive / Vocab-tree / Auto |
+| Loop closure | `loop_closure` | 離れた revisit edge を追加 |
+| Transitive | `transitive_matching` | 1 pass で 3-view 以上の track を追加 |
+| Matches / pair | `max_num_matches` | Geometry verification 前の上限 |
+| Two-view inliers | `min_num_inliers` | Verified pair の最小 inlier |
+| Guided matching | `guided_matching` | Geometry-guided second pass、default Off |
+| Mapper | `mapper` | Global / Incremental |
+| View graph calibration | `view_graph_calibration` | Unknown intrinsics / rotation graph の calibration |
+| BA GPU | `ba_use_gpu` | Ceres CUDA + cuDSS |
 
-| Item | Default |
+旧 typo `SiftExtration.max_image_size` と `SiftExtraction.max_image_size` は COLMAP 4.1 では無効。
+
+Single-source Sequential は quadratic overlap 4、つまり 1 / 2 / 4 / 8 frame offset。Loop closure は official
+256K FAISS tree を使う。旧 FLANN tree は file が存在しても crash するため、installer と Doctor は header を
+検証する。256K indexing は CPU / sequential outer loop、SIFT pair matching は GPU。Parktest clean run では
+indexing が約 56 分、GPU pair matching が約 4 分だった。
+
+COLMAP 4.1.1 の folder-major rig pairing bug は sensor directory 境界を temporal neighbor と誤認する。
+Pinned runtime は upstream [PR #4591](https://github.com/colmap/colmap/pull/4591) の same-camera guard を
+backport する。Matching は clean database から作り、sequential / loop graph に generalized rig verification
+を 1 回適用してから transitive extension を行う。拡張 edge の individual two-view geometry は維持し、巨大な
+final graph 全体へ generalized RANSAC を繰り返さない。
+
+Parktest clean run は raw 253,061 pairs、verified 243,869 pairs、43,484,839 inliers を得た。旧 scheduling は
+transitive 後の巨大 graph 全体へ rig verification を適用したため総計 6 h 16 min を要した。Sequential / loop
+graph だけを generalized verification する現在の scheduling は、その数時間の final pass を避ける。
+
+Transitive pass は 1 回で十分。Parktest で 1 回目 265 batches に対し、2 回目は 2492 batches（約 249 万
+pairs）へ膨張した。閉環後の 2 / 3 回目は quasi-exhaustive になり、速度と outlier risk の両方で不利。
+
+## Sparse reconstruction and continuity gate
+
+Global Mapper を最大 3 deterministic seed で試す。Primary registration、point count、trajectory continuity を
+満たす最初の model を採用する。全 Global seed が失敗した場合、view-graph calibration 前の original DB から
+Incremental Mapper を実行し、同じ gate を再適用する。
+
+Continuous video は capture ごとに sensor camera center を平均し、相隣 step の P95 と maximum を比較する。
+Default `max / P95 <= 10×`。評価に十分な連続 capture が無ければ silent pass しない。旧 parktest model は
+3388/3388 images を登録しながら discontinuity を持ったため reject された。Clean database、修正版 pairing、
+feature mask、1-pass transitive から再計算した final model は seed 0 で gate を通過した。
+
+| Metric | Rejected old model | Accepted final model |
+|---|---:|---:|
+| Registered images | 3388 / 3388 | **3388 / 3388** |
+| Points3D | — | **791,750** |
+| Mean reprojection | — | **0.941 px** |
+| Median / P95 step | 0.792 / 1.112 | **0.210 / 0.238 m** |
+| Maximum step | 62.92 | **0.597 m** |
+| Maximum / P95 | 56.6× | **2.51×** |
+| Outlier jumps | 2 | **0** |
+| Global Mapper time | — | 69 min 4 s |
+
+Registration 数だけを成功判定に使わない。Global positioning は verified pair translation を直接拘束せず、
+3-view 以上の bearing track で位置を解くため、pair が多くても piecewise jump は起こり得る。
+
+Bundle Adjustment は pose、intrinsics、3D points を同じ reprojection objective で最適化する。Feature GPU と
+BA GPU は別 capability。Official Windows CUDA archive の Ceres は CPU-only。Pinned CUDA 12.8 runtime は
+native sm89、dense CUDA、sparse cuDSS 0.8.0.10 を Doctor と実 mapper log の両方で検証する。Native
+ALIKED 用には cuFFT、NVRTC、cuDNN 9.20 と ONNX CUDA provider も app-local に含める。
+
+## Gravity, real scale, and ground origin
+
+### Gravity alignment
+
+Primary INSV の exposure timestamp と accelerometer から gravity consensus を推定し、model 全体へ rotation
+だけを適用する。Dataset は `-Y up`。旧 trajectory-diameter normalization は physical scale を壊すため廃止。
+Parktest は 1,694 frame 中 1,501 inliers、time offset 15 ms で整列し、camera vertical span は 5.725 から
+2.029 m になった。
+
+### Restore real size
+
+IMU orientation だけでは SfM scale は決まらない。Acceleration 二重積分は bias が距離へ発散するため、
+scale 推定には使わない。Known physical sensor baseline と、同じ capture の reconstructed camera-center
+distance の robust median から meter scale を復元する。Baseline 不明 source では推測しない。Parktest は
+1,694 / 1,694 baseline が inlier で、physical / reconstructed median とも 0.0322733 m、scale factor は 1.0。
+
+### Position from predicted ground
+
+Primary trajectory 周囲の local points を集め、camera sample ごとの ground mode を等 weight で集約する。
+遠方の water、roof、point density が origin を支配しない。Terrain は変形せず Y translation だけを適用する。
+Parktest は 246,780 support points、91.3% trajectory coverage から Y を −0.579 m 平行移動した。予測 camera
+height median 0.532 m は、抽出 frame で確認できる低い手持ち姿勢と一致した。
+
+## LFStudio export
+
+Export Inspector が表示する 1 個の directory が dataset root。その directory 自体を LichtFeld Studio で
+選ぶ。Application は LFStudio output path を表示・変更・削除しない。
+
+```text
+export_dataset/
+├── images/sources/<source-id>/...
+├── masks/sources/<source-id>/...       # resolved channel がある時だけ
+├── sparse/0/{rigs,cameras,frames,images,points3D}.bin
+├── preview/{reconstruction.json,points.bin}
+├── train_configs/
+│   ├── train_config.mrnf.json
+│   ├── train_config.mcmc.json
+│   └── recommendations.json
+└── export_manifest.json
+```
+
+Native fisheye JPEG は valid circle を含む MCU boundary で `jpegtran` lossless crop し、camera principal
+point、2D observation、mask を同じ offset で更新する。Export は registered image だけを含み、camera center
+`C=-Rᵀt` の non-zero trajectory、rig/frame、image/mask count を LFStudio loader smoke で検証する。
+
+## Recommended LFStudio training
+
+```text
+LichtFeld-Studio --config <dataset>/train_configs/train_config.mrnf.json \
+  --data-path <dataset> --max-width 2304 --headless --train
+```
+
+- Strategy: MRNF
+- Renderer: GUT
+- Mask: resolved segment mask
+- PPISP + novel-view controller: On
+- Maximum width: 2304
+- General Gaussian cap: 2M
+- Verified high-quality manual cap on 12 GB RTX 4070 Ti: 2.4M
+- Iterations: 30,000
+
+PPISP は exposure、vignetting、white balance、camera response を camera / frame ごとに学習する appearance
+model で、denoiser ではない。Controller は final phase で Gaussians を freeze し novel-view appearance を
+distill する。Final PLY と同名 `.ppisp` sidecar を一緒に保管する。
+
+Old invalid-geometry run の memory sweep:
+
+| Input / cap / width | Result |
 |---|---|
-| Frame selection | Sharpness-first、1 fps、5 candidates |
-| Feature masks | On、2048 px、dilation 8 px、expanded prompt |
-| Training masks | On、2048 px、dilation 8 px、training prompt |
-| Feature | SIFT、long edge 2048 px、maximum 8192 |
-| Matcher | Brute-force、pairing Auto |
-| Pair validation | maximum 16,384 matches、minimum 15 inliers、guided off |
-| Mapper | Global Mapper + view-graph calibration |
-| Bundle Adjustment | CPU。Doctor が cuDSS を確認した場合だけ GPU |
-| Alignment | Primary IMU auto、reference trajectory normalization |
-| LFStudio | MRNF + GUT + resolved mask + PPISP/controller、max cap 1M |
+| Full、3.0M | OOM at 11,800 |
+| Full、2.4M | OOM at 9,100 |
+| Cropped、2.4M、full width | OOM at 10,700 |
+| Cropped、2.4M、3072 | OOM at 16,900、3.868 GiB request |
+| **Cropped、2.4M、2304** | **30,000 complete** |
 
-Standard / High preset は実写比較で良かった SIFT + Brute-force を基礎にする。High は 3072 px、
-16,384 features、32,768 matches。ALIKED / LightGlue は弱 texture の alternative。
+Camera icon の brown / red は relative photometric loss heatmap で、camera disable を意味しない。Generic
+SceneNode Transform が 0 でも actual pose は COLMAP `R/t` にある。
 
-主な parameter:
+## Measured comparisons
 
-- `max_image_size`: feature image の長辺上限。0 は COLMAP default
-- `max_num_features`: image ごとの feature 上限
-- `peak_threshold` / `edge_threshold`: SIFT response / edge filtering
-- `affine_shape + DSP`: viewpoint / scale robustness。CPU cost が大きい
-- `max_num_matches`: pair ごとの match 上限
-- `min_num_inliers`: verified pair を残す最小 inlier
-- `guided_matching`: geometry-guided second pass
-- `view_graph_calibration`: Global Mapper 前の rotation / intrinsics calibration
-- `ba_use_gpu`: CUDA/cuDSS BA。Feature GPU とは別 capability
+### Features: 38.17 s X5、104 rig captures / 208 images
 
-旧 `SiftExtration.max_image_size` / `SiftExtraction.max_image_size` は無効。COLMAP 4.1 の正しい flag は
-`FeatureExtraction.max_image_size`。
+| Feature / Matcher / Mapper | Feature | Match | Mapper | Registered | Points | Mean reproj. |
+|---|---:|---:|---:|---:|---:|---:|
+| Python ALIKED + LightGlue + Incremental | 89.7 s | 1604.1 s | 428.9 s | 208/208 | 52,505 | 1.242 px |
+| **COLMAP SIFT + Brute-force + Global** | **28.9 s** | 33.1 s | 25.8 s | 208/208 | 27,202 | **0.917 px** |
+| COLMAP ALIKED + Brute-force + Global | 243.0 s | **9.7 s** | **17.9 s** | 208/208 | 19,060 | 1.041 px |
+| COLMAP ALIKED + LightGlue + Global | 243.0 s | 193.0 s | 24.7 s | 208/208 | 24,665 | 1.273 px |
 
-## Measured mixed-camera reconstruction
-
-35.96 s X5 recording（35 rig captures / 70 fisheye images）と同 scene の iPhone 16 Pro 10 stills:
+### Mixed camera: 35.96 s X5 + iPhone 16 Pro stills
 
 | Result | Primary only | + phone photos |
 |---|---:|---:|
@@ -274,66 +395,11 @@ Standard / High preset は実写比較で良かった SIFT + Brute-force を基�
 | Verified cross-source pairs | — | **168** |
 | Cameras | 2 | 3 |
 | Points3D | 10,544 | **11,268** |
-| Observations | 61,140 | **64,133** |
 | Mean reprojection | 1.003 px | 1.010 px |
-| Median reprojection | 0.937 px | 0.940 px |
-| P95 reprojection | 1.880 px | 1.918 px |
 
-Phone images は primary component へ全て接続し、primary registration は低下しなかった。Repeat run では
-Global Mapper seed 0 が camera-only model になり、quality-gated seed 1 が 80/80、11,312 points、
-64,248 observations、mean 1.012 px を復元した。
+### Night-scene denoise
 
-38.17 s X5、104 rig captures / 208 images の feature comparison:
-
-| Feature / Matcher / Mapper | Feature | Match | Mapper | Registered | Points | Mean reproj. |
-|---|---:|---:|---:|---:|---:|---:|
-| old Python ALIKED + LightGlue + Incremental | 89.7 s | 1604.1 s | 428.9 s | 208/208 | 52,505 | 1.242 px |
-| **COLMAP SIFT + Brute-force + Global** | **28.9 s** | 33.1 s | 25.8 s | 208/208 | **27,202** | **0.917 px** |
-| COLMAP ALIKED + Brute-force + Global | 243.0 s | **9.7 s** | **17.9 s** | 208/208 | 19,060 | 1.041 px |
-| COLMAP ALIKED + LightGlue + Global | 243.0 s | 193.0 s | 24.7 s | 208/208 | 24,665 | 1.273 px |
-
-## LFStudio export and training
-
-Export Inspector の 1 directory を dataset root として選ぶ。
-
-```text
-export_dataset/
-├── images/sources/<source-id>/...
-├── masks/sources/<source-id>/...    # resolved channel がある場合だけ
-├── sparse/0/{rigs,cameras,frames,images,points3D}.bin
-├── preview/
-├── train_configs/
-└── export_manifest.json
-```
-
-```text
-LichtFeld-Studio --config <dataset>/train_configs/train_config.mrnf.json --data-path <dataset>
-```
-
-Training output path は LFStudio 側で管理する。本 application は output directory を作成、表示、移動、
-削除しない。Dataset root 内に unmanaged item がある場合は export 再生成を停止する。
-
-Recommended MRNF は GUT、resolved segment mask、PPISP、novel-view controller を有効にする。PPISP は
-exposure、vignetting、white balance / color、camera response function の appearance model であり denoiser
-ではない。Final PLY を開くときは同名 `.ppisp` sidecar も load する。
-
-RTX 4070 Ti 12 GB、LFStudio v0.5.3 の measured mixed run:
-
-| Metric | Result |
-|---|---:|
-| Physical cameras / frames / masks | 3 / 80 / 80 |
-| Initial SfM points | 11,312 |
-| Iterations | 30,000 |
-| Runtime / speed | 3,773.552 s / 8.0 iter/s |
-| Internal / reloadable Gaussians | 525,433 / 517,387 |
-| PLY / PPISP / checkpoint | 128.3 MB / 2.9 MB / 220.7 MB |
-
-Camera icon の green / brown / red は relative photometric-loss heatmap で、red は camera disable を意味しない。
-Transform Inspector の 0 は generic SceneNode 値の場合があり、実 pose は `Camera.R/T` と `C=-Rᵀt` にある。
-
-## Training-image denoise decision
-
-同じ夜間素材で FastDVDnet training と raw training を LFStudio 30k まで比較した。
+FastDVDnet preprocessing と raw training を 30k まで比較した。
 
 | Training / target | Pose | PSNR | SSIM |
 |---|---:|---:|---:|
@@ -343,55 +409,29 @@ Transform Inspector の 0 は generic SceneNode 値の場合があり、実 pose
 | **Raw / raw** | **SIFT** | **24.920** | 0.8056 |
 
 同じ clean target の SIFT masked PSNR は denoised training 24.478、raw training 25.028。Denoise は約
-0.55 dB 悪化したため denoise Step、model download、runtime dependency、UI は削除済み。Export は
-original image を使う。
+0.55 dB 悪化し、detail hallucination / temporal inconsistency risk も増えるため、denoise Step、model、UI、
+dependency は削除した。Night scene は raw image + SIFT pose + PPISP を使う。
 
-## Runtime config
-
-Default は `runtime/config.toml`。Machine 固有 file は `SPHERE_CONFIG` で指定する。
-
-```toml
-[workspace]
-root = "./workspace"
-
-[filesystem]
-allowed_roots = []
-
-[binaries]
-ffmpeg = ""
-ffprobe = ""
-colmap = ""
-vocab_tree = ""
-
-[frame_extraction]
-hwaccel = "auto"
-require_hwaccel = false
-score_workers = 0
-
-[sam3]
-repo_path = ""
-checkpoint_path = ""
-device = "cuda:0"
-max_inference_size = 2048
-```
-
-## Architecture
+## Architecture and extension
 
 ```text
 project_source table
-  ├─ primary source
+  ├─ one primary source
   └─ N supplemental sources
-          ↓
+         ↓
 source-scoped inspect / extract / prepare
-          ├─ feature-mask artifact -> feature workspace -> matching -> reconstruction -> alignment
-          └─ training-mask artifact ----------------------------------------------┐
-                                                                                   ↓
-                                                       registered-only resolved export
+         ├─ feature mask -> feature workspace -> matching -> SfM
+         └─ training mask ------------------------------------┐
+                                                              ↓
+rotation -> metric scale -> ground origin -> registered-only export
 ```
 
-Source identity、capture index、camera group、mask purpose、mask path は別 field。新 raw camera を追加する
-場合は adapter、calibration、prepare 処理を追加し、global mode branch を増やさない。Stage output は
-temporary directory へ書き、成功時だけ atomic replace する。
+新しい raw camera は adapter、calibration、prepare implementation を追加する。Global pipeline に camera 名の
+条件分岐を増やさず、camera catalog、per-sensor intrinsics、rig contract を実装する。Fisheye region は X5
+constant ではなく source calibration / user region から導出する。
+
+API process は orchestration、native / ML は worker subprocess。Project mutation は active job 中 409、cancel
+はその worker process tree だけを終了する。
 
 ## Verification
 
@@ -410,19 +450,28 @@ pnpm build
 pnpm test:e2e
 ```
 
-実素材 browser E2E は `SPHERE_E2E_SOURCE` を指定する。
+Actual UI path test:
+
+```bash
+PLAYWRIGHT_BASE_URL=http://127.0.0.1:8787 \
+SPHERE_E2E_SOURCE=/path/to/short.insv \
+pnpm --dir frontend test:e2e
+```
 
 ## License
 
 Project 全体は [GNU General Public License v3.0 or later](LICENSE)、SPDX identifier
-`GPL-3.0-or-later`。Downloaded third-party component は各 component 自身の license に従う。
+`GPL-3.0-or-later`。Downloaded COLMAP、Ceres、NVIDIA runtime、model は各 component の license に従う。
 
-## References / legacy plugin
+## References and legacy plugin
 
-- [COLMAP](https://github.com/colmap/colmap): mixed cameras、multi-rig、Global Mapper、ALIKED、EQUIRECTANGULAR
-- [LichtFeld-Studio](https://github.com/MrNeRF/LichtFeld-Studio): COLMAP loader、GUT、MRNF、mask、PPISP
+- [COLMAP](https://github.com/colmap/colmap): camera、rig、Global Mapper、ALIKED、ERP
+- [COLMAP PR #4591](https://github.com/colmap/colmap/pull/4591): sequential rig pairing fix
+- [COLMAP PR #4590](https://github.com/colmap/colmap/pull/4590): panorama benchmark / consistency gate
+- [GLOMAP paper](https://arxiv.org/abs/2407.20219): global positioning formulation
+- [LichtFeld Studio](https://github.com/MrNeRF/LichtFeld-Studio): loader、GUT、MRNF、mask、PPISP
 - [PPISP](https://github.com/nv-tlabs/ppisp): appearance compensation / controller
-- [telemetry-parser](https://github.com/AdrianEddy/telemetry-parser): Insta360 metadata / IMU timestamp
-- [Gyroflow](https://github.com/gyroflow/gyroflow): IMU orientation semantics
+- [telemetry-parser](https://github.com/AdrianEddy/telemetry-parser): Insta360 metadata
+- [Gyroflow](https://github.com/gyroflow/gyroflow): IMU semantics
 - [insv-stitch](https://github.com/BenjaminHenriksson/insv-stitch): INSV container research
-- [lichtfeld-360-plugin](https://github.com/alexmgee/lichtfeld-360-plugin): legacy plugin workflow reference
+- [lichtfeld-360-plugin](https://github.com/alexmgee/lichtfeld-360-plugin): original legacy plugin workflow reference

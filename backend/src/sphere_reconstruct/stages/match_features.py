@@ -21,7 +21,7 @@ from .colmap_progress import matching_progress
 @register
 class MatchFeatures(Stage):
     name = StageName.MATCH_FEATURES
-    impl_version = "2.2"
+    impl_version = "2.3"
 
     def normalize_params(self, raw: dict) -> dict:
         feature_type = str(raw.get("feature_type", "SIFT")).upper()
@@ -105,7 +105,7 @@ class MatchFeatures(Stage):
         run_transitive = bool(ctx.params["transitive_matching"] and pairing == "sequential")
         pairing_extra_args = [
             *extra_args,
-            *_rig_verification_args(bool(spec.rig_config_path), enabled=not run_transitive),
+            *_rig_verification_args(bool(spec.rig_config_path), enabled=True),
         ]
         common = {
             "database_path": database_path,
@@ -157,7 +157,7 @@ class MatchFeatures(Stage):
                 matching_type=matching_type,
                 extra_args=[
                     *extra_args,
-                    *_rig_verification_args(bool(spec.rig_config_path), enabled=True),
+                    *_rig_verification_args(bool(spec.rig_config_path), enabled=False),
                 ],
                 log_path=logs_dir / "transitive_matcher.log",
                 on_line=matching_progress(ctx, low=0.7, high=0.9),
@@ -174,6 +174,9 @@ class MatchFeatures(Stage):
                 "transitive_matching": run_transitive,
                 "transitive_iterations": (ctx.params["transitive_iterations"] if run_transitive else 0),
                 "rig_verification": bool(spec.rig_config_path),
+                "rig_verification_scope": (
+                    "pairing_graph" if spec.rig_config_path else "disabled"
+                ),
                 "gpu_enabled": ctx.params["use_gpu"],
             }
         )

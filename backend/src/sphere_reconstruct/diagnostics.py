@@ -142,6 +142,7 @@ def _colmap_check() -> dict:
         "gpu_bundle_adjustment": bundle_adjustment["sparse"] and "ba_ceres_use_gpu" in combined,
         "gpu_bundle_adjustment_dense": bundle_adjustment["dense"],
         "gpu_bundle_adjustment_sparse": bundle_adjustment["sparse"],
+        "onnx_cuda_runtime": bundle_adjustment["onnx_cuda"],
     }
     ok = version["returncode"] == 0 and all(
         capabilities[name] for name in ("global_mapper", "aliked", "equirectangular")
@@ -153,6 +154,7 @@ def _colmap_check() -> dict:
         "capabilities": capabilities,
         "ceres_cuda": bundle_adjustment["dense"],
         "cudss": bundle_adjustment["cudss"],
+        "cudnn": bundle_adjustment["cudnn"],
         "runtime_metadata": bundle_adjustment["metadata"],
         "message": "ok" if ok else "COLMAP 4.1+ capabilities are incomplete",
     }
@@ -170,6 +172,8 @@ def _bundle_adjustment_capabilities(binary: Path) -> dict:
             "dense": bool(metadata.get("gpu_bundle_adjustment_dense")),
             "sparse": bool(metadata.get("gpu_bundle_adjustment_sparse")),
             "cudss": metadata.get("cudss_version"),
+            "cudnn": metadata.get("cudnn_version"),
+            "onnx_cuda": bool(metadata.get("onnx_cuda_runtime_bundled")),
             "metadata": str(metadata_path),
         }
 
@@ -181,7 +185,14 @@ def _bundle_adjustment_capabilities(binary: Path) -> dict:
     ceres = next((path for path in ceres_candidates if path.is_file()), None)
     cudss = next(iter(binary.parent.glob("*cudss*")), None) or find_library("cudss")
     if ceres is None:
-        return {"dense": False, "sparse": False, "cudss": None, "metadata": None}
+        return {
+            "dense": False,
+            "sparse": False,
+            "cudss": None,
+            "cudnn": None,
+            "onnx_cuda": False,
+            "metadata": None,
+        }
     binary_strings = ceres.read_bytes()
     no_cuda = b"Ceres was compiled without support for CUDA" in binary_strings
     dense = not no_cuda and b"CUDA" in binary_strings
@@ -190,6 +201,11 @@ def _bundle_adjustment_capabilities(binary: Path) -> dict:
         "dense": dense,
         "sparse": sparse,
         "cudss": str(cudss) if cudss else None,
+        "cudnn": str(next(iter(binary.parent.glob("cudnn64_*.dll")), "")) or None,
+        "onnx_cuda": bool(
+            next(iter(binary.parent.glob("onnxruntime_providers_cuda.dll")), None)
+            and next(iter(binary.parent.glob("cudnn64_*.dll")), None)
+        ),
         "metadata": None,
     }
 

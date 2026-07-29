@@ -3,6 +3,7 @@
     [string]$OutputDirectory,
     [string]$CudaArchitectures = "",
     [string]$CudssWheelPath = "",
+    [string]$CudnnArchivePath = "",
     [switch]$ReuseBuildRoot
 )
 
@@ -32,6 +33,24 @@ $CudssWheel = switch ($CudaMajor) {
         }
     }
     default { throw "CUDA $CudaMajor 用 cuDSS 0.8.0.10 Windows runtime は提供されていません" }
+}
+$CudnnVersion = "9.20.0.48"
+$CudnnArchive = switch ($CudaMajor) {
+    12 {
+        @{
+            FileName = "cudnn-windows-x86_64-$($CudnnVersion)_cuda12-archive.zip"
+            Url = "https://developer.download.nvidia.com/compute/cudnn/redist/cudnn/windows-x86_64/cudnn-windows-x86_64-$($CudnnVersion)_cuda12-archive.zip"
+            Sha256 = "003a5d022899268f7deef0c3530f1587a3195a93905a16fd0e3c9da0c46b88ab"
+        }
+    }
+    13 {
+        @{
+            FileName = "cudnn-windows-x86_64-$($CudnnVersion)_cuda13-archive.zip"
+            Url = "https://developer.download.nvidia.com/compute/cudnn/redist/cudnn/windows-x86_64/cudnn-windows-x86_64-$($CudnnVersion)_cuda13-archive.zip"
+            Sha256 = "d3ccce59130f10f68fe09365feea65b622bcecace79a0682fe43ee07b88a6a29"
+        }
+    }
+    default { throw "CUDA $CudaMajor 用 cuDNN $CudnnVersion Windows runtime は提供されていません" }
 }
 $TemporaryRoot = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { $env:TEMP }
 $BuildRoot = Join-Path $TemporaryRoot "sphere-colmap-cuda-ba"
@@ -70,6 +89,51 @@ function Assert-NativeSuccess {
     if ($LASTEXITCODE -ne 0) {
         throw "$Operation が exit code $LASTEXITCODE で失敗しました"
     }
+}
+
+function Get-PinnedDownload {
+    param(
+        [Parameter(Mandatory = $true)][string]$Url,
+        [Parameter(Mandatory = $true)][string]$Sha256,
+        [Parameter(Mandatory = $true)][string]$Destination,
+        [Parameter(Mandatory = $true)][string]$Name
+    )
+
+    New-Item (Split-Path $Destination -Parent) -ItemType Directory -Force | Out-Null
+    if (Test-Path $Destination) {
+        $ExistingHash = (Get-FileHash $Destination -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($ExistingHash -eq $Sha256) {
+            return
+        }
+        Remove-Item $Destination -Force
+    }
+    $Partial = "$Destination.partial"
+    if (Test-Path $Partial) {
+        $PartialHash = (Get-FileHash $Partial -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($PartialHash -eq $Sha256) {
+            Move-Item $Partial $Destination -Force
+            return
+        }
+    }
+    curl.exe `
+        --fail `
+        --location `
+        --retry 5 `
+        --retry-all-errors `
+        --retry-delay 2 `
+        --connect-timeout 30 `
+        --speed-limit 1024 `
+        --speed-time 60 `
+        --continue-at - `
+        --output $Partial `
+        $Url
+    Assert-NativeSuccess "$Name download"
+    $Hash = (Get-FileHash $Partial -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($Hash -ne $Sha256) {
+        Remove-Item $Partial -Force
+        throw "$Name の SHA-256 が一致しません: $Hash"
+    }
+    Move-Item $Partial $Destination -Force
 }
 
 function Ensure-GitPatch {
@@ -132,6 +196,7 @@ $ColmapSource = Join-Path $BuildRoot "colmap"
 $CeresSource = Join-Path $BuildRoot "ceres"
 $VcpkgRoot = Join-Path $BuildRoot "vcpkg"
 $CudssRoot = Join-Path $BuildRoot "cudss"
+$CudnnRoot = Join-Path $BuildRoot "cudnn"
 $CeresBuild = Join-Path $BuildRoot "ceres-build"
 $CeresInstall = Join-Path $BuildRoot "ceres-install"
 $CeresConfigDirectory = Join-Path $CeresInstall "lib/cmake/Ceres"
@@ -233,6 +298,12 @@ $ColmapManifest | ConvertTo-Json -Depth 20 | Set-Content $ColmapManifestPath -En
     "lapack:$Triplet"
 Assert-NativeSuccess "vcpkg Ceres dependencies"
 
+$DownloadDirectory = if ($env:SPHERE_NATIVE_DOWNLOAD_CACHE) {
+    $env:SPHERE_NATIVE_DOWNLOAD_CACHE
+}
+else {
+    Join-Path $BuildRoot "downloads"
+}
 $WheelDirectory = Join-Path $BuildRoot "wheel"
 $CudssPackageRoot = Join-Path $CudssRoot "nvidia/cu$CudaMajor"
 $CudssDll = Join-Path $CudssPackageRoot "bin/cudss64_0.dll"
@@ -241,25 +312,18 @@ if (-not ((Test-Path $CudssDll) -and (Test-Path $CudssHeader))) {
     if (Test-Path $CudssRoot) {
         Remove-Item $CudssRoot -Recurse -Force
     }
+    New-Item $DownloadDirectory -ItemType Directory -Force | Out-Null
     New-Item $WheelDirectory -ItemType Directory -Force | Out-Null
-    $WheelPath = Join-Path $WheelDirectory $CudssWheel.FileName
+    $WheelPath = Join-Path $DownloadDirectory $CudssWheel.FileName
     if ($CudssWheelPath) {
         Copy-Item $CudssWheelPath $WheelPath -Force
     }
     else {
-        curl.exe `
-            --fail `
-            --location `
-            --retry 5 `
-            --retry-all-errors `
-            --retry-delay 2 `
-            --connect-timeout 30 `
-            --speed-limit 1024 `
-            --speed-time 60 `
-            --continue-at - `
-            --output $WheelPath `
-            $CudssWheel.Url
-        Assert-NativeSuccess "cuDSS wheel download"
+        Get-PinnedDownload `
+            -Url $CudssWheel.Url `
+            -Sha256 $CudssWheel.Sha256 `
+            -Destination $WheelPath `
+            -Name "cuDSS wheel"
     }
     $WheelHash = (Get-FileHash $WheelPath -Algorithm SHA256).Hash.ToLowerInvariant()
     if ($WheelHash -ne $CudssWheel.Sha256) {
@@ -269,6 +333,37 @@ if (-not ((Test-Path $CudssDll) -and (Test-Path $CudssHeader))) {
     Copy-Item $WheelPath $WheelZip -Force
     Expand-Archive $WheelZip -DestinationPath $CudssRoot
 }
+
+$CudnnDll = Get-ChildItem $CudnnRoot -Recurse -Filter "cudnn64_9.dll" -File -ErrorAction SilentlyContinue |
+    Select-Object -First 1
+if ($null -eq $CudnnDll) {
+    if (Test-Path $CudnnRoot) {
+        Remove-Item $CudnnRoot -Recurse -Force
+    }
+    $ArchivePath = Join-Path $DownloadDirectory $CudnnArchive.FileName
+    if ($CudnnArchivePath) {
+        New-Item $DownloadDirectory -ItemType Directory -Force | Out-Null
+        Copy-Item $CudnnArchivePath $ArchivePath -Force
+    }
+    else {
+        Get-PinnedDownload `
+            -Url $CudnnArchive.Url `
+            -Sha256 $CudnnArchive.Sha256 `
+            -Destination $ArchivePath `
+            -Name "cuDNN archive"
+    }
+    $ArchiveHash = (Get-FileHash $ArchivePath -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($ArchiveHash -ne $CudnnArchive.Sha256) {
+        throw "cuDNN archive の SHA-256 が一致しません: $ArchiveHash"
+    }
+    Expand-Archive $ArchivePath -DestinationPath $CudnnRoot
+    $CudnnDll = Get-ChildItem $CudnnRoot -Recurse -Filter "cudnn64_9.dll" -File |
+        Select-Object -First 1
+}
+if ($null -eq $CudnnDll) {
+    throw "cuDNN archive に cudnn64_9.dll がありません"
+}
+$CudnnBin = $CudnnDll.Directory.FullName
 
 $CudssConfigDirectory = Join-Path $CudssPackageRoot "lib/cmake/cudss"
 New-Item $CudssConfigDirectory -ItemType Directory -Force | Out-Null
@@ -356,6 +451,7 @@ Assert-NativeSuccess "COLMAP build"
 $InstallBin = Join-Path $ColmapInstall "bin"
 Copy-Item (Join-Path $CeresInstall "bin/*.dll") $InstallBin -Force
 Copy-Item (Join-Path $CudssPackageRoot "bin/*.dll") $InstallBin -Force
+Copy-Item (Join-Path $CudnnBin "cudnn*.dll") $InstallBin -Force
 
 $VcpkgBinDirectories = @(
     (Join-Path $VcpkgRoot "installed/$Triplet/bin"),
@@ -368,19 +464,9 @@ foreach ($Directory in $VcpkgBinDirectories) {
 }
 
 $CudaBin = Join-Path $env:CUDA_PATH "bin"
-$CudaRuntimePatterns = @(
-    "cudart64_*.dll",
-    "cublas64_*.dll",
-    "cublasLt64_*.dll",
-    "cusolver64_*.dll",
-    "cusolverMg64_*.dll",
-    "cusparse64_*.dll",
-    "nvJitLink_*.dll",
-    "curand64_*.dll"
-)
-foreach ($Pattern in $CudaRuntimePatterns) {
-    Get-ChildItem $CudaBin -Filter $Pattern | Copy-Item -Destination $InstallBin -Force
-}
+# Workflow は必要 component だけを CUDA_PATH に入れる。個別 filename list は toolkit release ごとに
+# transitive dependency を落とすため、選択済み component の runtime DLL をすべて app-local にする。
+Copy-Item (Join-Path $CudaBin "*.dll") $InstallBin -Force
 
 if (-not $env:VCToolsRedistDir) {
     throw "VCToolsRedistDir が設定されていません。Visual Studio Developer Shell から実行してください"
@@ -396,22 +482,12 @@ foreach ($Directory in $MsvcRuntimeDirectories) {
     Copy-Item (Join-Path $Directory "*.dll") $InstallBin -Force
 }
 
-$CeresDll = Join-Path $InstallBin "ceres.dll"
-$Dependencies = & dumpbin /DEPENDENTS $CeresDll | Out-String
+$CeresDependencies = & dumpbin /DEPENDENTS (Join-Path $InstallBin "ceres.dll") | Out-String
 Assert-NativeSuccess "dumpbin Ceres dependency inspection"
-if ($Dependencies -notmatch "cudss64_0.dll") {
+if ($CeresDependencies -notmatch "cudss64_0.dll") {
     throw "The generated Ceres library is not linked to cuDSS"
 }
-$ColmapExecutable = Join-Path $InstallBin "colmap.exe"
-$OriginalPath = $env:PATH
-try {
-    $env:PATH = "$InstallBin;$env:SystemRoot\System32;$env:SystemRoot"
-    & $ColmapExecutable version
-    Assert-NativeSuccess "standalone COLMAP runtime smoke test"
-}
-finally {
-    $env:PATH = $OriginalPath
-}
+& (Join-Path $PSScriptRoot "test_colmap_runtime.ps1") -InstallRoot $ColmapInstall
 
 $Metadata = @{
     colmap_version = $ColmapTag
@@ -421,12 +497,14 @@ $Metadata = @{
     cuda_version = $env:CUDA_PATH -replace '^.*v', ''
     cuda_architectures = $EffectiveCudaArchitectures
     cudss_version = "0.8.0.10"
+    cudnn_version = $CudnnVersion
     ceres_cuda = $true
     cudss = $true
     sequential_rig_pairing_fix = "COLMAP PR 4591 semantic backport"
     gpu_bundle_adjustment_dense = $true
     gpu_bundle_adjustment_sparse = $true
     msvc_runtime_bundled = $true
+    onnx_cuda_runtime_bundled = $true
 }
 $Metadata | ConvertTo-Json | Set-Content (Join-Path $ColmapInstall "sphere-colmap-capabilities.json") -Encoding utf8
 
@@ -442,10 +520,19 @@ $CudaEula = Join-Path $env:CUDA_PATH "EULA.txt"
 if (Test-Path $CudaEula) {
     Copy-Item $CudaEula (Join-Path $LicenseDirectory "NVIDIA-CUDA-EULA.txt")
 }
-Invoke-WebRequest `
-    -Uri "https://docs.nvidia.com/cuda/cudss/license.html" `
-    -OutFile (Join-Path $LicenseDirectory "NVIDIA-CUDSS-LICENSE.html") `
-    -UseBasicParsing
+$CudnnLicense = Get-ChildItem $CudnnRoot -Recurse -Filter "LICENSE.txt" -File |
+    Select-Object -First 1
+if ($null -eq $CudnnLicense) {
+    throw "cuDNN archive に LICENSE.txt がありません"
+}
+Copy-Item $CudnnLicense.FullName (Join-Path $LicenseDirectory "NVIDIA-CUDNN-LICENSE.txt")
+curl.exe `
+    --fail `
+    --location `
+    --retry 5 `
+    --output (Join-Path $LicenseDirectory "NVIDIA-CUDSS-LICENSE.html") `
+    "https://docs.nvidia.com/cuda/cudss/license.html"
+Assert-NativeSuccess "cuDSS license download"
 
 $RuntimeBundle = Join-Path $BuildRoot "runtime-bundle"
 if (Test-Path $RuntimeBundle) {

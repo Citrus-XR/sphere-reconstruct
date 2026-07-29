@@ -704,6 +704,11 @@ const statLabel = (t: (key: string) => string, key: string): string => {
 
 const formatStatistic = (t: (key: string) => string, key: string, value: string | number | boolean): string => {
   if (key === 'lfstudio_training_metrics' && value === 'external') return t('notAvailableExternalTraining')
+  if (key === 'rig_verification_scope' && typeof value === 'string') {
+    const translationKey = `stat_${value}`
+    const translated = t(translationKey)
+    return translated === translationKey ? value : translated
+  }
   if ((key === 'purpose' || key === 'mask_source') && typeof value === 'string')
     return t(value === 'feature' ? 'featureMask' : 'trainingMask')
   if (typeof value === 'boolean') return value ? t('yes') : t('no')

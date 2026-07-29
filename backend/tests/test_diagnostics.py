@@ -20,8 +20,10 @@ def test_pinned_runtime_metadata_enables_sparse_gpu_bundle_adjustment(tmp_path):
         json.dumps(
             {
                 "cudss_version": "0.8.0.10",
+                "cudnn_version": "9.20.0.48",
                 "gpu_bundle_adjustment_dense": True,
                 "gpu_bundle_adjustment_sparse": True,
+                "onnx_cuda_runtime_bundled": True,
             }
         ),
         encoding="utf-8",
@@ -32,6 +34,8 @@ def test_pinned_runtime_metadata_enables_sparse_gpu_bundle_adjustment(tmp_path):
     assert capabilities["dense"] is True
     assert capabilities["sparse"] is True
     assert capabilities["cudss"] == "0.8.0.10"
+    assert capabilities["cudnn"] == "9.20.0.48"
+    assert capabilities["onnx_cuda"] is True
 
 
 def test_cpu_only_ceres_marker_disables_gpu_bundle_adjustment(tmp_path):
@@ -46,6 +50,7 @@ def test_cpu_only_ceres_marker_disables_gpu_bundle_adjustment(tmp_path):
 
     assert capabilities["dense"] is False
     assert capabilities["sparse"] is False
+    assert capabilities["onnx_cuda"] is False
 
 
 def test_nvidia_inventory_exposes_pinned_cuda_ba_requirements():
