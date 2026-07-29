@@ -12,6 +12,7 @@ import {
   type ReconstructionData,
 } from '../api/client'
 import { useSettings } from '../ui/settings'
+import { AppIcon } from '../components/AppIcon'
 import {
   CapturePreview,
   CaptureSummary,
@@ -79,9 +80,9 @@ export const FrameInspector = ({
       {isInsv && (
         <span className="seg" role="group" aria-label={t('lensLabel')}>
           <button type="button" aria-pressed={lens === 0} className={lens === 0 ? 'on' : ''}
-            onClick={() => setLens(0)}>L0</button>
+            onClick={() => setLens(0)}><AppIcon name="camera" size={13} /> L0</button>
           <button type="button" aria-pressed={lens === 1} className={lens === 1 ? 'on' : ''}
-            onClick={() => setLens(1)}>L1</button>
+            onClick={() => setLens(1)}><AppIcon name="camera" size={13} /> L1</button>
         </span>
       )}
       <MaskPurposeTabs available={availablePurposes} selected={effectivePurpose}
@@ -113,6 +114,7 @@ export const FrameInspector = ({
         <InspectorFields>
           <InspectorField
             label={`${t(effectivePurpose === 'feature' ? 'featureMask' : 'trainingMask')} · ${t('maskCoverage')}`}
+            icon="mask"
             tone={maskRec.coverage_warning ? 'error' : 'muted'}>
             {(maskRec.coverage * 100).toFixed(1)}%{maskRec.coverage_warning ? ' ⚠' : ''}
           </InspectorField>
@@ -120,7 +122,7 @@ export const FrameInspector = ({
       )}
 
       <div className="inspector-section">
-        <div className="inspector-section-title">{t('frameScore')}</div>
+        <div className="inspector-section-title"><AppIcon name="points" size={14} /> {t('frameScore')}</div>
         <div className="mono">
           {info?.score
             ? `${t('sharpness')} ${info.score.sharpness.toFixed(1)}`

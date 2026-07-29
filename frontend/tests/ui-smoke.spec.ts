@@ -396,7 +396,11 @@ test('scene copy follows language and paths remain copyable native values', asyn
   await page.goto('/')
 
   await expect(page.locator('.scene-toolbar')).not.toContainText('Right-drag')
-  await expect(page.getByText(/Images 1 · Points 42 · Registered 100% · Path span 1\.250 units/)).toBeVisible()
+  const sceneInfo = page.locator('.scene-info')
+  await expect(sceneInfo).toContainText('Images 1')
+  await expect(sceneInfo).toContainText('Points 42')
+  await expect(sceneInfo).toContainText('Registered 100%')
+  await expect(sceneInfo).toContainText('Path span 1.250 units')
 
   const sourcePath = page.locator('.ide-source-path')
   await expect(sourcePath.locator('.path-value')).toHaveText('D:/VID 2026/clip.insv')
@@ -422,7 +426,10 @@ test('scene copy follows language and paths remain copyable native values', asyn
 
   await page.getByTitle('Settings').click()
   await page.locator('.pop select').nth(1).selectOption('zh')
-  await expect(page.getByText(/图像 1 · 点 42 · 注册 100% · 轨迹范围 1\.250 单位/)).toBeVisible()
+  await expect(sceneInfo).toContainText('图像 1')
+  await expect(sceneInfo).toContainText('点 42')
+  await expect(sceneInfo).toContainText('注册 100%')
+  await expect(sceneInfo).toContainText('轨迹范围 1.250 单位')
   await expect(page.getByText('场景视图', { exact: true }).first()).toBeVisible()
   expect(mock.unexpectedRequests).toEqual([])
 })

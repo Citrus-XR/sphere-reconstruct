@@ -4,6 +4,8 @@ import { GizmoHelper, GizmoViewport, Grid } from '@react-three/drei'
 import * as THREE from 'three'
 import { fetchPoints, type ParsedPoints, type ReconstructionData } from '../api/client'
 import { GlassSurface } from '../components/GlassSurface'
+import { AppIcon } from '../components/AppIcon'
+import { composeViewQuaternion, configureGridMaterial, panViewPosition } from './viewMath'
 import { useSettings } from '../ui/settings'
 
 const useCircleTexture = () =>
@@ -28,16 +30,6 @@ const PointCloud = ({ points, size, tex }: { points: ParsedPoints; size: number;
         transparent={false} depthTest depthWrite sizeAttenuation={false} />
     </points>
   )
-}
-
-export const configureGridMaterial = (material: THREE.Material): void => {
-  material.depthTest = true
-  material.depthWrite = false
-  material.polygonOffset = true
-  material.polygonOffsetFactor = 1
-  material.polygonOffsetUnits = 1
-  material.side = THREE.DoubleSide
-  material.needsUpdate = true
 }
 
 const StableGrid = ({ scale, center, groundY, light }: {
@@ -99,30 +91,6 @@ const CameraFrustums = ({ recon, scale, selectedId, onPick }: {
 const typing = () => {
   const el = document.activeElement
   return !!el && ['INPUT', 'TEXTAREA', 'SELECT'].includes(el.tagName)
-}
-
-// Mouse look の yaw / pitch と Z/X の roll を独立状態にする。ローカル軸の quaternion を
-// 累積すると通常の mouse look だけでも roll が混入するため、YXZ 順で毎回再構成する。
-export const composeViewQuaternion = (
-  yaw: number,
-  pitch: number,
-  roll: number,
-  target = new THREE.Quaternion(),
-): THREE.Quaternion => target.setFromEuler(new THREE.Euler(pitch, yaw, roll, 'YXZ'))
-
-export const panViewPosition = (
-  position: THREE.Vector3,
-  quaternion: THREE.Quaternion,
-  movementX: number,
-  movementY: number,
-  sceneScale: number,
-): THREE.Vector3 => {
-  const distance = sceneScale * 0.0012
-  const screenRight = new THREE.Vector3(1, 0, 0).applyQuaternion(quaternion)
-  const screenUp = new THREE.Vector3(0, 1, 0).applyQuaternion(quaternion)
-  return position
-    .addScaledVector(screenRight, -movementX * distance)
-    .addScaledVector(screenUp, movementY * distance)
 }
 
 const PITCH_LIMIT = Math.PI / 2 - 0.01
@@ -323,10 +291,17 @@ export const PointCloudViewer = ({
     <div style={{ position: 'absolute', inset: 0 }}>
       <GlassSurface className="scene-toolbar-glass" cornerRadius={15} padding="0">
         <div className="scene-toolbar">
-          <label>{t('sc_bg')} <input type="color" value={bg} onChange={e => setBgOverride(e.target.value)} /></label>
-          <label><input type="checkbox" checked={showGrid} onChange={e => setShowGrid(e.target.checked)} /> {t('sc_grid')}</label>
-          <label><input type="checkbox" checked={showCenter} onChange={e => setShowCenter(e.target.checked)} /> {t('sc_center')}</label>
-          <label>{t('sc_points')} <input type="range" min={1} max={8} step={0.5} value={pointSize}
+          <label><AppIcon name="color" size={15} /> {t('sc_bg')}
+            <input type="color" value={bg} onChange={e => setBgOverride(e.target.value)} />
+          </label>
+          <label><AppIcon name="grid" size={15} />
+            <input type="checkbox" checked={showGrid} onChange={e => setShowGrid(e.target.checked)} /> {t('sc_grid')}
+          </label>
+          <label><AppIcon name="target" size={15} />
+            <input type="checkbox" checked={showCenter} onChange={e => setShowCenter(e.target.checked)} /> {t('sc_center')}
+          </label>
+          <label><AppIcon name="points" size={15} /> {t('sc_points')}
+            <input type="range" min={1} max={8} step={0.5} value={pointSize}
             onChange={e => setPointSize(Number(e.target.value))} /></label>
         </div>
       </GlassSurface>

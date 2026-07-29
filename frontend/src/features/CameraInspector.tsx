@@ -82,14 +82,15 @@ export const CameraInspector = ({
           registration={{ registered: true, points: image.num_points }} />
       )}
       <InspectorFields>
-        {source && <InspectorField label={t('sourceLabel')}>{source.label}</InspectorField>}
-        <InspectorField label={t('datasetImage')}>{image.name}</InspectorField>
-        <InspectorField label={t('cameraPosition')}>
+        {source && <InspectorField label={t('sourceLabel')} icon="folder">{source.label}</InspectorField>}
+        <InspectorField label={t('datasetImage')} icon="image">{image.name}</InspectorField>
+        <InspectorField label={t('cameraPosition')} icon="camera">
           [{image.position.map(value => value.toFixed(3)).join(', ')}]
         </InspectorField>
         {maskRec && (
           <InspectorField
             label={`${t(effectivePurpose === 'feature' ? 'featureMask' : 'trainingMask')} · ${t('maskCoverage')}`}
+            icon="mask"
             tone={maskRec.coverage_warning ? 'error' : 'muted'}>
             {(maskRec.coverage * 100).toFixed(1)}%{maskRec.coverage_warning ? ' ⚠' : ''}
           </InspectorField>

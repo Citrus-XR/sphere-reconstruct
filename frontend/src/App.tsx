@@ -10,8 +10,8 @@ import { ErrorBoundary } from './components/ErrorBoundary'
 import { StageHierarchy, type HierItem } from './components/StageHierarchy'
 import { SceneHierarchy } from './components/SceneHierarchy'
 import { PathText } from './components/PathText'
-import { AppIcon } from './components/AppIcon'
-import { GlassSurface } from './components/GlassSurface'
+import { AppIcon, type AppIconName } from './components/AppIcon'
+import { GlassButton } from './components/GlassSurface'
 import { StageSettings } from './features/StageSettings'
 import { CameraInspector } from './features/CameraInspector'
 import { FrameInspector } from './features/FrameInspector'
@@ -21,7 +21,9 @@ import { useSettings } from './ui/settings'
 import { translateMsg } from './ui/i18n'
 
 type Lvl = 'info' | 'warn' | 'error' | 'debug'
-const LVL_EMOJI: Record<string, string> = { info: 'ℹ️', warn: '⚠️', error: '⛔', debug: '🔍' }
+const LVL_ICON: Record<Lvl, AppIconName> = {
+  info: 'info', warn: 'warning', error: 'error', debug: 'search',
+}
 const LAYOUT_KEY = 'layout.flex.v2'
 const PointCloudViewer = lazy(() => import('./viewers/PointCloudViewer').then(module => ({
   default: module.PointCloudViewer,
@@ -464,7 +466,7 @@ export const App = () => {
   // KEY+ARGS を持つイベントは表示言語で翻訳し, 未 key 行は message フォールバックを使う.
   const renderMsg = (e: EventEnvelope) => (e.msg_key ? translateMsg(lang, e.msg_key, e.msg_args) : e.message)
   const lastEv = events.length ? events[events.length - 1] : null
-  const lastLog = lastEv ? `[${fmtTime(lastEv.ts)}] ${LVL_EMOJI[lastEv.level] ?? ''} ${renderMsg(lastEv)}` : ''
+  const lastLog = lastEv ? `[${fmtTime(lastEv.ts)}] ${lastEv.level.toUpperCase()} ${renderMsg(lastEv)}` : ''
   const filtered = events.filter(e => lvlOn[e.level as Lvl] && (!search || renderMsg(e).toLowerCase().includes(search.toLowerCase())))
 
   // 新ログ到着時, 直前まで最下部にいた場合のみ追従スクロール (途中を読んでいる時は動かさない).
@@ -497,9 +499,19 @@ export const App = () => {
               : null}
             {recon && (
               <div className="scene-info">
-                {t('sceneImages')} {recon.stats.num_images} · {t('scenePoints')} {recon.stats.num_points3D.toLocaleString()}
-                {recon.stats.registered_ratio != null && ` · ${t('sceneRegistered')} ${(recon.stats.registered_ratio * 100).toFixed(0)}%`}
-                {recon.stats.camera_trajectory_diameter != null && ` · ${t('scenePathSpan')} ${recon.stats.camera_trajectory_diameter.toFixed(3)} ${recon.metric_scale?.metric ? t('sceneMeters') : t('sceneUnits')}`}
+                <span className="scene-metric"><AppIcon name="image" size={14} />
+                  {t('sceneImages')} {recon.stats.num_images}</span>
+                <span className="scene-metric"><AppIcon name="points" size={14} />
+                  {t('scenePoints')} {recon.stats.num_points3D.toLocaleString()}</span>
+                {recon.stats.registered_ratio != null && <span className="scene-metric">
+                  <AppIcon name="checkmark" size={14} />
+                  {t('sceneRegistered')} {(recon.stats.registered_ratio * 100).toFixed(0)}%
+                </span>}
+                {recon.stats.camera_trajectory_diameter != null && <span className="scene-metric">
+                  <AppIcon name="path" size={14} />
+                  {t('scenePathSpan')} {recon.stats.camera_trajectory_diameter.toFixed(3)}{' '}
+                  {recon.metric_scale?.metric ? t('sceneMeters') : t('sceneUnits')}
+                </span>}
               </div>
             )}
           </div>
@@ -552,10 +564,16 @@ export const App = () => {
             <div className="con-bar">
               {(['info', 'warn', 'error'] as Lvl[]).map(l => (
                 <button key={l} className={`con-chip${lvlOn[l] ? ' on' : ''}`} title={l}
-                  onClick={() => setLvlOn(p => ({ ...p, [l]: !p[l] }))}>{LVL_EMOJI[l]}</button>
+                  aria-label={l} onClick={() => setLvlOn(p => ({ ...p, [l]: !p[l] }))}>
+                  <AppIcon name={LVL_ICON[l]} size={15} />
+                </button>
               ))}
-              <input className="con-search" placeholder={t('search')} value={search} onChange={e => setSearch(e.target.value)} />
-              <button className="con-chip" onClick={() => setEvents([])}>{t('clearLog')}</button>
+              <span className="con-search-wrap"><AppIcon name="search" size={14} />
+                <input className="con-search" placeholder={t('search')} value={search} onChange={e => setSearch(e.target.value)} />
+              </span>
+              <button className="con-chip icon-label" onClick={() => setEvents([])}>
+                <AppIcon name="broom" size={14} /> {t('clearLog')}
+              </button>
             </div>
             <div className="mono con-log" ref={conRef}
               onScroll={e => { const el = e.currentTarget; atBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24 }}>
@@ -564,7 +582,9 @@ export const App = () => {
                   <span style={{ color: 'var(--fg-mute)' }}>
                     [{fmtTime(e.ts)}]{e.stage ? `[${t(`st_${e.stage}`)}]` : ''}
                   </span>{' '}
-                  <span title={e.level}>{LVL_EMOJI[e.level] ?? e.level}</span>{' '}
+                  <span className={`log-level log-level-${e.level}`} title={e.level}>
+                    <AppIcon name={LVL_ICON[e.level as Lvl] ?? 'info'} size={14} />
+                  </span>{' '}
                   {renderMsg(e)}{e.progress != null ? ` (${Math.round(e.progress * 100)}%)` : ''}
                 </div>
               ))}
@@ -581,33 +601,29 @@ export const App = () => {
   return (
     <div className="ide">
       <div className="ide-top">
-        <GlassSurface className="top-brand-glass" cornerRadius={14} padding="3px">
-          <button className="btn icon-label" onClick={() => setManagerOpen(true)}>
-            <AppIcon name="navigation" /> {t('projects')}
-          </button>
-        </GlassSurface>
+        <GlassButton className="icon-label" onClick={() => setManagerOpen(true)}>
+          <AppIcon name="navigation" /> {t('projects')}
+        </GlassButton>
         <h1 style={{ margin: '0 4px' }}>{project?.name ?? 'sphere-reconstruct'}</h1>
         {primarySource
           ? <><PathText path={primarySource.path} compact className="ide-source-path" />
               {project && project.sources.length > 1 && <span className="mono">+{project.sources.length - 1}</span>}</>
           : <span className="mono ide-source-path">{t('noSource')}</span>}
-        <GlassSurface className="top-actions-glass" cornerRadius={16} padding="3px">
-          <div className="top-actions">
-            <button className="btn btn-secondary icon-label" disabled={!projectId || clearOutputs.isPending || processing}
-              onClick={() => { if (window.confirm(t('clearOutputsConfirm'))) clearOutputs.mutate() }}>
-              <AppIcon name="broom" /> {t('clearOutputs')}
-            </button>
-            {processing
-              ? <button className="btn stop icon-label" onClick={stopJob}>
-                  <AppIcon name="stop" /> {t('stop')}
-                </button>
-              : <button className="btn icon-label" disabled={!projectId || !!runReason || !nextStep || runNextMutation.isPending}
-                  title={runReason ?? ''} onClick={runNext}>
-                  <AppIcon name="play" /> {t('runAll')}
-                </button>}
-            <SettingsMenu />
-          </div>
-        </GlassSurface>
+        <div className="top-actions">
+          <GlassButton className="btn-secondary icon-label" disabled={!projectId || clearOutputs.isPending || processing}
+            onClick={() => { if (window.confirm(t('clearOutputsConfirm'))) clearOutputs.mutate() }}>
+            <AppIcon name="broom" /> {t('clearOutputs')}
+          </GlassButton>
+          {processing
+            ? <GlassButton className="stop icon-label" onClick={stopJob}>
+                <AppIcon name="stop" /> {t('stop')}
+              </GlassButton>
+            : <GlassButton className="icon-label" disabled={!projectId || !!runReason || !nextStep || runNextMutation.isPending}
+                title={runReason ?? ''} onClick={runNext}>
+                <AppIcon name="play" /> {t('runAll')}
+              </GlassButton>}
+          <SettingsMenu />
+        </div>
       </div>
 
       <div className="ide-center">

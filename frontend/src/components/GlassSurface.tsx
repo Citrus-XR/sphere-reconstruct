@@ -1,5 +1,5 @@
 import LiquidGlass from 'liquid-glass-react'
-import type { CSSProperties, ReactNode } from 'react'
+import type { ButtonHTMLAttributes, CSSProperties, ReactNode } from 'react'
 
 export const GlassSurface = ({
   children,
@@ -31,4 +31,10 @@ export const GlassSurface = ({
     </LiquidGlass>
     <div className="glass-surface-content" style={{ padding }}>{children}</div>
   </div>
+)
+
+export const GlassButton = ({ className = '', children, ...props }: ButtonHTMLAttributes<HTMLButtonElement>) => (
+  <GlassSurface className="glass-button-surface" cornerRadius={999} padding="0">
+    <button {...props} className={`btn glass-button ${className}`.trim()}>{children}</button>
+  </GlassSurface>
 )

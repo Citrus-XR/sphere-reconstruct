@@ -3,6 +3,7 @@ import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { api, type Project } from '../api/client'
 import { useSettings } from '../ui/settings'
 import { AppIcon } from './AppIcon'
+import { GlassSurface } from './GlassSurface'
 
 // Unity Hub 風のプロジェクト管理ウィンドウ: 一覧 (更新時刻降順) / 新規作成 (名前入力) /
 // 削除 (ディスクから完全削除, ソース動画は消さない, 確認あり).
@@ -48,7 +49,9 @@ export const ProjectManager = ({
 
   return (
     <div className="modal-back" onClick={onClose}>
-      <div className="modal" style={{ height: 560, width: 680 }} onClick={e => e.stopPropagation()}
+      <GlassSurface className="modal-glass" cornerRadius={20} padding="0"
+        style={{ height: 560, width: 680 }}>
+      <div className="modal" style={{ height: '100%', width: '100%' }} onClick={e => e.stopPropagation()}
         role="dialog" aria-modal="true" aria-labelledby="project-manager-title">
         <div className="modal-head">
           <strong id="project-manager-title" style={{ flex: 1 }}>{t('projects')}</strong>
@@ -94,6 +97,7 @@ export const ProjectManager = ({
         </div>
         {del.error && <div className="error" style={{ padding: 8 }}>{String(del.error)}</div>}
       </div>
+      </GlassSurface>
     </div>
   )
 }

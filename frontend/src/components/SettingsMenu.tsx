@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { createPortal } from 'react-dom'
 import { useQuery } from '@tanstack/react-query'
 import { api } from '../api/client'
 import { useSettings } from '../ui/settings'
@@ -6,6 +7,7 @@ import type { Lang } from '../ui/i18n'
 import type { Theme } from '../ui/settings'
 import { PathText } from './PathText'
 import { AppIcon } from './AppIcon'
+import { GlassButton, GlassSurface } from './GlassSurface'
 
 // 右上の設定メニュー: テーマ (自動/ライト/ダーク) + 言語. ブラウザに保存.
 export const SettingsMenu = () => {
@@ -16,13 +18,14 @@ export const SettingsMenu = () => {
   })
   return (
     <div style={{ position: 'relative' }}>
-      <button className="btn btn-secondary icon-only" onClick={() => setOpen(o => !o)}
+      <GlassButton className="btn-secondary icon-only" onClick={() => setOpen(o => !o)}
         title={t('settings')} aria-label={t('settings')}>
         <AppIcon name="settings" />
-      </button>
-      {open && (
+      </GlassButton>
+      {open && createPortal(
         <>
           <div style={{ position: 'fixed', inset: 0, zIndex: 199 }} onClick={() => setOpen(false)} />
+          <GlassSurface className="pop-glass" cornerRadius={18} padding="0">
           <div className="pop">
             <div className="ctl">
               <label>{t('theme')}</label>
@@ -52,7 +55,9 @@ export const SettingsMenu = () => {
               ))}
             </div>}
           </div>
-        </>
+          </GlassSurface>
+        </>,
+        document.body,
       )}
     </div>
   )

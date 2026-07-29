@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test'
 import * as THREE from 'three'
-import { composeViewQuaternion, configureGridMaterial, panViewPosition } from '../src/viewers/PointCloudViewer'
+import { composeViewQuaternion, configureGridMaterial, panViewPosition } from '../src/viewers/viewMath'
 
 test('mouse yaw and pitch do not introduce camera roll', () => {
   for (const [yaw, pitch] of [[0.8, 0.4], [-1.7, 0.9], [2.4, -0.7]]) {
