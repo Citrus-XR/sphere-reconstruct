@@ -387,11 +387,16 @@ parktest の実測:
 | Eval preset、2.4M / 2304、PPISP controller | 約 7k で OOM | 未評価 |
 | Eval preset、2.4M / 2304、PPISP controller off | 約 10k で OOM | 未評価 |
 | Eval preset、2M / 2048、PPISP on / controller off | 30,000 完走 | **不合格**。28,600 splat が 10 m 超、3,238 splat が 50 m 超 |
-| LFStudio UI default + GUT + segment mask、PPISP off | 対話確認 | 大尺度の sky / ground collapse を再現せず |
+| LFStudio UI default + GUT + segment mask、2M / 2048、PPISP off | 30,000 完走、61分18秒 | 数値改善、visual acceptance 待ち |
 
 不合格 PLY の巨大 splat は青 / 白が中心で、空が地面へ現れる直接原因だった。PPISP を完全に無効化しても
 eval preset で再現するため、PPISP 単独の問題ではない。PPISP は exposure、vignetting、white balance、
 camera response を学習する appearance model で denoiser ではなく、現時点では opt-in experiment とする。
+
+UI default の完走 PLY は median maximum scale が 0.0921 m から 0.0298 m、P99 が 14.08 m から 6.58 m、
+10 m 超が 28,600 から 12,434、10 m 超かつ opacity 0.5 超が 8,858 から 1,091 へ減った。改善は明確だが
+50 m 超が 1,404 残り maximum 2,345 m の低 opacity splat もあるため、数値だけで品質合格にせず LFStudio で
+sky / ground separation を visual acceptance する。
 
 Camera icon の brown / red は relative photometric loss heatmap で、camera disable を意味しない。Generic
 SceneNode Transform が 0 でも actual pose は COLMAP `R/t` にある。

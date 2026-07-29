@@ -286,6 +286,10 @@ means LR 6.4 倍、scaling LR 約 2.86 倍で、parktest の scene scale 22.895 
 2M / 2048 の不合格 PLY は 10 m 超 28,600 個、50 m 超 3,238 個を含んだ。PPISP を無効化しても再現する
 ため、config generator は v0.5.3 `mrnf_defaults()` を基準にする。
 
+同じ dataset を UI default MRNF + GUT + segment mask、PPISP off、2M / 2048 で再学習すると 30,000 step を
+61分18秒で完走した。10 m 超 splat は 12,434、10 m 超かつ opacity 0.5 超は 1,091 へ減少した。ただし
+50 m 超が 1,404 残るため、runtime success と数値改善の後にも sky / ground separation の visual acceptance を行う。
+
 疎点群は連続 surface ではない。Export statistics の sparse-point radius median / P95 / P99 / maximum で裾を
 確認し、P99 / median が 5 を超える場合は遠景・小視差点が広いことを示す warning として扱う。真の遠景まで
 機械的に消さないため、この warning は point を変更しない。
