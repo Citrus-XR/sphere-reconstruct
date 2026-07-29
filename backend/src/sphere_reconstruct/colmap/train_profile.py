@@ -45,8 +45,17 @@ def compute_profile(recon: Reconstruction) -> dict:
     if len(pts) >= 3:
         center = np.median(pts, axis=0)
         dp = np.linalg.norm(pts - center, axis=1)
-        # LichtFeld の scene_scale (点→中心の中央値).
-        prof["scene_scale_point"] = float(np.median(dp))
+        # LichtFeld の scene_scale (点→中心の中央値) と、裾の広さを分離して公開する。
+        radius_median = float(np.median(dp))
+        radius_p95, radius_p99 = (float(value) for value in np.percentile(dp, [95.0, 99.0]))
+        prof["scene_scale_point"] = radius_median
+        prof["sparse_point_radius_median"] = radius_median
+        prof["sparse_point_radius_p95"] = radius_p95
+        prof["sparse_point_radius_p99"] = radius_p99
+        prof["sparse_point_radius_max"] = float(np.max(dp))
+        prof["sparse_point_radius_p99_to_median"] = (
+            radius_p99 / radius_median if radius_median > 0.0 else 0.0
+        )
         # 外れ点に強い bbox (2.5–97.5 パーセンタイル).
         lo = np.percentile(pts, 2.5, axis=0)
         hi = np.percentile(pts, 97.5, axis=0)

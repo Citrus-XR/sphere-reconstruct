@@ -1,10 +1,9 @@
 """LichtFeld-Studio 向け推奨学習 config の生成.
 
 再構成プロファイル + camera model から, 3 つの densification strategy (mrnf / igs+ / mcmc)
-の config JSON を組み立てる. 公式 preset を基底にし, 場面依存の `max_cap` と camera model 互換に
-関わる `gut` / `undistort` / `random` を上書きする. 推奨 MRNF では複数 physical camera 間の
-exposure / color / vignetting / CRF 差を分離する PPISP と novel-view controller も有効にする.
-scene_scale は LichtFeld が読み込み時に自動計算するため config には出さない.
+の config JSON を組み立てる. LFStudio の対話 UI と同じ strategy default を基底にし, 場面依存の
+`max_cap` と camera model 互換に関わる `gut` / `undistort` / `random` だけを上書きする.
+scene_scale は LFStudio が読み込み時に自動計算するため config には出さない.
 
 互換の要点 (LichtFeld source code で確認):
 - `gut` はレンダラ選択フラグ: false=fastgs (既定, PINHOLE 専用), true=gsplat (歪み/FISHEYE/
@@ -19,22 +18,22 @@ from __future__ import annotations
 
 from copy import deepcopy
 
-# --- 公式 preset (eval/*.json) を基底テンプレートとして埋め込む ---------------------
+# --- LFStudio v0.5.3 の対話 UI default -------------------------------------------
 
 _MRNF_PRESET = {
     "iterations": 30000,
     "sh_degree_interval": 1000,
-    "means_lr": 0.000128,
-    "means_lr_end": 0.00000016,
-    "shs_lr": 0.005,
-    "opacity_lr": 0.025,
-    "scaling_lr": 0.020,
+    "means_lr": 0.000020,
+    "means_lr_end": 0.00000020,
+    "shs_lr": 0.002,
+    "opacity_lr": 0.012,
+    "scaling_lr": 0.007,
     "scaling_lr_end": 0.005,
-    "rotation_lr": 0.0015,
+    "rotation_lr": 0.002,
     "lambda_dssim": 0.2,
     "min_opacity": 0.0039215689,
     "refine_every": 200,
-    "start_refine": 500,
+    "start_refine": 0,
     "stop_refine": 28500,
     "grad_threshold": 0.003,
     "sh_degree": 3,
@@ -80,11 +79,13 @@ _MRNF_PRESET = {
 _MCMC_PRESET = {
     "iterations": 30000,
     "sh_degree_interval": 1000,
-    "means_lr": 0.000128,
-    "shs_lr": 0.0024,
-    "opacity_lr": 0.0335,
-    "scaling_lr": 0.00475,
-    "rotation_lr": 0.00083,
+    "means_lr": 0.000016,
+    "means_lr_end": 0.00000016,
+    "shs_lr": 0.0025,
+    "opacity_lr": 0.025,
+    "scaling_lr": 0.005,
+    "scaling_lr_end": 0.005,
+    "rotation_lr": 0.001,
     "lambda_dssim": 0.2,
     "min_opacity": 0.005,
     "refine_every": 100,
@@ -92,8 +93,8 @@ _MCMC_PRESET = {
     "stop_refine": 25000,
     "grad_threshold": 0.0002,
     "sh_degree": 3,
-    "opacity_reg": 0.0042,
-    "scale_reg": 0.0042,
+    "opacity_reg": 0.01,
+    "scale_reg": 0.01,
     "init_opacity": 0.5,
     "init_scaling": 0.1,
     "max_cap": 1000000,
@@ -133,10 +134,12 @@ _MCMC_PRESET = {
 _IGSPLUS_PRESET = {
     "iterations": 30000,
     "sh_degree_interval": 1000,
-    "means_lr": 0.000128,
+    "means_lr": 0.000016,
+    "means_lr_end": 0.00000016,
     "shs_lr": 0.005,
     "opacity_lr": 0.025,
     "scaling_lr": 0.020,
+    "scaling_lr_end": 0.005,
     "rotation_lr": 0.0015,
     "lambda_dssim": 0.20,
     "min_opacity": 0.005,
@@ -147,8 +150,8 @@ _IGSPLUS_PRESET = {
     "sh_degree": 3,
     "opacity_reg": 0.0,
     "scale_reg": 0.0,
-    "init_opacity": 0.3,
-    "init_scaling": 0.2,
+    "init_opacity": 0.1,
+    "init_scaling": 0.1,
     "max_cap": 1000000,
     "strategy": "igs+",
     "eval_steps": [7000, 30000],
@@ -180,33 +183,33 @@ _PRESETS = {"mrnf": _MRNF_PRESET, "igsplus": _IGSPLUS_PRESET, "mcmc": _MCMC_PRES
 
 _RECOMMENDED_STRATEGY = "mrnf"
 
-# PPISP controller は free-view rendering に frame 固有補正を持ち込まず、rendered appearance から
-# 補正を推定する。最後の 5,000 step で scene を固定して distill する LFStudio 既定 schedule を使う。
-# https://github.com/MrNeRF/LichtFeld-Studio/blob/b27a98e83cc42bdffad76f35a064614d82b12264/src/core/include/core/parameters.hpp#L162-L172
-# https://github.com/nv-tlabs/ppisp/blob/df33809f7b3b20ac06de088dfc871b144b8fb54d/README.md#overview
-_RECOMMENDED_PPISP = {
-    "use_ppisp": True,
+# `eval/mrnf_optimization_params.json` は benchmark 用で、対話 UI の MRNF default より means_lr が
+# 6.4 倍、scaling_lr が約 2.86 倍高い。scene_scale=22.895 の parktest では実効 means LR が
+# 2.93e-3 となり、空の Gaussian が 10–100 m 級へ膨張した。汎用 config は `mrnf_defaults()` に
+# 合わせ、未解決の appearance sidecar を既定に持ち込まない。
+# https://github.com/MrNeRF/LichtFeld-Studio/blob/d8c50c6a3e2273cb74130a6e9023de8d068af52d/src/core/parameters.cpp#L243-L265
+# https://github.com/MrNeRF/LichtFeld-Studio/blob/d8c50c6a3e2273cb74130a6e9023de8d068af52d/eval/mrnf_optimization_params.json
+_RECOMMENDED_APPEARANCE = {
+    "use_ppisp": False,
     "ppisp_lr": 0.002,
     "ppisp_reg_weight": 0.001,
     "ppisp_warmup_steps": 500,
-    "ppisp_use_controller": True,
-    "ppisp_freeze_gaussians_on_distill": True,
+    "ppisp_use_controller": False,
+    "ppisp_freeze_gaussians_on_distill": False,
     "ppisp_controller_activation_step": -1,
     "ppisp_controller_lr": 0.002,
 }
 
 # max_cap 導出: SfM 点数の倍率. VRAM/品質のダイヤルなので clamp する.
 _CAP_K = 6
-# LFStudio v0.5.3 の再現用 eval preset は 1M。runtime 既定 5M は eager allocation で
-# 12GB 級 GPU に重い。3840 px GUT + PPISP controller の実測では 2.4M/3M が raster 一時領域で
-# OOM になったため、通常の推奨値は 2M までにする。
-# https://github.com/MrNeRF/LichtFeld-Studio/blob/d8c50c6a3e2273cb74130a6e9023de8d068af52d/eval/mrnf_optimization_params.json
+# LFStudio v0.5.3 の MRNF UI default 5M は eager allocation で 12GB 級 GPU に重い。通常の推奨値は
+# 2M までにする。
 _CAP_FLOOR = 1_000_000
 _CAP_CEIL = 2_000_000
 # GUT backward は visible splat 数に比例する巨大な連続領域を要求する。12GB / 2.4M splat の
-# parktest では 3072px でも 3.87GiB request で OOM、2304px で継続できた。
+# parktest は 2304px でも最終的に OOM し、2M / 2048px が完走した。
 # https://github.com/MrNeRF/LichtFeld-Studio/issues/1091
-_GUT_MAX_WIDTH = 2304
+_GUT_MAX_WIDTH = 2048
 _SPARSE_POINT_WARNING = 10_000
 
 
@@ -244,12 +247,14 @@ def build_configs(profile: dict, *, has_masks: bool = False) -> tuple[dict[str, 
         warnings.append("high_reproj_error")
     if 0 < npts < _SPARSE_POINT_WARNING:
         warnings.append("sparse_point_cloud")
+    if float(profile.get("sparse_point_radius_p99_to_median", 0.0)) > 5.0:
+        warnings.append("wide_sparse_point_distribution")
 
     configs: dict[str, dict] = {}
     for name, preset in _PRESETS.items():
         cfg = deepcopy(preset)
         if name == _RECOMMENDED_STRATEGY:
-            cfg.update(_RECOMMENDED_PPISP)
+            cfg.update(_RECOMMENDED_APPEARANCE)
         cfg["max_cap"] = cap
         cfg["mask_mode"] = "segment" if has_masks else "none"
         cfg["invert_masks"] = False

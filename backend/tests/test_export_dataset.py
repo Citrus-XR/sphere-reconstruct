@@ -231,12 +231,12 @@ def test_export_root_is_directly_loadable_by_lf_studio(tmp_path: Path):
     assert "training_output_dir" not in recommendation
     assert recommendation["gui_integration"]["train_configs_auto_applied"] is False
     required_settings = recommendation["gui_integration"]["required_settings"]
-    assert required_settings["ppisp"] is True
-    assert required_settings["ppisp_controller"] is True
+    assert required_settings["ppisp"] is False
+    assert required_settings["ppisp_controller"] is False
     config = json.loads((output / "train_configs" / "train_config.mrnf.json").read_text())
     assert config["mask_mode"] == "segment"
-    assert config["use_ppisp"] is True
-    assert config["ppisp_use_controller"] is True
+    assert config["use_ppisp"] is False
+    assert config["ppisp_use_controller"] is False
 
 
 def test_export_losslessly_crops_fisheye_training_dataset(tmp_path: Path):

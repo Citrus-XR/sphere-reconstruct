@@ -138,7 +138,7 @@ General default は X5 indoor / outdoor と mixed phone-photo test の実測を�
 | Alignment | IMU rotation | Scale を変更しない |
 | Scale | Physical rig baseline | IMU 二重積分を使わない |
 | Ground | Trajectory-local median | 水面 / roof / point density bias を抑える |
-| LFStudio | MRNF + GUT + masks + PPISP controller | Distorted camera と appearance 差を扱う |
+| LFStudio | MRNF UI default + GUT + masks | Distorted camera を扱い、未検証の appearance 補正を既定にしない |
 
 ### Quality presets
 
@@ -355,35 +355,43 @@ rasterizer へ渡す。LFStudio import 時の `Undistort: ... -> ...` log は hy
 training RGB / mask をその小さい解像度へ変換した記録ではない。Actual image loader の `max-width` が学習 tensor
 解像度を示す。
 
+疎点群は surface reconstruction ではなく、複数 view で再現できた feature の 3D sample だけを表す。従って地面が
+連続した点の床にならないこと自体は正常。Export statistics は point radius の median / P95 / P99 / maximum と
+P99-to-median ratio を表示し、ratio が 5 を超える場合は `wide_sparse_point_distribution` を出す。遠方の山や建物も
+含み得るため自動削除せず、学習 hyperparameter の異常と区別して診断する。
+
 ## Recommended LFStudio training
 
 ```text
 LichtFeld-Studio --config <dataset>/train_configs/train_config.mrnf.json \
-  --data-path <dataset> --max-width 2304 --headless --train
+  --data-path <dataset> --max-width 2048 --headless --train
 ```
 
 - Strategy: MRNF
 - Renderer: GUT
 - Mask: resolved segment mask
-- PPISP + novel-view controller: On
-- Maximum width: 2304
+- PPISP + novel-view controller: Off
+- Maximum width: 2048
 - General Gaussian cap: 2M
-- Verified high-quality manual cap on 12 GB RTX 4070 Ti: 2.4M
 - Iterations: 30,000
 
-PPISP は exposure、vignetting、white balance、camera response を camera / frame ごとに学習する appearance
-model で、denoiser ではない。Controller は final phase で Gaussians を freeze し novel-view appearance を
-distill する。Final PLY と同名 `.ppisp` sidecar を一緒に保管する。
+生成 config は LFStudio v0.5.3 の `mrnf_defaults()` を基準にする。`eval/mrnf_optimization_params.json` は
+benchmark 用で、UI default より means LR 6.4 倍、scaling LR 約 2.86 倍、SH LR 2.5 倍、opacity LR
+約 2.08 倍高い。parktest では scene scale 22.895 により実効 means LR が 0.00293 となり、完走しても
+geometry が壊れたため general preset として使用しない。
 
-Old invalid-geometry run の memory sweep:
+parktest の実測:
 
-| Input / cap / width | Result |
-|---|---|
-| Full、3.0M | OOM at 11,800 |
-| Full、2.4M | OOM at 9,100 |
-| Cropped、2.4M、full width | OOM at 10,700 |
-| Cropped、2.4M、3072 | OOM at 16,900、3.868 GiB request |
-| **Cropped、2.4M、2304** | **30,000 complete** |
+| Config | Runtime result | Geometry result |
+|---|---|---|
+| Eval preset、2.4M / 2304、PPISP controller | 約 7k で OOM | 未評価 |
+| Eval preset、2.4M / 2304、PPISP controller off | 約 10k で OOM | 未評価 |
+| Eval preset、2M / 2048、PPISP on / controller off | 30,000 完走 | **不合格**。28,600 splat が 10 m 超、3,238 splat が 50 m 超 |
+| LFStudio UI default + GUT + segment mask、PPISP off | 対話確認 | 大尺度の sky / ground collapse を再現せず |
+
+不合格 PLY の巨大 splat は青 / 白が中心で、空が地面へ現れる直接原因だった。PPISP を完全に無効化しても
+eval preset で再現するため、PPISP 単独の問題ではない。PPISP は exposure、vignetting、white balance、
+camera response を学習する appearance model で denoiser ではなく、現時点では opt-in experiment とする。
 
 Camera icon の brown / red は relative photometric loss heatmap で、camera disable を意味しない。Generic
 SceneNode Transform が 0 でも actual pose は COLMAP `R/t` にある。
@@ -423,7 +431,8 @@ FastDVDnet preprocessing と raw training を 30k まで比較した。
 
 同じ clean target の SIFT masked PSNR は denoised training 24.478、raw training 25.028。Denoise は約
 0.55 dB 悪化し、detail hallucination / temporal inconsistency risk も増えるため、denoise Step、model、UI、
-dependency は削除した。Night scene は raw image + SIFT pose + PPISP を使う。
+dependency は削除した。Night scene は raw image + SIFT pose を基準にし、appearance 補正は別の opt-in
+比較として扱う。
 
 ## Frontend UI
 

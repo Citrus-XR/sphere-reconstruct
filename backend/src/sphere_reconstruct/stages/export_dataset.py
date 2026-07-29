@@ -336,7 +336,7 @@ class ExportDataset(Stage):
                 "train_configs_auto_applied": False,
                 "warnings": [
                     "lfstudio_gui_does_not_auto_apply_train_configs",
-                    "select_mrnf_enable_gut_segment_masks_and_ppisp_manually",
+                    "select_mrnf_enable_gut_and_segment_masks_manually",
                 ],
                 "required_settings": {
                     "strategy": cfg_info["recommended_strategy"],

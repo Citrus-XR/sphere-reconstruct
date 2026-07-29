@@ -85,6 +85,15 @@ def test_high_reproj_warns():
     assert "high_reproj_error" in info["warnings"]
 
 
+def test_wide_sparse_point_distribution_warns_without_changing_geometry():
+    profile = _profile(["PINHOLE"])
+    profile["sparse_point_radius_p99_to_median"] = 7.3
+
+    _, info = lc.build_configs(profile)
+
+    assert "wide_sparse_point_distribution" in info["warnings"]
+
+
 def test_all_presets_have_required_keys():
     required = {
         "iterations",
@@ -107,6 +116,20 @@ def test_all_presets_have_required_keys():
         assert cfg["strategy"] in ("mrnf", "igs+", "mcmc")
 
 
+def test_alternative_configs_use_lfstudio_ui_defaults_not_eval_presets():
+    configs, _ = lc.build_configs(_profile(["PINHOLE"]))
+
+    mcmc = configs["mcmc"]
+    assert mcmc["means_lr"] == 0.000016
+    assert mcmc["scaling_lr"] == 0.005
+    assert mcmc["opacity_reg"] == 0.01
+
+    igsplus = configs["igsplus"]
+    assert igsplus["means_lr"] == 0.000016
+    assert igsplus["init_opacity"] == 0.1
+    assert igsplus["init_scaling"] == 0.1
+
+
 def test_binary_masks_enable_segment_mode():
     configs, _ = lc.build_configs(_profile(["OPENCV_FISHEYE"]), has_masks=True)
     for config in configs.values():
@@ -114,18 +137,22 @@ def test_binary_masks_enable_segment_mode():
         assert config["invert_masks"] is False
 
 
-def test_recommended_mrnf_enables_ppisp_and_novel_view_controller():
+def test_recommended_mrnf_uses_stable_ui_defaults_without_ppisp():
     configs, info = lc.build_configs(_profile(["OPENCV_FISHEYE", "SIMPLE_RADIAL"]))
 
     recommended = configs["mrnf"]
     assert info["recommended_strategy"] == "mrnf"
-    assert recommended["use_ppisp"] is True
-    assert recommended["ppisp_use_controller"] is True
-    assert recommended["ppisp_freeze_gaussians_on_distill"] is True
+    assert recommended["use_ppisp"] is False
+    assert recommended["ppisp_use_controller"] is False
+    assert recommended["ppisp_freeze_gaussians_on_distill"] is False
     assert recommended["ppisp_controller_activation_step"] == -1
     assert recommended["ppisp_warmup_steps"] == 500
-    assert info["recommended_max_width"] == 2304
-    assert "--max-width 2304" in info["usage"]
+    assert recommended["means_lr"] == 0.000020
+    assert recommended["scaling_lr"] == 0.007
+    assert recommended["shs_lr"] == 0.002
+    assert recommended["opacity_lr"] == 0.012
+    assert info["recommended_max_width"] == 2048
+    assert "--max-width 2048" in info["usage"]
 
     for alternative in (configs["mcmc"], configs["igsplus"]):
         assert alternative.get("use_ppisp", False) is False

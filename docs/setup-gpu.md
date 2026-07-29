@@ -265,7 +265,8 @@ observation、mask を同じ offset で更新する。jpegtran が無ければ o
 ## LichtFeld Studio GPU memory
 
 Native distorted / fisheye / ERP dataset は MRNF または MCMC + GUT。IGS+ は GUT と併用できず、ERP を
-扱えない。Recommended MRNF は segment mask、PPISP、novel-view controller を有効にする。
+扱えない。Recommended MRNF は LFStudio UI の安定した default を保ち、segment mask と GUT だけを
+追加する。PPISP と novel-view controller は opt-in で、既定では無効。
 
 `undistort=false` では original camera model と distortion coefficient を GUT rasterizer が直接使う。Dataset
 load 時に出る `Undistort: source -> destination` は split-view 用 metadata の事前計算であり、training image
@@ -273,13 +274,21 @@ load 時に出る `Undistort: source -> destination` は split-view 用 metadata
 
 ```text
 LichtFeld-Studio --config <dataset>/train_configs/train_config.mrnf.json \
-  --data-path <dataset> --max-width 2304
+  --data-path <dataset> --max-width 2048
 ```
 
 GUT backward temporary memory は visible splat と image size に比例する。12 GB RTX 4070 Ti の parktest
-では cropped 2.4M Gaussiansでも 3072 px が 3.868 GiB contiguous allocation で OOM、2304 px は 30,000
-iterations 完走。General default は cap 2M / max width 2304、2.4M は同等以上の VRAM で確認した manual
-high-quality value とする。Final PLY と同名 `.ppisp` sidecar を一緒に保管する。
+では 2.4M / 2304 px が controller on / off の両方で OOM、2M / 2048 px が 30,000 iterations 完走した。
+従って general memory default は cap 2M / max width 2048。
+
+完走は品質合格を意味しない。旧 `eval/mrnf_optimization_params.json` preset は LFStudio UI default より
+means LR 6.4 倍、scaling LR 約 2.86 倍で、parktest の scene scale 22.895 では巨大な空色 splat を生成した。
+2M / 2048 の不合格 PLY は 10 m 超 28,600 個、50 m 超 3,238 個を含んだ。PPISP を無効化しても再現する
+ため、config generator は v0.5.3 `mrnf_defaults()` を基準にする。
+
+疎点群は連続 surface ではない。Export statistics の sparse-point radius median / P95 / P99 / maximum で裾を
+確認し、P99 / median が 5 を超える場合は遠景・小視差点が広いことを示す warning として扱う。真の遠景まで
+機械的に消さないため、この warning は point を変更しない。
 
 ## Verification
 
