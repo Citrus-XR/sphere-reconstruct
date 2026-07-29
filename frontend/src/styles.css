@@ -18,11 +18,11 @@
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --fg: #eaeaea;
-    --fg-mute: #9a9a9a;
-    --bg: #171717;
-    --bg-elev: #212121;
-    --border: #303030;
+    --fg: #f4f7fb;
+    --fg-mute: #bdc7d6;
+    --bg: #111821;
+    --bg-elev: #1a2432;
+    --border: #344257;
     --accent: #6c9dff;
     --error: #ff7b78;
     --glass: rgba(23, 31, 45, 0.62);
@@ -38,6 +38,14 @@
 body { margin: 0; color: var(--fg); background:
   radial-gradient(circle at 12% 0%, color-mix(in srgb, var(--accent) 24%, transparent), transparent 34%),
   radial-gradient(circle at 88% 100%, rgba(92, 214, 201, .16), transparent 38%), var(--bg); }
+* { scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--fg-mute) 52%, transparent) var(--bg-elev); }
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-track { background: var(--bg-elev); }
+*::-webkit-scrollbar-thumb { background: color-mix(in srgb, var(--fg-mute) 52%, transparent);
+  border: 2px solid var(--bg-elev); border-radius: 999px; }
+*::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--accent) 62%, var(--fg-mute)); }
 
 .glass-surface-host { position: relative; display: inline-flex; isolation: isolate; min-width: 0; }
 .glass-surface-content { position: relative; z-index: 2; display: flex; align-items: center; min-width: 0; }
@@ -72,11 +80,11 @@ body { margin: 0; color: var(--fg); background:
 }
 .icon-only { width: 34px; height: 34px; padding: 0; }
 .icon-label svg { flex: none; }
-.glass-button-surface { flex: none; }
-.glass-button { min-height: 34px; background: color-mix(in srgb, var(--accent) 24%, transparent);
-  color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, var(--glass-border));
-  box-shadow: none; }
-.glass-button.btn-secondary { background: transparent; }
+.top-glass-button { min-height: 34px; background: var(--glass); color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--glass-border)); box-shadow: none; }
+.top-glass-button:hover:not(:disabled) { transform: none; filter: none;
+  background: color-mix(in srgb, var(--accent) 11%, var(--glass)); }
+.top-glass-button:active:not(:disabled) { transform: none; }
 
 .input {
   border: 1px solid var(--border);
@@ -148,7 +156,6 @@ input[type="color"] { width: 28px; height: 20px; padding: 1px; border: 1px solid
   backdrop-filter: blur(18px) saturate(130%);
   font-family: var(--mono-font); font-size: 11px; color: var(--fg-mute);
   overflow: hidden; min-width: 0; }
-.top-actions-glass, .top-brand-glass { flex: none; }
 .top-actions { display: flex; align-items: center; gap: 6px; }
 
 /* hierarchy (左) */
@@ -190,9 +197,6 @@ input[type="color"] { width: 28px; height: 20px; padding: 1px; border: 1px solid
 .modal { background: var(--glass-strong); border: 1px solid var(--glass-border); border-radius: 20px;
   box-shadow: inset 0 1px 0 var(--glass-highlight); backdrop-filter: blur(28px) saturate(140%);
   width: 640px; max-height: 80vh; display: flex; flex-direction: column; overflow: hidden; }
-.modal-glass .glass-surface-content { width: 100%; height: 100%; }
-.modal-glass .modal { background: color-mix(in srgb, var(--glass-strong) 68%, transparent);
-  backdrop-filter: none; }
 .modal-head { padding: 10px 14px; border-bottom: 1px solid var(--glass-border);
   display: flex; align-items: center; gap: 8px; }
 .modal-list { overflow: auto; padding: 6px; }
@@ -221,6 +225,7 @@ input[type="color"] { width: 28px; height: 20px; padding: 1px; border: 1px solid
 
 /* ===== テーマ手動切替 (data-theme が prefers-color-scheme を上書き) ===== */
 :root[data-theme="light"] {
+  color-scheme: light;
   --fg: #1a1a1a; --fg-mute: #6a6a6a; --bg: #fdfdfd; --bg-elev: #ffffff;
   --border: #dcdcdc; --accent: #3a6df0; --error: #d9534f;
   --glass: rgba(255,255,255,.58); --glass-strong: rgba(255,255,255,.78);
@@ -228,8 +233,9 @@ input[type="color"] { width: 28px; height: 20px; padding: 1px; border: 1px solid
   --glass-shadow: 0 3px 10px rgba(34,61,96,.12);
 }
 :root[data-theme="dark"] {
-  --fg: #eaeaea; --fg-mute: #9a9a9a; --bg: #171717; --bg-elev: #212121;
-  --border: #303030; --accent: #6c9dff; --error: #ff7b78;
+  color-scheme: dark;
+  --fg: #f4f7fb; --fg-mute: #bdc7d6; --bg: #111821; --bg-elev: #1a2432;
+  --border: #344257; --accent: #79a7ff; --error: #ff8582;
   --glass: rgba(23,31,45,.62); --glass-strong: rgba(27,37,53,.82);
   --glass-border: rgba(255,255,255,.14); --glass-highlight: rgba(255,255,255,.22);
   --glass-shadow: 0 3px 12px rgba(0,0,0,.28);
@@ -242,14 +248,11 @@ input[type="color"] { width: 28px; height: 20px; padding: 1px; border: 1px solid
 .ide-status .stats-right { display: flex; align-items: center; gap: 12px; flex: 0 0 auto; }
 
 /* 設定ポップオーバー */
-.pop-glass { position: fixed; top: 50px; right: 8px; z-index: 200;
-  width: min(320px, calc(100vw - 16px)); }
-.pop-glass .glass-surface-content { width: 100%; }
-.pop { position: relative;
+.pop-glass.pop { position: fixed; top: 50px; right: 8px; z-index: 200;
   background: var(--glass-strong); border: 1px solid var(--glass-border); border-radius: 18px;
   box-shadow: inset 0 1px 0 var(--glass-highlight);
   backdrop-filter: blur(26px) saturate(140%); padding: 12px;
-  box-sizing: border-box; width: 100%; max-height: calc(100vh - 58px);
+  box-sizing: border-box; width: min(320px, calc(100vw - 16px)); max-height: calc(100vh - 58px);
   overflow-x: hidden; overflow-y: auto; }
 .environment-check { min-width: 0; }
 .environment-check .mono { overflow-wrap: anywhere; }
@@ -386,3 +389,13 @@ input[type="color"] { width: 28px; height: 20px; padding: 1px; border: 1px solid
 @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: .2; } }
 .hier-badge.running { background: #f5c518 !important; animation: blink .8s infinite; }
 .btn.stop { background: var(--error); }
+
+:root[data-theme="dark"] .dock-content { color: var(--fg); }
+:root[data-theme="dark"] .dock-content .btn:not(.btn-secondary):not(.stop) {
+  color: #eaf1ff; background: color-mix(in srgb, var(--accent) 42%, #182337);
+  border-color: color-mix(in srgb, var(--accent) 48%, var(--glass-border)); box-shadow: none;
+}
+:root[data-theme="dark"] .inspector-field dt,
+:root[data-theme="dark"] .inspector-section-title,
+:root[data-theme="dark"] .hint { color: #c6d0df; }
+:root[data-theme="dark"] .inspector-field dd { color: #f2f6fc; }

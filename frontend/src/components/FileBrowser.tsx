@@ -4,7 +4,6 @@ import { api, type FsEntry } from '../api/client'
 import { useSettings } from '../ui/settings'
 import { formatPathForDisplay, PathText } from './PathText'
 import { AppIcon } from './AppIcon'
-import { GlassSurface } from './GlassSurface'
 
 // ソース選択 (モーダル). ドライブ選択 + フォルダを辿る. 行全体クリックで下階層へ.
 export const FileBrowser = ({
@@ -42,9 +41,7 @@ export const FileBrowser = ({
 
   return (
     <div className="modal-back" onClick={onClose}>
-      <GlassSurface className="modal-glass" cornerRadius={20} padding="0"
-        style={{ height: 520, width: 640 }}>
-      <div className="modal" style={{ height: '100%', width: '100%' }} onClick={e => e.stopPropagation()}
+      <div className="modal" style={{ height: 520, width: 640 }} onClick={e => e.stopPropagation()}
         role="dialog" aria-modal="true" aria-labelledby="file-browser-title">
         <div className="modal-head">
           <strong id="file-browser-title" style={{ flex: 'none' }}>{t('selectSource')}</strong>
@@ -91,7 +88,6 @@ export const FileBrowser = ({
           )}
         </div>
       </div>
-      </GlassSurface>
     </div>
   )
 }

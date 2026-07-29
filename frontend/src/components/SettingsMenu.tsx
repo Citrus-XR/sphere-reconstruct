@@ -7,7 +7,6 @@ import type { Lang } from '../ui/i18n'
 import type { Theme } from '../ui/settings'
 import { PathText } from './PathText'
 import { AppIcon } from './AppIcon'
-import { GlassButton, GlassSurface } from './GlassSurface'
 
 // 右上の設定メニュー: テーマ (自動/ライト/ダーク) + 言語. ブラウザに保存.
 export const SettingsMenu = () => {
@@ -18,15 +17,14 @@ export const SettingsMenu = () => {
   })
   return (
     <div style={{ position: 'relative' }}>
-      <GlassButton className="btn-secondary icon-only" onClick={() => setOpen(o => !o)}
+      <button className="btn btn-secondary top-glass-button icon-only" onClick={() => setOpen(o => !o)}
         title={t('settings')} aria-label={t('settings')}>
         <AppIcon name="settings" />
-      </GlassButton>
+      </button>
       {open && createPortal(
         <>
           <div style={{ position: 'fixed', inset: 0, zIndex: 199 }} onClick={() => setOpen(false)} />
-          <GlassSurface className="pop-glass" cornerRadius={18} padding="0">
-          <div className="pop">
+          <div className="pop-glass pop">
             <div className="ctl">
               <label>{t('theme')}</label>
               <select className="input" value={theme} onChange={e => setTheme(e.target.value as Theme)}>
@@ -55,7 +53,6 @@ export const SettingsMenu = () => {
               ))}
             </div>}
           </div>
-          </GlassSurface>
         </>,
         document.body,
       )}

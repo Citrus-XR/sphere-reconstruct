@@ -11,7 +11,6 @@ import { StageHierarchy, type HierItem } from './components/StageHierarchy'
 import { SceneHierarchy } from './components/SceneHierarchy'
 import { PathText } from './components/PathText'
 import { AppIcon, type AppIconName } from './components/AppIcon'
-import { GlassButton } from './components/GlassSurface'
 import { StageSettings } from './features/StageSettings'
 import { CameraInspector } from './features/CameraInspector'
 import { FrameInspector } from './features/FrameInspector'
@@ -601,27 +600,27 @@ export const App = () => {
   return (
     <div className="ide">
       <div className="ide-top">
-        <GlassButton className="icon-label" onClick={() => setManagerOpen(true)}>
+        <button className="btn top-glass-button icon-label" onClick={() => setManagerOpen(true)}>
           <AppIcon name="navigation" /> {t('projects')}
-        </GlassButton>
+        </button>
         <h1 style={{ margin: '0 4px' }}>{project?.name ?? 'sphere-reconstruct'}</h1>
         {primarySource
           ? <><PathText path={primarySource.path} compact className="ide-source-path" />
               {project && project.sources.length > 1 && <span className="mono">+{project.sources.length - 1}</span>}</>
           : <span className="mono ide-source-path">{t('noSource')}</span>}
         <div className="top-actions">
-          <GlassButton className="btn-secondary icon-label" disabled={!projectId || clearOutputs.isPending || processing}
+          <button className="btn btn-secondary top-glass-button icon-label" disabled={!projectId || clearOutputs.isPending || processing}
             onClick={() => { if (window.confirm(t('clearOutputsConfirm'))) clearOutputs.mutate() }}>
             <AppIcon name="broom" /> {t('clearOutputs')}
-          </GlassButton>
+          </button>
           {processing
-            ? <GlassButton className="stop icon-label" onClick={stopJob}>
+            ? <button className="btn stop top-glass-button icon-label" onClick={stopJob}>
                 <AppIcon name="stop" /> {t('stop')}
-              </GlassButton>
-            : <GlassButton className="icon-label" disabled={!projectId || !!runReason || !nextStep || runNextMutation.isPending}
+              </button>
+            : <button className="btn top-glass-button icon-label" disabled={!projectId || !!runReason || !nextStep || runNextMutation.isPending}
                 title={runReason ?? ''} onClick={runNext}>
                 <AppIcon name="play" /> {t('runAll')}
-              </GlassButton>}
+              </button>}
           <SettingsMenu />
         </div>
       </div>
