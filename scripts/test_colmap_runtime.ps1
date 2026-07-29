@@ -95,12 +95,19 @@ public static class SphereRuntimeLoader
 $OriginalPath = $env:PATH
 try {
     $env:PATH = "$BinDirectory;$env:SystemRoot\System32;$env:SystemRoot"
-    foreach ($Library in @(
-        "ceres.dll",
-        "cudss64_0.dll",
-        "onnxruntime_providers_cuda.dll"
-    )) {
+    foreach ($Library in @("ceres.dll", "cudss64_0.dll")) {
         [SphereRuntimeLoader]::Validate((Join-Path $BinDirectory $Library))
+    }
+    $DriverLibrary = Join-Path "$env:SystemRoot\System32" "nvcuda.dll"
+    if (Test-Path $DriverLibrary) {
+        [SphereRuntimeLoader]::Validate(
+            (Join-Path $BinDirectory "onnxruntime_providers_cuda.dll")
+        )
+    }
+    else {
+        # GitHub hosted Windows runner は NVIDIA driver を持たない。Provider 自体の全 static / delay
+        # import は上の PE closure で検査済みなので、driver が無い場合だけ DllMain smoke を省く。
+        Write-Output "ONNX CUDA provider LoadLibrary: skipped (nvcuda.dll unavailable)"
     }
     & (Join-Path $BinDirectory "colmap.exe") version
     if ($LASTEXITCODE -ne 0) {

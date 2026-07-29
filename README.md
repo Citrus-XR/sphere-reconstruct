@@ -425,6 +425,18 @@ FastDVDnet preprocessing と raw training を 30k まで比較した。
 0.55 dB 悪化し、detail hallucination / temporal inconsistency risk も増えるため、denoise Step、model、UI、
 dependency は削除した。Night scene は raw image + SIFT pose + PPISP を使う。
 
+## Frontend UI
+
+Frontend は React 19 + TypeScript + Vite、Scene View は React Three Fiber / Three.js。Toolbar と primary
+action island は [liquid-glass-react](https://github.com/rdev/liquid-glass-react) の stable `standard` mode を
+progressive decoration として使い、Firefox / Safari の部分対応時も CSS glass fallback で操作性を保つ。
+Icon は [Icônes Fluent collection](https://icones.js.org/collection/fluent) で選び、Microsoft official
+`@fluentui/react-icons` の atomic SVG path だけを import する。
+
+Scene grid は finite double-sided plane、depth-test on / depth-write off。Ground positioning 済み model は
+viewer Y=0 に置き、opaque alpha-tested point depth の後ろへ描画するため、view rotation 時に grid が消える、
+点群を透過して前面へ張り付く、巨大 infinite plane の precision flicker を避ける。
+
 ## Architecture and extension
 
 ```text
@@ -484,7 +496,12 @@ Project 全体は [GNU General Public License v3.0 or later](LICENSE)、SPDX ide
 - [GLOMAP paper](https://arxiv.org/abs/2407.20219): global positioning formulation
 - [LichtFeld Studio](https://github.com/MrNeRF/LichtFeld-Studio): loader、GUT、MRNF、mask、PPISP
 - [PPISP](https://github.com/nv-tlabs/ppisp): appearance compensation / controller
+- [liquid-glass-react](https://github.com/rdev/liquid-glass-react): MIT-licensed progressive glass decoration
+- [Icônes Fluent collection](https://icones.js.org/collection/fluent) / [Fluent UI System Icons](https://github.com/microsoft/fluentui-system-icons): UI icon source
 - [telemetry-parser](https://github.com/AdrianEddy/telemetry-parser): Insta360 metadata
 - [Gyroflow](https://github.com/gyroflow/gyroflow): IMU semantics
 - [insv-stitch](https://github.com/BenjaminHenriksson/insv-stitch): INSV container research
 - [lichtfeld-360-plugin](https://github.com/alexmgee/lichtfeld-360-plugin): original legacy plugin workflow reference
+
+Frontend dependency attribution and retained MIT notices are in
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

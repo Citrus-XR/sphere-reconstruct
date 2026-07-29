@@ -152,9 +152,11 @@ Runtime archive には executable / DLL、capability metadata、COLMAP / Ceres /
 development header や static library は含めない。
 
 GitHub Actions definition は `.github/workflows/build-colmap-cuda-ba.yml`。Build job は全 PE の通常・delay-load
-import を再帰検査し、Ceres、cuDSS、ONNX CUDA provider を明示的に `LoadLibraryExW` する。次の clean Windows
-job が archive だけを展開して同じ検査と `colmap version` を再実行し、両方通った artifact だけを release
-する。CUDA 12.8 Windows installer に存在しない CUDA 13 専用 component 名 `crt` / `nvvm` は指定しない。
+import を再帰検査し、Ceres と cuDSS を明示的に `LoadLibraryExW` する。ONNX CUDA provider は NVIDIA driver
+がある環境で load smoke を行い、GPU のない GitHub hosted runner では PE dependency closure までを検証する。
+次の clean Windows job が archive だけを展開して同じ検査と `colmap version` を再実行し、両方通った artifact
+だけを release する。CUDA 12.8 Windows installer に存在しない CUDA 13 専用 component 名 `crt` / `nvvm`
+は指定しない。
 
 ## FFmpeg hardware decode
 

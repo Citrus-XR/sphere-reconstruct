@@ -5,6 +5,7 @@ import { useSettings } from '../ui/settings'
 import type { Lang } from '../ui/i18n'
 import type { Theme } from '../ui/settings'
 import { PathText } from './PathText'
+import { AppIcon } from './AppIcon'
 
 // 右上の設定メニュー: テーマ (自動/ライト/ダーク) + 言語. ブラウザに保存.
 export const SettingsMenu = () => {
@@ -15,7 +16,10 @@ export const SettingsMenu = () => {
   })
   return (
     <div style={{ position: 'relative' }}>
-      <button className="btn btn-secondary" onClick={() => setOpen(o => !o)} title={t('settings')}>⚙</button>
+      <button className="btn btn-secondary icon-only" onClick={() => setOpen(o => !o)}
+        title={t('settings')} aria-label={t('settings')}>
+        <AppIcon name="settings" />
+      </button>
       {open && (
         <>
           <div style={{ position: 'fixed', inset: 0, zIndex: 199 }} onClick={() => setOpen(false)} />

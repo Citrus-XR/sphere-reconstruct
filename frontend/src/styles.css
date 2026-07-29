@@ -8,6 +8,11 @@
   --border: #dcdcdc;
   --accent: #3a6df0;
   --error: #d9534f;
+  --glass: rgba(255, 255, 255, 0.58);
+  --glass-strong: rgba(255, 255, 255, 0.78);
+  --glass-border: rgba(255, 255, 255, 0.72);
+  --glass-highlight: rgba(255, 255, 255, 0.9);
+  --glass-shadow: 0 14px 38px rgba(34, 61, 96, 0.16);
   --mono-font: 'Cascadia Mono', 'Consolas', 'Liberation Mono', 'DejaVu Sans Mono', ui-monospace, monospace;
 }
 
@@ -20,36 +25,59 @@
     --border: #303030;
     --accent: #6c9dff;
     --error: #ff7b78;
+    --glass: rgba(23, 31, 45, 0.62);
+    --glass-strong: rgba(27, 37, 53, 0.82);
+    --glass-border: rgba(255, 255, 255, 0.14);
+    --glass-highlight: rgba(255, 255, 255, 0.22);
+    --glass-shadow: 0 16px 44px rgba(0, 0, 0, 0.36);
   }
 }
 
 * { box-sizing: border-box; }
-body { margin: 0; background: var(--bg); color: var(--fg); }
+body { margin: 0; color: var(--fg); background:
+  radial-gradient(circle at 12% 0%, color-mix(in srgb, var(--accent) 24%, transparent), transparent 34%),
+  radial-gradient(circle at 88% 100%, rgba(92, 214, 201, .16), transparent 38%), var(--bg); }
+
+.glass-surface-host { position: relative; display: inline-flex; isolation: isolate; min-width: 0; }
+.glass-surface-content { position: relative; z-index: 2; display: flex; align-items: center; min-width: 0; }
+.liquid-glass-background { position: absolute !important; z-index: 0; inset: 50% auto auto 50%; }
+.liquid-glass-background .glass { width: 100%; height: 100%; min-width: 100%; min-height: 100%;
+  border: 1px solid var(--glass-border); box-shadow: var(--glass-shadow) !important;
+  background: linear-gradient(145deg, var(--glass-highlight), transparent 44%, var(--glass)); }
 
 .btn {
-  background: var(--accent);
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 92%, white), var(--accent));
   color: white;
-  border: none;
-  padding: 8px 16px;
-  border-radius: 6px;
+  border: 1px solid color-mix(in srgb, var(--accent) 72%, white);
+  padding: 7px 14px;
+  border-radius: 999px;
   cursor: pointer;
-  font-size: 14px;
+  font-size: 13px; font-weight: 600;
   white-space: nowrap;
   flex: none;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.28),
+    0 6px 16px color-mix(in srgb, var(--accent) 24%, transparent);
+  transition: transform .16s ease, filter .16s ease, background .16s ease;
 }
+.btn:hover:not(:disabled) { transform: translateY(-1px); filter: brightness(1.06); }
+.btn:active:not(:disabled) { transform: translateY(0) scale(.98); }
 .btn:disabled { opacity: 0.5; cursor: default; }
 
 .btn-secondary {
-  background: transparent;
+  background: color-mix(in srgb, var(--glass) 72%, transparent);
   color: var(--accent);
-  border: 1px solid var(--accent);
+  border: 1px solid color-mix(in srgb, var(--accent) 62%, var(--glass-border));
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.18);
 }
+.icon-only { width: 34px; height: 34px; padding: 0; }
+.icon-label svg { flex: none; }
 
 .input {
   border: 1px solid var(--border);
   padding: 8px 10px;
-  border-radius: 6px;
-  background: var(--bg);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--glass-strong) 78%, transparent);
   color: var(--fg);
   font-size: 14px;
   width: 100%;
@@ -82,22 +110,28 @@ body { margin: 0; background: var(--bg); color: var(--fg); }
   position: fixed; inset: 0;
   display: grid;
   grid-template-columns: 1fr;
-  grid-template-rows: 46px 1fr 26px;
+  grid-template-rows: 56px 1fr 30px;
   grid-template-areas:
     "top"
     "center"
     "status";
-  background: var(--bg); color: var(--fg);
+  background: transparent; color: var(--fg);
   font-size: 13px;
 }
-.ide-top { grid-area: top; display: flex; align-items: center; gap: 12px;
-  padding: 0 12px; border-bottom: 1px solid var(--border); background: var(--bg-elev); }
+.ide-top { grid-area: top; display: flex; align-items: center; gap: 12px; z-index: 20;
+  padding: 7px 10px; border-bottom: 1px solid var(--glass-border);
+  background: color-mix(in srgb, var(--glass) 82%, transparent);
+  backdrop-filter: blur(22px) saturate(135%); }
 .ide-top h1 { font-size: 15px; margin: 0 8px 0 0; letter-spacing: .02em; }
-.ide-center { grid-area: center; overflow: hidden; position: relative; background: var(--bg); }
+.ide-center { grid-area: center; overflow: hidden; position: relative; background: transparent; }
 .ide-status { grid-area: status; display: flex; align-items: center; gap: 16px;
-  padding: 0 12px; border-top: 1px solid var(--border); background: var(--bg-elev);
+  padding: 0 12px; border-top: 1px solid var(--glass-border);
+  background: color-mix(in srgb, var(--glass-strong) 84%, transparent);
+  backdrop-filter: blur(18px) saturate(130%);
   font-family: var(--mono-font); font-size: 11px; color: var(--fg-mute);
   overflow: hidden; min-width: 0; }
+.top-actions-glass, .top-brand-glass { flex: none; }
+.top-actions { display: flex; align-items: center; gap: 6px; }
 
 /* hierarchy (左) */
 .hier-item { display: flex; align-items: center; gap: 8px; padding: 7px 12px;
@@ -132,11 +166,12 @@ body { margin: 0; background: var(--bg); color: var(--fg); }
 .predict { font-size: 11px; color: var(--accent); margin-top: 2px; }
 
 /* file browser modal */
-.modal-back { position: fixed; inset: 0; background: rgba(0,0,0,.5);
+.modal-back { position: fixed; inset: 0; background: rgba(8,14,24,.48); backdrop-filter: blur(8px);
   display: flex; align-items: center; justify-content: center; z-index: 50; }
-.modal { background: var(--bg-elev); border: 1px solid var(--border); border-radius: 8px;
+.modal { background: var(--glass-strong); border: 1px solid var(--glass-border); border-radius: 20px;
+  box-shadow: var(--glass-shadow), inset 0 1px 0 var(--glass-highlight); backdrop-filter: blur(28px) saturate(140%);
   width: 640px; max-height: 80vh; display: flex; flex-direction: column; overflow: hidden; }
-.modal-head { padding: 10px 14px; border-bottom: 1px solid var(--border);
+.modal-head { padding: 10px 14px; border-bottom: 1px solid var(--glass-border);
   display: flex; align-items: center; gap: 8px; }
 .modal-list { overflow: auto; padding: 6px; }
 .fs-row { display: flex; align-items: center; gap: 8px; padding: 6px 10px; cursor: pointer; border-radius: 4px; }
@@ -147,27 +182,34 @@ body { margin: 0; background: var(--bg); color: var(--fg); }
   color: inherit; font: inherit; text-align: left; cursor: pointer; }
 .fs-row:hover { background: rgba(128,128,128,.1); }
 
-/* シーン上部ツールバー (固定, 背景あり) */
-.scene-toolbar { position: absolute; top: 0; left: 0; right: 0;
-  display: flex; align-items: center; gap: 14px; z-index: 5;
-  background: rgba(20,20,20,.9); color: #ddd; padding: 6px 12px;
-  border-bottom: 1px solid rgba(255,255,255,.1);
+/* シーン上部ツールバー。LiquidGlass は progressive decoration、CSS が fallback。 */
+.scene-toolbar-glass { position: absolute; top: 8px; left: 8px; z-index: 6; }
+.scene-toolbar { display: flex; align-items: center; gap: 14px;
+  background: color-mix(in srgb, var(--glass-strong) 54%, transparent); color: var(--fg);
+  padding: 6px 12px; border: 1px solid var(--glass-border); border-radius: 15px;
   font-size: 11px; font-family: var(--mono-font); }
 .scene-toolbar label { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; }
 .scene-toolbar input[type=range] { width: 70px; }
 /* 視図左下の info オーバレイ */
-.scene-info { position: absolute; bottom: 8px; left: 8px; z-index: 6; color: #bbb;
-  background: rgba(0,0,0,.5); padding: 4px 8px; border-radius: 4px; font-size: 11px;
+.scene-info { position: absolute; bottom: 8px; left: 8px; z-index: 6; color: var(--fg);
+  background: var(--glass); border: 1px solid var(--glass-border); backdrop-filter: blur(14px);
+  padding: 5px 9px; border-radius: 12px; font-size: 11px;
   font-family: var(--mono-font); }
 
 /* ===== テーマ手動切替 (data-theme が prefers-color-scheme を上書き) ===== */
 :root[data-theme="light"] {
   --fg: #1a1a1a; --fg-mute: #6a6a6a; --bg: #fdfdfd; --bg-elev: #ffffff;
   --border: #dcdcdc; --accent: #3a6df0; --error: #d9534f;
+  --glass: rgba(255,255,255,.58); --glass-strong: rgba(255,255,255,.78);
+  --glass-border: rgba(255,255,255,.72); --glass-highlight: rgba(255,255,255,.9);
+  --glass-shadow: 0 14px 38px rgba(34,61,96,.16);
 }
 :root[data-theme="dark"] {
   --fg: #eaeaea; --fg-mute: #9a9a9a; --bg: #171717; --bg-elev: #212121;
   --border: #303030; --accent: #6c9dff; --error: #ff7b78;
+  --glass: rgba(23,31,45,.62); --glass-strong: rgba(27,37,53,.82);
+  --glass-border: rgba(255,255,255,.14); --glass-highlight: rgba(255,255,255,.22);
+  --glass-shadow: 0 16px 44px rgba(0,0,0,.36);
 }
 
 /* 下部バー: 左=最新ログ, 右=使用率 */
@@ -178,8 +220,9 @@ body { margin: 0; background: var(--bg); color: var(--fg); }
 
 /* 設定ポップオーバー */
 .pop { position: absolute; top: 42px; right: 8px; z-index: 200;
-  background: var(--bg-elev); border: 1px solid var(--border); border-radius: 8px;
-  box-shadow: 0 6px 24px rgba(0,0,0,.35); padding: 12px;
+  background: var(--glass-strong); border: 1px solid var(--glass-border); border-radius: 18px;
+  box-shadow: var(--glass-shadow), inset 0 1px 0 var(--glass-highlight);
+  backdrop-filter: blur(26px) saturate(140%); padding: 12px;
   box-sizing: border-box; width: min(320px, calc(100vw - 16px)); max-height: calc(100vh - 58px);
   overflow-x: hidden; overflow-y: auto; }
 .environment-check { min-width: 0; }
@@ -203,24 +246,24 @@ body { margin: 0; background: var(--bg); color: var(--fg); }
 /* ===== flexlayout (ドッキング) をアプリのテーマに合わせる ===== */
 .flexlayout__layout {
   --color-text: var(--fg);
-  --color-background: var(--bg);
-  --color-base: var(--bg);
-  --color-1: var(--bg);
-  --color-2: var(--bg-elev);
-  --color-3: var(--bg-elev);
-  --color-4: var(--bg-elev);
-  --color-5: var(--border);
-  --color-6: var(--border);
-  --color-tabset-background: var(--bg-elev);
-  --color-tabset-background-selected: var(--bg-elev);
-  --color-tabset-background-maximized: var(--bg-elev);
+  --color-background: transparent;
+  --color-base: transparent;
+  --color-1: transparent;
+  --color-2: var(--glass);
+  --color-3: var(--glass-strong);
+  --color-4: var(--glass-strong);
+  --color-5: var(--glass-border);
+  --color-6: var(--glass-border);
+  --color-tabset-background: var(--glass);
+  --color-tabset-background-selected: var(--glass-strong);
+  --color-tabset-background-maximized: var(--glass-strong);
   --color-tab-selected: var(--fg);
-  --color-tab-selected-background: var(--bg);
+  --color-tab-selected-background: var(--glass-strong);
   --color-tab-unselected: var(--fg-mute);
-  --color-tab-unselected-background: var(--bg-elev);
+  --color-tab-unselected-background: transparent;
   --color-tab-content: var(--fg);
-  --color-border-background: var(--bg-elev);
-  --color-splitter: var(--border);
+  --color-border-background: var(--glass);
+  --color-splitter: var(--glass-border);
   --color-splitter-hover: var(--accent);
   --color-splitter-drag: var(--accent);
   --color-drag-rect-border: var(--accent);
@@ -228,8 +271,10 @@ body { margin: 0; background: var(--bg); color: var(--fg); }
   --color-drag-rect: var(--fg);
   --font-size: 12px;
 }
-.flexlayout__tab { background: var(--bg-elev); color: var(--fg); min-width: 0; overflow: hidden; }
-.flexlayout__tabset_tabbar_outer { background: var(--bg-elev); }
+.flexlayout__tab { background: color-mix(in srgb, var(--glass) 72%, transparent); color: var(--fg);
+  min-width: 0; overflow: hidden; backdrop-filter: blur(16px) saturate(125%); }
+.flexlayout__tabset_tabbar_outer { background: var(--glass); backdrop-filter: blur(18px) saturate(130%);
+  border-bottom: 1px solid var(--glass-border); }
 .dock-content { height: 100%; overflow: auto; padding: 8px; min-width: 0; }
 .dock-content.nopad { padding: 0; }
 
@@ -237,6 +282,18 @@ body { margin: 0; background: var(--bg); color: var(--fg); }
 .seg { display: inline-flex; border: 1px solid var(--border); border-radius: 4px; overflow: hidden; }
 .seg button { border: none; background: transparent; color: var(--fg-mute); font-size: 11px; padding: 2px 8px; cursor: pointer; }
 .seg button.on { background: var(--accent); color: #fff; }
+
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .ide-top, .ide-status, .modal, .pop, .scene-toolbar, .scene-info, .flexlayout__tab {
+    background: var(--bg-elev);
+  }
+  .liquid-glass-background { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .btn, .liquid-glass-background .glass { transition: none !important; }
+  .btn:hover:not(:disabled), .btn:active:not(:disabled) { transform: none; }
+}
 
 /* Photos と Dataset Camera が共有する Inspector の視覚契約. */
 .inspector-header { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }

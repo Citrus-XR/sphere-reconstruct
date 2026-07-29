@@ -10,6 +10,8 @@ import { ErrorBoundary } from './components/ErrorBoundary'
 import { StageHierarchy, type HierItem } from './components/StageHierarchy'
 import { SceneHierarchy } from './components/SceneHierarchy'
 import { PathText } from './components/PathText'
+import { AppIcon } from './components/AppIcon'
+import { GlassSurface } from './components/GlassSurface'
 import { StageSettings } from './features/StageSettings'
 import { CameraInspector } from './features/CameraInspector'
 import { FrameInspector } from './features/FrameInspector'
@@ -39,7 +41,7 @@ const mergeProgressEvent = (previous: EventEnvelope | undefined, incoming: Event
     : incoming
 )
 
-// Unity/VSCode 風のドッキング初期レイアウト. タブのタイトルをドラッグして再配置でき,
+// Docking 初期レイアウト。タブのタイトルをドラッグして再配置でき、
 // 変更は localStorage に保存される. Console は既定でシーンビューの下.
 const DEFAULT_LAYOUT: IJsonModel = {
   global: { tabEnableClose: false, tabEnableRename: false, tabSetEnableMaximize: true },
@@ -579,19 +581,33 @@ export const App = () => {
   return (
     <div className="ide">
       <div className="ide-top">
-        <button className="btn" onClick={() => setManagerOpen(true)}>☰ {t('projects')}</button>
+        <GlassSurface className="top-brand-glass" cornerRadius={14} padding="3px">
+          <button className="btn icon-label" onClick={() => setManagerOpen(true)}>
+            <AppIcon name="navigation" /> {t('projects')}
+          </button>
+        </GlassSurface>
         <h1 style={{ margin: '0 4px' }}>{project?.name ?? 'sphere-reconstruct'}</h1>
         {primarySource
           ? <><PathText path={primarySource.path} compact className="ide-source-path" />
               {project && project.sources.length > 1 && <span className="mono">+{project.sources.length - 1}</span>}</>
           : <span className="mono ide-source-path">{t('noSource')}</span>}
-        <button className="btn btn-secondary" disabled={!projectId || clearOutputs.isPending || processing}
-          onClick={() => { if (window.confirm(t('clearOutputsConfirm'))) clearOutputs.mutate() }}>{t('clearOutputs')}</button>
-        {processing
-          ? <button className="btn stop" onClick={stopJob}>■ {t('stop')}</button>
-          : <button className="btn" disabled={!projectId || !!runReason || !nextStep || runNextMutation.isPending}
-              title={runReason ?? ''} onClick={runNext}>{t('runAll')}</button>}
-        <SettingsMenu />
+        <GlassSurface className="top-actions-glass" cornerRadius={16} padding="3px">
+          <div className="top-actions">
+            <button className="btn btn-secondary icon-label" disabled={!projectId || clearOutputs.isPending || processing}
+              onClick={() => { if (window.confirm(t('clearOutputsConfirm'))) clearOutputs.mutate() }}>
+              <AppIcon name="broom" /> {t('clearOutputs')}
+            </button>
+            {processing
+              ? <button className="btn stop icon-label" onClick={stopJob}>
+                  <AppIcon name="stop" /> {t('stop')}
+                </button>
+              : <button className="btn icon-label" disabled={!projectId || !!runReason || !nextStep || runNextMutation.isPending}
+                  title={runReason ?? ''} onClick={runNext}>
+                  <AppIcon name="play" /> {t('runAll')}
+                </button>}
+            <SettingsMenu />
+          </div>
+        </GlassSurface>
       </div>
 
       <div className="ide-center">

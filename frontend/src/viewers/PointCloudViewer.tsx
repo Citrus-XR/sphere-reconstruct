@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { Canvas, useThree, useFrame } from '@react-three/fiber'
 import { GizmoHelper, GizmoViewport, Grid } from '@react-three/drei'
 import * as THREE from 'three'
 import { fetchPoints, type ParsedPoints, type ReconstructionData } from '../api/client'
+import { GlassSurface } from '../components/GlassSurface'
 import { useSettings } from '../ui/settings'
 
 const useCircleTexture = () =>
@@ -23,8 +24,41 @@ const PointCloud = ({ points, size, tex }: { points: ParsedPoints; size: number;
   }, [points])
   return (
     <points geometry={geom}>
-      <pointsMaterial size={size} vertexColors map={tex} alphaTest={0.5} transparent sizeAttenuation={false} />
+      <pointsMaterial size={size} vertexColors map={tex} alphaTest={0.5}
+        transparent={false} depthTest depthWrite sizeAttenuation={false} />
     </points>
+  )
+}
+
+export const configureGridMaterial = (material: THREE.Material): void => {
+  material.depthTest = true
+  material.depthWrite = false
+  material.polygonOffset = true
+  material.polygonOffsetFactor = 1
+  material.polygonOffsetUnits = 1
+  material.side = THREE.DoubleSide
+  material.needsUpdate = true
+}
+
+const StableGrid = ({ scale, center, groundY, light }: {
+  scale: number
+  center: THREE.Vector3
+  groundY: number
+  light: boolean
+}) => {
+  const ref = useRef<THREE.Mesh>(null)
+  useLayoutEffect(() => {
+    const material = ref.current?.material
+    if (material && !Array.isArray(material)) configureGridMaterial(material)
+  }, [])
+  return (
+    <Grid ref={ref} args={[scale * 4, scale * 4]}
+      position={[center.x, groundY, center.z]}
+      cellSize={scale * 0.05} sectionSize={scale * 0.5}
+      infiniteGrid={false} followCamera={false} fadeDistance={scale * 2}
+      fadeStrength={1.5} cellThickness={0.42} sectionThickness={0.82}
+      cellColor={light ? '#b9c5d5' : '#43546c'} sectionColor={light ? '#7897bd' : '#7596c2'}
+      side={THREE.DoubleSide} renderOrder={-100} />
   )
 }
 
@@ -257,13 +291,18 @@ export const PointCloudViewer = ({
 
   // bbox から scene の中心とスケールを 1 度算出.
   const scene = useMemo(() => {
-    if (!points || points.count === 0) return { scale: 10, center: new THREE.Vector3() }
+    if (!points || points.count === 0)
+      return { scale: 10, center: new THREE.Vector3(), minimumY: 0 }
     const box = new THREE.Box3(), v = new THREE.Vector3()
     for (let i = 0; i < points.count; i++) {
       v.set(points.positions[i * 3], points.positions[i * 3 + 1], points.positions[i * 3 + 2])
       box.expandByPoint(v)
     }
-    return { center: box.getCenter(new THREE.Vector3()), scale: box.getSize(new THREE.Vector3()).length() || 10 }
+    return {
+      center: box.getCenter(new THREE.Vector3()),
+      scale: box.getSize(new THREE.Vector3()).length() || 10,
+      minimumY: box.min.y,
+    }
   }, [points])
 
   const selectedPos = useMemo(() => {
@@ -274,16 +313,23 @@ export const PointCloudViewer = ({
 
   if (error) return <div style={overlayMsg}>{error}</div>
   if (!points) return <div style={overlayMsg}>...</div>
+  const gridGroundY = recon.ground_position?.applied ? 0 : scene.minimumY
+  const backgroundColor = new THREE.Color(bg)
+  const lightBackground = (
+    backgroundColor.r * 0.2126 + backgroundColor.g * 0.7152 + backgroundColor.b * 0.0722
+  ) > 0.55
 
   return (
     <div style={{ position: 'absolute', inset: 0 }}>
-      <div className="scene-toolbar">
-        <label>{t('sc_bg')} <input type="color" value={bg} onChange={e => setBgOverride(e.target.value)} /></label>
-        <label><input type="checkbox" checked={showGrid} onChange={e => setShowGrid(e.target.checked)} /> {t('sc_grid')}</label>
-        <label><input type="checkbox" checked={showCenter} onChange={e => setShowCenter(e.target.checked)} /> {t('sc_center')}</label>
-        <label>{t('sc_points')} <input type="range" min={1} max={8} step={0.5} value={pointSize}
-          onChange={e => setPointSize(Number(e.target.value))} /></label>
-      </div>
+      <GlassSurface className="scene-toolbar-glass" cornerRadius={15} padding="0">
+        <div className="scene-toolbar">
+          <label>{t('sc_bg')} <input type="color" value={bg} onChange={e => setBgOverride(e.target.value)} /></label>
+          <label><input type="checkbox" checked={showGrid} onChange={e => setShowGrid(e.target.checked)} /> {t('sc_grid')}</label>
+          <label><input type="checkbox" checked={showCenter} onChange={e => setShowCenter(e.target.checked)} /> {t('sc_center')}</label>
+          <label>{t('sc_points')} <input type="range" min={1} max={8} step={0.5} value={pointSize}
+            onChange={e => setPointSize(Number(e.target.value))} /></label>
+        </div>
+      </GlassSurface>
 
       <Canvas camera={{ position: [0, 0, 10], near: 0.01, far: 100000, fov: 55 }}>
         <color attach="background" args={[bg]} />
@@ -291,10 +337,8 @@ export const PointCloudViewer = ({
         {showPoints && <PointCloud points={points} size={pointSize} tex={tex} />}
         {showCams && <CameraFrustums recon={recon} scale={scene.scale * 0.012} selectedId={selectedCameraId} onPick={onPickCamera} />}
         {showGrid && (
-          <Grid args={[scene.scale * 2, scene.scale * 2]}
-            position={[scene.center.x, scene.center.y - scene.scale * 0.5, scene.center.z]}
-            cellSize={scene.scale * 0.1} sectionSize={scene.scale * 0.5} infiniteGrid
-            fadeDistance={scene.scale * 8} cellColor="#444" sectionColor="#666" />
+          <StableGrid scale={scene.scale} center={scene.center} groundY={gridGroundY}
+            light={lightBackground} />
         )}
         {showCenter && (
           <mesh position={[scene.center.x, scene.center.y, scene.center.z]}>

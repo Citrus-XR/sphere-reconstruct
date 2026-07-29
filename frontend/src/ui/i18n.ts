@@ -446,7 +446,7 @@ const logEn: Dict = {
 const ja: Dict = {
   ...logJa,
   selectSource: 'ソース選択…',
-  runAll: '▶ 次の工程',
+  runAll: '次の工程',
   settings: '設定',
   theme: 'テーマ',
   themeAuto: '自動 (ブラウザ準拠)',
@@ -571,7 +571,7 @@ const ja: Dict = {
 const zh: Dict = {
   ...logZh,
   selectSource: '选择源…',
-  runAll: '▶ 生成下一步',
+  runAll: '生成下一步',
   settings: '设置',
   theme: '主题',
   themeAuto: '自动 (跟随浏览器)',
@@ -690,7 +690,7 @@ const zh: Dict = {
 const en: Dict = {
   ...logEn,
   selectSource: 'Select source…',
-  runAll: '▶ Generate next',
+  runAll: 'Generate next',
   settings: 'Settings',
   theme: 'Theme',
   themeAuto: 'Auto (browser)',

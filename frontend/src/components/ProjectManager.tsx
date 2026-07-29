@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { api, type Project } from '../api/client'
 import { useSettings } from '../ui/settings'
+import { AppIcon } from './AppIcon'
 
 // Unity Hub 風のプロジェクト管理ウィンドウ: 一覧 (更新時刻降順) / 新規作成 (名前入力) /
 // 削除 (ディスクから完全削除, ソース動画は消さない, 確認あり).
@@ -52,12 +53,14 @@ export const ProjectManager = ({
         <div className="modal-head">
           <strong id="project-manager-title" style={{ flex: 1 }}>{t('projects')}</strong>
           <button type="button" className="btn btn-secondary" onClick={onClose}
-            aria-label={t('close')} autoFocus>×</button>
+            aria-label={t('close')} autoFocus><AppIcon name="dismiss" /></button>
         </div>
         <div style={{ display: 'flex', gap: 8, padding: '8px 12px', borderBottom: '1px solid var(--border)' }}>
           <input className="input" style={{ flex: 1, minWidth: 0, width: 'auto' }} placeholder={t('projectName')} value={name}
             onChange={e => setName(e.target.value)} onKeyDown={e => e.key === 'Enter' && create.mutate()} />
-          <button className="btn" disabled={create.isPending} onClick={() => create.mutate()}>{t('createProject')}</button>
+          <button className="btn icon-label" disabled={create.isPending} onClick={() => create.mutate()}>
+            <AppIcon name="add" /> {t('createProject')}
+          </button>
         </div>
         <div className="modal-list" style={{ flex: 1 }}>
           {sorted.length === 0 && <div className="mono" style={{ padding: 12 }}>—</div>}
@@ -72,14 +75,18 @@ export const ProjectManager = ({
                 <span style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
                   <span className="mono" style={{ color: 'var(--error)', fontSize: 11 }}>{t('deleteConfirm')}</span>
                   <button className="btn" style={{ background: 'var(--error)', padding: '4px 10px' }}
-                    disabled={del.isPending} onClick={() => del.mutate(p.id)}>{t('delete')}</button>
-                  <button className="btn btn-secondary" style={{ padding: '4px 10px' }} onClick={() => setConfirmDel(null)}>{t('cancel')}</button>
+                    disabled={del.isPending} onClick={() => del.mutate(p.id)}><AppIcon name="delete" /> {t('delete')}</button>
+                  <button className="btn btn-secondary icon-label" style={{ padding: '4px 10px' }} onClick={() => setConfirmDel(null)}>
+                    <AppIcon name="dismiss" /> {t('cancel')}
+                  </button>
                 </span>
               ) : (
                 <span style={{ display: 'flex', gap: 6 }}>
-                  <button className="btn btn-secondary" style={{ padding: '4px 10px' }} onClick={() => { onSelect(p.id); onClose() }}>{t('open')}</button>
-                  <button className="btn btn-secondary" style={{ padding: '4px 10px', color: 'var(--error)', borderColor: 'var(--error)' }}
-                    onClick={() => setConfirmDel(p.id)}>{t('delete')}</button>
+                  <button className="btn btn-secondary icon-label" style={{ padding: '4px 10px' }} onClick={() => { onSelect(p.id); onClose() }}>
+                    <AppIcon name="folderOpen" /> {t('open')}
+                  </button>
+                  <button className="btn btn-secondary icon-label" style={{ padding: '4px 10px', color: 'var(--error)', borderColor: 'var(--error)' }}
+                    onClick={() => setConfirmDel(p.id)}><AppIcon name="delete" /> {t('delete')}</button>
                 </span>
               )}
             </div>

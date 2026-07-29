@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query'
 import { api, type FsEntry } from '../api/client'
 import { useSettings } from '../ui/settings'
 import { formatPathForDisplay, PathText } from './PathText'
+import { AppIcon } from './AppIcon'
 
 // ソース選択 (モーダル). ドライブ選択 + フォルダを辿る. 行全体クリックで下階層へ.
 export const FileBrowser = ({
@@ -50,7 +51,7 @@ export const FileBrowser = ({
           ))}
           {cwd && <PathText path={cwd} compact className="file-browser-path" />}
           <button type="button" className="btn btn-secondary" onClick={onClose}
-            aria-label={t('close')} autoFocus>×</button>
+            aria-label={t('close')} autoFocus><AppIcon name="dismiss" /></button>
         </div>
         <div className="modal-list">
           {selectionError != null && (
@@ -60,13 +61,13 @@ export const FileBrowser = ({
           {isFetching && <div className="mono" style={{ padding: 8 }}>...</div>}
           {data?.parent && (
             <button type="button" className="fs-row fs-row-button" onClick={() => setCwd(data.parent)}>
-              <span>📁</span> <span>..</span>
+              <AppIcon name="folderOpen" /> <span>..</span>
             </button>
           )}
           {data?.dirs.map(d => (
             <div key={d.path} className="fs-row">
               <button type="button" className="fs-main" onClick={() => setCwd(d.path)}>
-                <span>📁</span>
+                <AppIcon name="folder" />
                 <span style={{ flex: 1 }}>{d.name}</span>
               </button>
               {selectionKind === 'directory' && (
@@ -77,7 +78,7 @@ export const FileBrowser = ({
           ))}
           {selectionKind === 'file' && data?.files.map((f: FsEntry) => (
             <button type="button" key={f.path} className="fs-row fs-row-button" onClick={() => onPick(f.path, false)}>
-              <span>🎬</span>
+              <AppIcon name="video" />
               <span style={{ flex: 1 }}>{f.name}</span>
               <span className="mono">{f.size != null ? `${(f.size / 1e9).toFixed(2)} GB` : ''}</span>
             </button>

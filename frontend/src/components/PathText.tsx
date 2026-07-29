@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useSettings } from '../ui/settings'
+import { AppIcon } from './AppIcon'
 
 export const formatPathForDisplay = (path: string): string => path.replaceAll('\\', '/')
 
@@ -44,7 +45,7 @@ export const PathText = ({
       <span className="path-value" dir="ltr" title={displayPath}>{displayPath}</span>
       <button className={`path-copy ${copyState}`} type="button" onClick={copy}
         aria-label={`${copyLabel}: ${displayPath}`} title={copyLabel}>
-        {copyState === 'copied' ? '✓' : copyState === 'failed' ? '!' : '⧉'}
+        <AppIcon name={copyState === 'copied' ? 'checkmark' : copyState === 'failed' ? 'warning' : 'copy'} size={14} />
       </button>
       <span className="sr-only" role="status" aria-live="polite">
         {copyState === 'idle' ? '' : copyLabel}

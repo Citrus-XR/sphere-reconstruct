@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test'
 import * as THREE from 'three'
-import { composeViewQuaternion, panViewPosition } from '../src/viewers/PointCloudViewer'
+import { composeViewQuaternion, configureGridMaterial, panViewPosition } from '../src/viewers/PointCloudViewer'
 
 test('mouse yaw and pitch do not introduce camera roll', () => {
   for (const [yaw, pitch] of [[0.8, 0.4], [-1.7, 0.9], [2.4, -0.7]]) {
@@ -37,4 +37,16 @@ test('middle-button pan remains in the screen plane after roll', () => {
   const displacement = after.sub(before)
 
   expect(Math.abs(displacement.dot(forward))).toBeLessThan(1e-10)
+})
+
+test('scene grid keeps perspective depth without occluding point geometry', () => {
+  const material = new THREE.ShaderMaterial({ transparent: true })
+
+  configureGridMaterial(material)
+
+  expect(material.depthTest).toBe(true)
+  expect(material.depthWrite).toBe(false)
+  expect(material.side).toBe(THREE.DoubleSide)
+  expect(material.polygonOffset).toBe(true)
+  expect(material.polygonOffsetFactor).toBe(1)
 })
