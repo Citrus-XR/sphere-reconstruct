@@ -166,6 +166,25 @@ def _execute(project: Path, raw_params: dict | None = None) -> Path:
     input_spec = project / "extract_features" / "input_spec.json"
     input_spec.parent.mkdir(parents=True, exist_ok=True)
     spec.write(input_spec)
+    catalog_path = project / "prepare_images" / "image_catalog.json"
+    if not catalog_path.is_file():
+        catalog_path.parent.mkdir(parents=True, exist_ok=True)
+        catalog_path.write_text(
+            json.dumps(
+                {
+                    "images": [
+                        {
+                            "name": image.name,
+                            "width": reconstruction.cameras[image.camera_id].width,
+                            "height": reconstruction.cameras[image.camera_id].height,
+                            "valid_region": {"kind": "full"},
+                        }
+                        for image in reconstruction.images.values()
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
     stage = ExportDataset()
     ctx = StageContext(
         project_id="test",
@@ -321,20 +340,15 @@ def test_export_rejects_camera_model_unsupported_by_lf_studio(tmp_path: Path):
         )
 
 
-def test_unmatched_mask_does_not_enable_segment_mode(tmp_path: Path):
+def test_export_rejects_selected_mask_channel_missing_registered_images(tmp_path: Path):
     project = tmp_path / "project"
     _write_model(project / "position_ground" / "sparse" / "0")
     _write_preview(project)
     _write_rgb(project / "extract_features" / "images" / "front" / "frame_000000.jpg")
     _write_mask_artifact(project, "training", image_name="unrelated.jpg")
 
-    output = _execute(project)
-
-    config = json.loads((output / "train_configs" / "train_config.mrnf.json").read_text())
-    exported = json.loads((output / "export_manifest.json").read_text())
-    assert config["mask_mode"] == "none"
-    assert exported["masks"] == 0
-    assert not (output / "masks" / "unrelated.png").exists()
+    with pytest.raises(RuntimeError, match="missing registered images"):
+        _execute(project)
 
 
 @pytest.mark.parametrize(
@@ -343,7 +357,7 @@ def test_unmatched_mask_does_not_enable_segment_mode(tmp_path: Path):
         (True, True, "training", 192),
         (True, False, "feature", 64),
         (False, True, "training", 192),
-        (False, False, None, None),
+        (False, False, "physical", 255),
     ],
 )
 def test_export_uses_one_resolved_mask_channel(
@@ -375,6 +389,37 @@ def test_export_uses_one_resolved_mask_channel(
     if expected_value is not None:
         with Image.open(exported) as mask:
             assert mask.getpixel((0, 0)) == expected_value
+
+
+def test_export_keeps_physical_fisheye_mask_when_both_sam_steps_are_disabled(tmp_path: Path):
+    project = tmp_path / "project"
+    _write_model(project / "position_ground" / "sparse" / "0")
+    _write_preview(project)
+    _write_rgb(project / "extract_features" / "images" / "front" / "frame_000000.jpg")
+    catalog = {
+        "images": [
+            {
+                "name": "front/frame_000000.jpg",
+                "width": 64,
+                "height": 64,
+                "valid_region": {"kind": "circle", "cx": 0.5, "cy": 0.5, "r": 0.4},
+            }
+        ]
+    }
+    catalog_path = project / "prepare_images" / "image_catalog.json"
+    catalog_path.parent.mkdir(parents=True)
+    catalog_path.write_text(json.dumps(catalog), encoding="utf-8")
+
+    output = _execute(
+        project,
+        {"feature_masks_enabled": False, "training_masks_enabled": False},
+    )
+
+    manifest = json.loads((output / "export_manifest.json").read_text())
+    assert manifest["mask_source"] == "physical"
+    with Image.open(output / "masks" / "front" / "frame_000000.jpg.png") as mask:
+        assert mask.getpixel((32, 32)) == 255
+        assert mask.getpixel((0, 0)) == 0
 
 
 def test_stationary_rig_is_detected_from_reference_sensor_trajectory(tmp_path: Path):

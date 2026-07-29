@@ -2,6 +2,7 @@
 
 import json
 
+import pytest
 from PIL import Image as PilImage
 
 from sphere_reconstruct.colmap import input_workspace
@@ -13,7 +14,7 @@ def _write_feature_masks(project, names):
     for index, name in enumerate(names):
         path = root / f"{name}.png"
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(f"feature-mask-{index}".encode())
+        PilImage.new("L", (100, 100), 255 - index).save(path, format="PNG")
         records.append(
             {
                 "name": name,
@@ -36,8 +37,8 @@ def test_mixed_workspace_materializes_batches_masks_and_rig(tmp_path):
     fisheye = prepared / "fisheye.jpg"
     phone = prepared / "phone.jpg"
     prepared.mkdir(parents=True)
-    fisheye.write_bytes(b"fisheye")
-    phone.write_bytes(b"phone")
+    PilImage.new("RGB", (100, 100), (10, 20, 30)).save(fisheye, format="JPEG")
+    PilImage.new("RGB", (100, 100), (40, 50, 60)).save(phone, format="JPEG")
     names = [
         "sources/primary/front/frame_000000.jpg",
         "sources/phone/camera_00/frame_000001.jpg",
@@ -132,7 +133,7 @@ def test_workspace_without_feature_masks_keeps_only_physical_valid_regions(tmp_p
     prepared = project / "prepare_images"
     prepared.mkdir(parents=True)
     source = prepared / "image.jpg"
-    source.write_bytes(b"image")
+    PilImage.new("RGB", (100, 100), (10, 20, 30)).save(source, format="JPEG")
     catalog = {
         "version": 1,
         "reconstruction_mode": "native_fisheye",
@@ -181,7 +182,7 @@ def test_workspace_with_full_regions_and_feature_masks_disabled_has_no_mask_path
     prepared = project / "prepare_images"
     prepared.mkdir(parents=True)
     source = prepared / "image.jpg"
-    source.write_bytes(b"image")
+    PilImage.new("RGB", (100, 100), (10, 20, 30)).save(source, format="JPEG")
     catalog = {
         "version": 1,
         "reconstruction_mode": "native_fisheye",
@@ -213,3 +214,40 @@ def test_workspace_with_full_regions_and_feature_masks_disabled_has_no_mask_path
 
     assert spec.mask_path is None
     assert not (output / "masks").exists()
+
+
+def test_workspace_rejects_image_dimensions_changed_after_prepare(tmp_path):
+    project = tmp_path / "project"
+    prepared = project / "prepare_images"
+    prepared.mkdir(parents=True)
+    source = prepared / "image.jpg"
+    PilImage.new("RGB", (50, 50), (10, 20, 30)).save(source, format="JPEG")
+    catalog = {
+        "version": 1,
+        "reconstruction_mode": "native_fisheye",
+        "primary_source_id": "primary",
+        "sources": [
+            {"id": "primary", "label": "Primary", "role": "primary", "projection": "dual_fisheye"}
+        ],
+        "rig_config_path": None,
+        "camera_groups": [],
+        "images": [
+            {
+                "name": "front/image.jpg",
+                "path": str(source.relative_to(project)),
+                "source_id": "primary",
+                "source_role": "primary",
+                "capture_index": 0,
+                "sensor_id": "front",
+                "width": 100,
+                "height": 100,
+                "valid_region": {"kind": "full"},
+            }
+        ],
+    }
+    (prepared / "image_catalog.json").write_text(json.dumps(catalog), encoding="utf-8")
+    output = tmp_path / "output"
+    output.mkdir()
+
+    with pytest.raises(RuntimeError, match="dimensions changed"):
+        input_workspace.build(project, output, use_feature_masks=False)

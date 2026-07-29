@@ -66,3 +66,43 @@ def test_fisheye_theta_limit_must_exclude_the_back_hemisphere():
 
     with pytest.raises(ValueError, match="pi/2"):
         valid_region.render_mask(region, 64, 64)
+
+
+def test_non_monotonic_fisheye_distortion_is_rejected():
+    region = {
+        "kind": "opencv_fisheye",
+        "params": [20.0, 20.0, 32.0, 32.0, -0.2, 0.0, 0.0, 0.0],
+        "max_theta_rad": 1.4,
+    }
+
+    with pytest.raises(ValueError, match="not monotonic"):
+        valid_region.render_mask(region, 64, 64)
+
+
+def test_narrow_non_monotonic_interval_between_uniform_samples_is_rejected():
+    center = 1.0
+    half_width_squared = 1e-8
+    denominator = center * center - half_width_squared
+    k1 = (-2.0 * center / denominator) / 3.0
+    k2 = (1.0 / denominator) / 5.0
+    region = {
+        "kind": "opencv_fisheye",
+        "params": [20.0, 20.0, 32.0, 32.0, k1, k2, 0.0, 0.0],
+        "max_theta_rad": 1.4,
+    }
+
+    with pytest.raises(ValueError, match="not monotonic"):
+        valid_region.render_mask(region, 64, 64)
+
+
+def test_bounding_box_rejects_disjoint_shapes_with_overlapping_aabbs():
+    region = {
+        "kind": "opencv_fisheye",
+        "params": [20.0, 20.0, 50.0, 50.0, 0.0, 0.0, 0.0, 0.0],
+        "max_theta_rad": 1.0,
+        "physical_circle": {"cx": 0.75, "cy": 0.75, "r": 0.1},
+    }
+
+    assert valid_region.render_mask(region, 100, 100).sum() == 0
+    with pytest.raises(ValueError, match="no pixels"):
+        valid_region.bounding_box(region, 100, 100)

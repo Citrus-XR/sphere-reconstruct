@@ -9,6 +9,8 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from PIL import Image as PilImage
+
 from ..domain.mask_artifact import MaskPurpose, load_mask_manifest, mask_manifest_path, records_by_name
 from ..imaging import valid_region
 
@@ -78,21 +80,49 @@ def build(
 
     images_dir = output_dir / "images"
     masks_dir = output_dir / "masks"
+    physical_mask_templates: dict[str, Path] = {}
     materialize_masks = use_feature_masks or any(
         image["valid_region"]["kind"] != "full" for image in catalog["images"]
     )
     for image_number, image in enumerate(catalog["images"], 1):
         source = project_dir / image["path"]
+        expected_size = (int(image["width"]), int(image["height"]))
+        try:
+            with PilImage.open(source) as decoded:
+                actual_size = decoded.size
+        except (OSError, ValueError) as error:
+            raise RuntimeError(f"cannot read prepared image: {source}") from error
+        if actual_size != expected_size:
+            raise RuntimeError(
+                f"prepared image dimensions changed for {image['name']}: "
+                f"{actual_size[0]}x{actual_size[1]} != {expected_size[0]}x{expected_size[1]}"
+            )
         _link_or_copy(source, images_dir / image["name"])
         if materialize_masks:
             destination = masks_dir / f"{image['name']}.png"
             generated = generated_masks.get(image["name"])
             if generated is not None:
+                try:
+                    with PilImage.open(generated) as decoded:
+                        mask_size = decoded.size
+                except (OSError, ValueError) as error:
+                    raise RuntimeError(f"cannot read feature mask: {generated}") from error
+                if mask_size != expected_size:
+                    raise RuntimeError(
+                        f"feature mask dimensions changed for {image['name']}: "
+                        f"{mask_size[0]}x{mask_size[1]} != {expected_size[0]}x{expected_size[1]}"
+                    )
                 _link_or_copy(generated, destination)
             elif use_feature_masks:
                 raise RuntimeError(f"feature mask missing for prepared image: {image['name']}")
             else:
-                _write_valid_region_mask(image, destination)
+                key = valid_region.cache_key(image["valid_region"], *expected_size)
+                template = physical_mask_templates.get(key)
+                if template is None:
+                    _write_valid_region_mask(image, destination)
+                    physical_mask_templates[key] = destination
+                else:
+                    _link_or_copy(template, destination)
         if progress is not None:
             progress(image_number, len(catalog["images"]))
 

@@ -67,6 +67,7 @@ class CropRect:
 class CropPlan:
     images: dict[str, CropRect]
     cameras: dict[int, CropRect]
+    source_sizes: dict[str, tuple[int, int]]
     source_pixels: int
     cropped_pixels: int
     alignment_px: int
@@ -94,6 +95,8 @@ def build_plan(
     records = {record["name"]: record for record in catalog["images"]}
     image_rects: dict[str, CropRect] = {}
     camera_rects: dict[int, CropRect] = {}
+    camera_region_keys: dict[int, str] = {}
+    source_sizes: dict[str, tuple[int, int]] = {}
     source_pixels = 0
     cropped_pixels = 0
     for image in reconstruction.images.values():
@@ -108,14 +111,26 @@ def build_plan(
                 f"catalog/model dimensions differ for {image.name}: "
                 f"{width}x{height} != {camera.width}x{camera.height}"
             )
-        rect = _record_rect(record, alignment_px)
-        previous = camera_rects.setdefault(image.camera_id, rect)
-        if previous != rect:
-            raise ValueError(f"camera {image.camera_id} has inconsistent fisheye crop rectangles")
+        region_key = valid_region.cache_key(record["valid_region"], width, height)
+        previous_key = camera_region_keys.setdefault(image.camera_id, region_key)
+        if previous_key != region_key:
+            raise ValueError(f"camera {image.camera_id} has inconsistent valid regions")
+        rect = camera_rects.get(image.camera_id)
+        if rect is None:
+            rect = _record_rect(record, alignment_px)
+            camera_rects[image.camera_id] = rect
         image_rects[image.name] = rect
+        source_sizes[image.name] = (width, height)
         source_pixels += width * height
         cropped_pixels += rect.pixels
-    return CropPlan(image_rects, camera_rects, source_pixels, cropped_pixels, alignment_px)
+    return CropPlan(
+        image_rects,
+        camera_rects,
+        source_sizes,
+        source_pixels,
+        cropped_pixels,
+        alignment_px,
+    )
 
 
 def crop_reconstruction(reconstruction: Reconstruction, plan: CropPlan) -> Reconstruction:
@@ -185,6 +200,7 @@ def crop_masks(
                 source_dir / f"{name}.png",
                 destination_dir / f"{name}.png",
                 plan.images[name],
+                plan.source_sizes[name],
             )
             for name in names
         ]
@@ -250,9 +266,19 @@ def _crop_image(source: Path, destination: Path, rect: CropRect, jpegtran: str) 
     return source_size, destination.stat().st_size
 
 
-def crop_mask_file(source: Path, destination: Path, rect: CropRect) -> None:
+def crop_mask_file(
+    source: Path,
+    destination: Path,
+    rect: CropRect,
+    expected_size: tuple[int, int],
+) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     with PilImage.open(source) as image:
+        if image.size != expected_size:
+            raise RuntimeError(
+                f"mask dimensions changed for {source}: "
+                f"{image.width}x{image.height} != {expected_size[0]}x{expected_size[1]}"
+            )
         full_image = rect == CropRect(0, 0, *image.size)
         if not full_image:
             image.crop((rect.left, rect.top, rect.right, rect.bottom)).save(

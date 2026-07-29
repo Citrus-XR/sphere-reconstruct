@@ -210,9 +210,13 @@ async def get_fisheye_region(project_id: str, source_id: str) -> dict:
     project_dir = await _project_dir(project_id)
     document_path = fisheye_region.region_path(project_dir)
     document = json.loads(document_path.read_text(encoding="utf-8")) if document_path.exists() else {}
-    saved = source_id in (document.get("sources") or {})
+    source_document = (document.get("sources") or {}).get(source_id)
+    saved = isinstance(source_document, dict)
+    needs_review = bool(
+        saved and source_document.get("_coordinate_version") != fisheye_region.REGION_VERSION
+    )
     region = fisheye_region.load_region(project_dir, source_id)
-    return {**region, "saved": saved, "detected": not saved}
+    return {**region, "saved": saved, "detected": not saved, "needs_review": needs_review}
 
 
 @router.put("/api/projects/{project_id}/fisheye-region")

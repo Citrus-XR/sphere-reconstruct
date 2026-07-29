@@ -13,6 +13,7 @@ import json
 from pathlib import Path
 
 FILENAME = "fisheye_regions.json"
+REGION_VERSION = 2
 # 既定半径 (正規化). 実測でレンズ有効円がこの比に収まることが多い.
 DEFAULT_R_NORM = 0.459
 DEFAULT_LENS = {"cx": 0.5, "cy": 0.5, "r": DEFAULT_R_NORM}
@@ -95,8 +96,8 @@ def detect_lens_region(image_path: Path) -> dict:
     # 完全に見える円は 3%、切れた円は 10% 内側へ寄せ、UI で必要なら広げられる初期値にする。
     safety = 0.90 if radius_normalized > 0.5 else 0.97
     return {
-        "cx": _clamp01(center_x / small.shape[1]),
-        "cy": _clamp01(center_y / small.shape[0]),
+        "cx": _clamp01((center_x + 0.5) / small.shape[1]),
+        "cy": _clamp01((center_y + 0.5) / small.shape[0]),
         "r": max(0.3, min(0.52, radius_normalized * safety)),
     }
 
@@ -114,9 +115,15 @@ def save_region(project_dir: Path, source_id: str, data: dict) -> dict:
             }
     path = region_path(project_dir)
     document = (
-        json.loads(path.read_text(encoding="utf-8")) if path.exists() else {"version": 1, "sources": {}}
+        json.loads(path.read_text(encoding="utf-8"))
+        if path.exists()
+        else {"version": REGION_VERSION, "sources": {}}
     )
-    document.setdefault("sources", {})[source_id] = out
+    document["version"] = REGION_VERSION
+    document.setdefault("sources", {})[source_id] = {
+        **out,
+        "_coordinate_version": REGION_VERSION,
+    }
     path.write_text(json.dumps(document, indent=2), encoding="utf-8")
     return out
 

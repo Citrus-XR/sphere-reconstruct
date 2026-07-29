@@ -46,6 +46,9 @@ def test_save_clamps_and_roundtrips(tmp_path):
     assert out["lens0"]["r"] == 0.75  # [0.01, 0.75]
     assert out["lens1"]["r"] == 0.01
     assert fr.load_region(tmp_path, "source-a")["lens0"]["cx"] == 1.0
+    document = json.loads(fr.region_path(tmp_path).read_text())
+    assert document["version"] == fr.REGION_VERSION
+    assert document["sources"]["source-a"]["_coordinate_version"] == fr.REGION_VERSION
 
 
 def test_circle_px_uses_width_for_radius():
@@ -59,8 +62,8 @@ def test_detect_lens_region_from_black_border(tmp_path):
     path = tmp_path / "lens.jpg"
     assert cv2.imwrite(str(path), image)
     region = fr.detect_lens_region(path)
-    assert abs(region["cx"] - 205 / 400) < 0.02
-    assert abs(region["cy"] - 195 / 400) < 0.02
+    assert abs(region["cx"] - 205.5 / 400) < 0.02
+    assert abs(region["cy"] - 195.5 / 400) < 0.02
     assert 0.43 < region["r"] < 0.47
 
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections import OrderedDict
 from pathlib import Path
 from uuid import uuid4
 
@@ -104,6 +105,7 @@ class _GenerateMasks(Stage):
 
         records = []
         outputs = []
+        valid_region_cache: OrderedDict[str, np.ndarray] = OrderedDict()
         try:
             for number, image_record in enumerate(images, 1):
                 image_span = ProgressSpan(
@@ -122,6 +124,23 @@ class _GenerateMasks(Stage):
                 if bgr is None:
                     raise RuntimeError(f"cannot read prepared image: {source_path}")
                 height, width = bgr.shape[:2]
+                expected_size = (int(image_record["width"]), int(image_record["height"]))
+                if (width, height) != expected_size:
+                    raise RuntimeError(
+                        f"prepared image dimensions changed for {image_record['name']}: "
+                        f"{width}x{height} != {expected_size[0]}x{expected_size[1]}"
+                    )
+                region_key = valid_region.cache_key(image_record["valid_region"], width, height)
+                camera_valid = valid_region_cache.get(region_key)
+                if camera_valid is None:
+                    camera_valid = valid_region.render_mask(
+                        image_record["valid_region"], width, height
+                    )
+                    valid_region_cache[region_key] = camera_valid
+                    if len(valid_region_cache) > 4:
+                        valid_region_cache.popitem(last=False)
+                else:
+                    valid_region_cache.move_to_end(region_key)
                 plan = mask_utils.plan_downsample(width, height, ctx.params["max_inference_size"])
                 small_rgb = cv2.cvtColor(mask_utils.downsample_image(bgr, plan), cv2.COLOR_BGR2RGB)
 
@@ -155,7 +174,13 @@ class _GenerateMasks(Stage):
                     else mask_utils.upscale_mask(union, width, height)
                 )
                 dynamic = mask_utils.dilate_mask(dynamic, ctx.params["dilate_px"])
-                valid, coverage = _compose_valid_mask(image_record["valid_region"], dynamic, width, height)
+                valid, coverage = _compose_valid_mask(
+                    image_record["valid_region"],
+                    dynamic,
+                    width,
+                    height,
+                    camera_valid=camera_valid,
+                )
                 output_path = ctx.stage_out_dir / f"{image_record['name']}.png"
                 mask_utils.write_mask_png(valid, output_path, invert=False)
                 warning = coverage > ctx.params["coverage_warn"]
@@ -170,6 +195,9 @@ class _GenerateMasks(Stage):
                     "source_id": image_record["source_id"],
                     "capture_index": image_record["capture_index"],
                     "path": _final_relpath(output_path, ctx),
+                    "width": width,
+                    "height": height,
+                    "sha256": sha256_file(output_path),
                     "coverage": coverage,
                     "coverage_warning": warning,
                     "detections": {
@@ -222,8 +250,16 @@ class GenerateTrainingMasks(_GenerateMasks):
     purpose = MaskPurpose.TRAINING
 
 
-def _compose_valid_mask(region: dict, dynamic: np.ndarray, width: int, height: int) -> tuple[np.ndarray, float]:
-    camera_valid = valid_region.render_mask(region, width, height)
+def _compose_valid_mask(
+    region: dict,
+    dynamic: np.ndarray,
+    width: int,
+    height: int,
+    *,
+    camera_valid: np.ndarray | None = None,
+) -> tuple[np.ndarray, float]:
+    if camera_valid is None:
+        camera_valid = valid_region.render_mask(region, width, height)
     valid_area = int(camera_valid.sum()) or 1
     coverage = float(((camera_valid > 0) & (dynamic > 0)).sum()) / valid_area
     return (camera_valid & (dynamic == 0)).astype(np.uint8), coverage
@@ -257,6 +293,6 @@ def _file_ref(path: Path, ctx: StageContext, mime: str) -> FileRef:
     return FileRef(
         path=_final_relpath(path, ctx),
         size=path.stat().st_size,
-        sha256=sha256_file(path) if path.suffix == ".json" else "",
+        sha256=sha256_file(path),
         mime=mime,
     )

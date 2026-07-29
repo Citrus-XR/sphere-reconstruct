@@ -231,7 +231,7 @@ const installUiMock = async (page: Page, options: MockOptions = {}) => {
       return
     }
     if (projectId && path === `/api/projects/${projectId}/fisheye-region`) {
-      await route.fulfill({ json: { lens0: { cx: 0.5, cy: 0.5, r: 0.48 }, lens1: { cx: 0.5, cy: 0.5, r: 0.48 }, saved: true } })
+      await route.fulfill({ json: { lens0: { cx: 0.5, cy: 0.5, r: 0.48 }, lens1: { cx: 0.5, cy: 0.5, r: 0.48 }, saved: true, needs_review: true } })
       return
     }
     if (projectId && path === `/api/projects/${projectId}/export-info`) {
@@ -476,6 +476,7 @@ test('fisheye valid-region editor can switch its preview frame', async ({ page }
   await page.goto('/')
 
   await page.getByRole('button', { name: /Fisheye region/ }).click()
+  await expect(page.getByText('Coordinate update: review and save the circle')).toBeVisible()
   const previewFrame = page.getByRole('slider', { name: 'Preview frame' })
   await expect(previewFrame).toHaveAttribute('max', '2')
   await previewFrame.fill('2')

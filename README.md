@@ -188,9 +188,14 @@ training mask にする。Physical circle と principal point がずれても背
 | Front | 0.525 px | 1.564 px | 0.448096 | 89.55° |
 | Back | 1.541 px | 4.464 px | 0.468613 | 89.55° |
 
+旧 scalar-circle clamp は principal-point offset を表現できず、Parktest export の white training pixels に
+front 1.61%、back 0.96% の hemisphere 外領域を残した。最初の LFStudio run は 5,200 iter で停止し、mask
+を calibrated-ray intersection へ移行してから最初から再実行した。
+
 Valid-region editor は抽出済みの任意 frame と lens を切り替えられる。SAM3 は circle 外を含む full image で
 object context を認識し、推論後に valid region と合成する。円外に胴体、円内に腕だけ見える人物でも context
-を失わない。
+を失わない。Region schema v2 は SVG と同じ image-edge coordinates。旧 schema は自動 offset せず UI に
+review / resave を要求し、user 調整値を勝手に移動しない。
 
 ## Two independent SAM3 mask Steps
 
@@ -210,9 +215,10 @@ Training prompt は final detail を残す。Scene に存在しない追加 obje
 | On | On | Feature mask | Training mask |
 | On | Off | Feature mask | Feature mask |
 | Off | On | Physical valid region | Training mask |
-| Off | Off | Physical valid region | No mask |
+| Off | Off | Physical valid region | Physical valid-region mask |
 
-Export は 0 または 1 mask channel だけを書く。White=keep、black=ignore。
+Export は 1 mask channel だけを書く。SAM3 channel が無い場合も camera-model physical valid region を書き、
+fisheye padding を黒い training target と誤認させない。White=keep、black=ignore。
 
 ### Video propagation decision
 

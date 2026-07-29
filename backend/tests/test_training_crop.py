@@ -128,3 +128,13 @@ def test_jpeg_and_mask_crop_keep_planned_dimensions(tmp_path: Path):
         assert image.size == (32, 32)
     with PilImage.open(tmp_path / "masks" / "front" / "frame.jpg.png") as mask:
         assert mask.size == (32, 32)
+
+
+def test_mask_crop_rejects_stale_source_dimensions(tmp_path: Path):
+    source = tmp_path / "source" / "front" / "frame.jpg.png"
+    source.parent.mkdir(parents=True)
+    PilImage.new("L", (32, 64), 255).save(source, format="PNG")
+    plan = training_crop.build_plan(_reconstruction(), _catalog())
+
+    with pytest.raises(RuntimeError, match="mask dimensions changed"):
+        training_crop.crop_masks(tmp_path / "source", tmp_path / "destination", plan)

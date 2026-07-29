@@ -71,6 +71,8 @@ def _make_catalog(project_dir, *, circle: bool) -> list[str]:
                 "path": str(path.relative_to(project_dir)),
                 "source_id": "source-a",
                 "capture_index": index,
+                "width": 256,
+                "height": 256,
                 "valid_region": (
                     {"kind": "circle", "cx": 0.5, "cy": 0.5, "r": 0.459} if circle else {"kind": "full"}
                 ),
@@ -125,7 +127,11 @@ def test_generate_masks_for_perspective_images(tmp_path, monkeypatch, stage_type
     assert document["revision"]
     assert 0.45 < document["images"][0]["coverage"] < 0.55
     assert document["prompt"] == ["person", "animal"]
+    assert document["images"][0]["width"] == 256
+    assert document["images"][0]["height"] == 256
+    assert len(document["images"][0]["sha256"]) == 64
     assert len(manifest.outputs) == len(names) + 1
+    assert all(len(output.sha256) == 64 for output in manifest.outputs)
     assert not (output / ".preview-mask-header.json").exists()
     assert not (output / ".preview-mask-records.jsonl").exists()
 
@@ -156,3 +162,26 @@ def test_generate_masks_combines_calibrated_fisheye_hemisphere():
     assert mask[50, 1] == 0
     assert mask[0, 55] == 0
     assert coverage == 0.0
+
+
+def test_generate_masks_rejects_image_dimensions_changed_after_prepare(tmp_path, monkeypatch):
+    project = tmp_path / "project"
+    project.mkdir()
+    names = _make_catalog(project, circle=False)
+    image_path = project / "prepare_images" / names[0]
+    assert cv2.imwrite(str(image_path), np.zeros((128, 128, 3), dtype=np.uint8))
+    monkeypatch.setattr(sam3_engine, "Sam3Engine", _FakeEngine)
+    stage = GenerateTrainingMasks()
+    output = project / ".generate_training_masks.tmp"
+    output.mkdir()
+    context = StageContext(
+        project_id="p",
+        project_dir=project,
+        stage_out_dir=output,
+        params=stage.normalize_params({"prompt": "person"}),
+        sources=(),
+        progress=ProgressReporter(lambda *_args: None),
+    )
+
+    with pytest.raises(RuntimeError, match="dimensions changed"):
+        stage.execute(context)

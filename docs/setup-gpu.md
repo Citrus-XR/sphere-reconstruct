@@ -201,7 +201,8 @@ INSV native は `offset_v3` の front / back MEI calibration を別々の `OPENC
 COLMAP perspective fisheye は forward hemisphere 専用なので、valid radius は calibrated 180° radius の
 scalar clamp にしない。Principal point、fx / fy、k1–k4 から pixel ごとの ray angle を評価し、89.55° 未満と
 physical image circle の積集合を mask にする。Reliable physical intrinsics / rig extrinsics は固定し、全
-camera が固定済みなら view-graph calibration を skip する。
+camera が固定済みなら view-graph calibration を skip する。Physical circle schema v2 は image-edge
+coordinates を使う。旧 schema の saved circle は移動せず UI で review / resave を要求する。
 
 Single-source video は Sequential + loop closure + transitive matching。COLMAP 4.1.1 は folder-major sensor
 境界を誤った temporal pair として展開するため、runtime は upstream
@@ -242,7 +243,8 @@ feature_prompt = "person,camera operator,person's shadow,animal,sky,tree,vehicle
 
 Feature / Training masks は別 Step、別 artifact、別 invalidation。SAM3 inference は native fisheye circle 外を
 含む full image context で行い、最後に physical valid region と合成する。完成した PNG は atomic write 後
-すぐ running preview index へ追加する。
+すぐ running preview index へ追加する。両 SAM3 Step を無効にした export でも physical valid-region mask は
+必ず出力し、fisheye padding を training target に含めない。
 
 Video propagation は prompt ごとに再実行するため multi-prompt で遅く、segmented bidirectional でも独立
 detection より frame miss が残った。従って default には使わない。

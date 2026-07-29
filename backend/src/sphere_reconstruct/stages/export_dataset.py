@@ -3,7 +3,7 @@
 aligned reconstruction を LFStudio が直接選択できる dataset root として書き出す:
 
     <project>/export_dataset/images/...
-    <project>/export_dataset/masks/...      (任意)
+    <project>/export_dataset/masks/...      (SAM3 または physical valid region)
     <project>/export_dataset/sparse/0/*
     <project>/export_dataset/preview/*
     <project>/export_dataset/train_configs/* (任意)
@@ -14,7 +14,7 @@ aligned reconstruction を LFStudio が直接選択できる dataset root とし
   emit_train_configs: bool  LFStudio 推奨設定を書き出す (default True)
   optimize_fisheye_training_images: bool  円形領域外を lossless crop (default True)
   feature_masks_enabled: bool   training mask 無効時の export fallback
-  training_masks_enabled: bool  export で優先する mask
+  training_masks_enabled: bool  export で優先する SAM3 mask。両方無効なら physical mask
 """
 
 from __future__ import annotations
@@ -41,6 +41,7 @@ from ..domain.mask_artifact import (
     stage_for,
 )
 from ..domain.pipeline_state import StageName
+from ..imaging import valid_region
 from ..infrastructure.filesystem import sha256_file
 from ..pipeline.manifest import register
 from ..pipeline.stage import ProgressSpan, Stage, StageContext, new_manifest
@@ -260,6 +261,9 @@ class ExportDataset(Stage):
                     args={"cur": current, "tot": total},
                 ),
             )
+            resolved_mask_source = (
+                mask_purpose.value if mask_purpose is not None else "physical"
+            )
             primary_prefix = f"sources/{spec.primary_source_id}/"
             if not any(name.startswith(primary_prefix) for name in registered_names):
                 primary_prefix = None
@@ -290,7 +294,7 @@ class ExportDataset(Stage):
                 "points3D": len(recon.points3D),
                 "masks": validation["matched_mask_count"],
                 "mask_files_copied": mask_files_copied,
-                "mask_source": mask_purpose.value if mask_purpose is not None else None,
+                "mask_source": resolved_mask_source,
                 "image_source": "lossless_fisheye_crop" if crop_plan is not None else "original",
                 "training_crop": crop_info,
                 "metric_scale": metric_scale_info,
@@ -382,7 +386,11 @@ class ExportDataset(Stage):
             **recon.summary(),
             "camera_models": sorted({camera.model for camera in recon.cameras.values()}),
             "mask_files": validation["matched_mask_count"] if validation else 0,
-            "mask_source": mask_purpose.value if mask_purpose is not None else None,
+            "mask_source": (
+                mask_purpose.value
+                if mask_purpose is not None
+                else ("physical" if validation and validation["matched_mask_count"] else None)
+            ),
             "validation": validation,
             "training_profile": train_profile_data,
             "training_recommendation": cfg_info,
@@ -414,11 +422,42 @@ def _copy_masks(
     crop_plan: training_crop.CropPlan | None = None,
     progress: Callable[[int, int], None] | None = None,
 ) -> int:
-    if purpose is None:
-        return 0
-    records = records_by_name(load_mask_manifest(project_dir, purpose))
     sorted_names = sorted(image_names)
-    copies: list[tuple[Path, Path, training_crop.CropRect | None]] = []
+    if purpose is None:
+        catalog = json.loads(
+            (project_dir / "prepare_images" / "image_catalog.json").read_text(encoding="utf-8")
+        )
+        records = {record["name"]: record for record in catalog["images"]}
+        missing = [name for name in sorted_names if name not in records]
+        if missing:
+            raise RuntimeError(f"image catalog is missing registered masks: {missing[:5]}")
+        templates: dict[str, Path] = {}
+        for image_number, image_name in enumerate(sorted_names, 1):
+            record = records[image_name]
+            rect = crop_plan.images[image_name] if crop_plan is not None else None
+            key = valid_region.cache_key(
+                record.get("valid_region", {"kind": "full"}),
+                int(record["width"]),
+                int(record["height"]),
+            ) + (f":crop={rect.as_list()}" if rect is not None else ":uncropped")
+            destination = destination_dir / f"{image_name}.png"
+            template = templates.get(key)
+            if template is None:
+                _write_physical_mask(record, destination, rect)
+                templates[key] = destination
+            else:
+                _link_or_copy(template, destination)
+            if progress is not None:
+                progress(image_number, len(sorted_names))
+        return len(sorted_names)
+
+    records = records_by_name(load_mask_manifest(project_dir, purpose))
+    missing = [name for name in sorted_names if name not in records]
+    if missing:
+        raise RuntimeError(f"{purpose.value} masks are missing registered images: {missing[:5]}")
+    copies: list[
+        tuple[Path, Path, training_crop.CropRect | None, tuple[int, int] | None]
+    ] = []
     for image_name in sorted_names:
         record = records.get(image_name)
         if record is None:
@@ -426,20 +465,45 @@ def _copy_masks(
         source = project_dir / record["path"]
         destination = destination_dir / f"{image_name}.png"
         rect = crop_plan.images[image_name] if crop_plan is not None else None
-        copies.append((source, destination, rect))
+        expected_size = crop_plan.source_sizes[image_name] if crop_plan is not None else None
+        copies.append((source, destination, rect, expected_size))
     workers = min(16, max(1, os.cpu_count() or 1))
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = []
-        for source, destination, rect in copies:
+        for source, destination, rect, expected_size in copies:
             if rect is None:
                 futures.append(pool.submit(_link_or_copy, source, destination))
             else:
-                futures.append(pool.submit(training_crop.crop_mask_file, source, destination, rect))
+                futures.append(
+                    pool.submit(
+                        training_crop.crop_mask_file,
+                        source,
+                        destination,
+                        rect,
+                        expected_size,
+                    )
+                )
         for image_number, future in enumerate(as_completed(futures), 1):
             future.result()
             if progress is not None:
                 progress(image_number, len(copies))
     return len(copies)
+
+
+def _write_physical_mask(
+    record: dict,
+    destination: Path,
+    rect: training_crop.CropRect | None,
+) -> None:
+    mask = valid_region.render_mask(
+        record.get("valid_region", {"kind": "full"}),
+        int(record["width"]),
+        int(record["height"]),
+    )
+    if rect is not None:
+        mask = mask[rect.top : rect.bottom, rect.left : rect.right]
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    PilImage.fromarray(mask * 255, mode="L").save(destination, format="PNG", compress_level=6)
 
 
 def _validate_lf_dataset(

@@ -292,6 +292,7 @@ export interface FisheyeRegion {
   lens0: LensCircle
   lens1: LensCircle
   saved?: boolean
+  needs_review?: boolean
 }
 
 export interface FrameSelection {

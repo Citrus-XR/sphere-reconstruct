@@ -709,8 +709,11 @@ const formatStatistic = (t: (key: string) => string, key: string, value: string 
     const translated = t(translationKey)
     return translated === translationKey ? value : translated
   }
-  if ((key === 'purpose' || key === 'mask_source') && typeof value === 'string')
-    return t(value === 'feature' ? 'featureMask' : 'trainingMask')
+  if ((key === 'purpose' || key === 'mask_source') && typeof value === 'string') {
+    if (value === 'feature') return t('featureMask')
+    if (value === 'training') return t('trainingMask')
+    if (value === 'physical') return t('physicalMask')
+  }
   if (typeof value === 'boolean') return value ? t('yes') : t('no')
   if (typeof value === 'string') return value
   if (key === 'file_size' || key === 'footer_size' || key.endsWith('_bytes')) {
