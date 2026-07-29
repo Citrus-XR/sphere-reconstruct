@@ -49,6 +49,10 @@ export const FisheyeRegionEditor = ({
       setRegion(r)
       setSavedMsg(true); setTimeout(() => setSavedMsg(false), 1500)
       qc.invalidateQueries({ queryKey: ['fisheye-region', projectId, sourceId] })
+      if (r.invalidated?.length) {
+        for (const key of ['stages', 'reconstruction', 'masks', 'export-info'])
+          qc.invalidateQueries({ queryKey: [key, projectId] })
+      }
       onSaved?.()
     },
   })

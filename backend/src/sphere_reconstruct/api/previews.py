@@ -11,6 +11,7 @@ import json
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
@@ -22,9 +23,11 @@ from ..domain.mask_artifact import (
     mask_manifest_path,
     stage_for,
 )
+from ..domain.pipeline_state import StageName
 from ..imaging import fisheye_region
 from ..infrastructure.database import get_db
 from ..infrastructure.filesystem import PathNotAllowedError, ensure_within
+from ..pipeline.invalidation import derive_pipeline_state, invalidate_from
 
 router = APIRouter(tags=["previews"])
 
@@ -222,9 +225,42 @@ async def get_fisheye_region(project_id: str, source_id: str) -> dict:
 @router.put("/api/projects/{project_id}/fisheye-region")
 async def put_fisheye_region(project_id: str, region: FisheyeRegion, source_id: str) -> dict:
     """魚眼有効領域を保存する. 検証して正規化した内容を返す."""
-    project_dir = await _project_dir(project_id)
+    db = get_db()
+    project = await project_domain.get_project(db, project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="project not found")
+    running = await (
+        await db.conn.execute(
+            "SELECT 1 FROM job WHERE project_id=? AND status IN ('queued', 'running') LIMIT 1",
+            (project_id,),
+        )
+    ).fetchone()
+    if running is not None:
+        raise HTTPException(status_code=409, detail="project has a running job")
+    project_dir = project.workspace_dir
     project_dir.mkdir(parents=True, exist_ok=True)
-    return fisheye_region.save_region(project_dir, source_id, region.model_dump())
+    previous = fisheye_region.load_region(project_dir, source_id)
+    saved = fisheye_region.save_region(project_dir, source_id, region.model_dump())
+    invalidated = []
+    if saved != previous:
+        invalidated = await run_in_threadpool(
+            invalidate_from,
+            project_dir,
+            StageName.PREPARE_IMAGES,
+            include_self=True,
+        )
+        state = derive_pipeline_state(project_dir)
+        await db.conn.execute(
+            "UPDATE project SET state=?, updated_at=datetime('now') WHERE id=?",
+            (state.value, project_id),
+        )
+        await db.conn.commit()
+    return {
+        **saved,
+        "saved": True,
+        "needs_review": False,
+        "invalidated": [stage.value for stage in invalidated],
+    }
 
 
 @router.get("/api/projects/{project_id}/source-info")
