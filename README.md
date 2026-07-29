@@ -179,12 +179,14 @@ INSV native は heuristic `f=W/3.5、k=0` を使わない。`offset_v3` の fron
 8-parameter `OPENCV_FISHEYE` へ least-squares fit し、source ごとの 2-camera physical rig にする。
 
 COLMAP perspective fisheye は 180° 以下の forward hemisphere 専用。Physical circle が 180° を越える
-場合、feature / training valid radius を calibrated forward radius の 99.5% へ clamp する。Parktest fit:
+場合、単一の circle radius は使わない。Calibrated `OPENCV_FISHEYE` の principal point、fx / fy、k1–k4
+から各 pixel の ray angle を判定し、`theta < 89.55°` と user-selected physical circle の積集合を feature /
+training mask にする。Physical circle と principal point がずれても背面 ray は残らない。Parktest fit:
 
-| Lens | RMS | Maximum | Effective radius / width |
-|---|---:|---:|---:|
-| Front | 0.525 px | 1.564 px | 0.444993 |
-| Back | 1.541 px | 4.464 px | 0.446542 |
+| Lens | RMS | Maximum | Physical radius / width | Ray limit |
+|---|---:|---:|---:|---:|
+| Front | 0.525 px | 1.564 px | 0.448096 | 89.55° |
+| Back | 1.541 px | 4.464 px | 0.468613 | 89.55° |
 
 Valid-region editor は抽出済みの任意 frame と lens を切り替えられる。SAM3 は circle 外を含む full image で
 object context を認識し、推論後に valid region と合成する。円外に胴体、円内に腕だけ見える人物でも context
@@ -341,6 +343,11 @@ export_dataset/
 Native fisheye JPEG は valid circle を含む MCU boundary で `jpegtran` lossless crop し、camera principal
 point、2D observation、mask を同じ offset で更新する。Export は registered image だけを含み、camera center
 `C=-Rᵀt` の non-zero trajectory、rig/frame、image/mask count を LFStudio loader smoke で検証する。
+
+GUT training では `undistort=false` のまま original `OPENCV_FISHEYE` model と distortion coefficient を
+rasterizer へ渡す。LFStudio import 時の `Undistort: ... -> ...` log は hypothetical crop metadata の事前計算で、
+training RGB / mask をその小さい解像度へ変換した記録ではない。Actual image loader の `max-width` が学習 tensor
+解像度を示す。
 
 ## Recommended LFStudio training
 

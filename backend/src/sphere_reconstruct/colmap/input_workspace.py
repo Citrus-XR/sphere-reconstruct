@@ -10,6 +10,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from ..domain.mask_artifact import MaskPurpose, load_mask_manifest, mask_manifest_path, records_by_name
+from ..imaging import valid_region
 
 
 @dataclass(frozen=True)
@@ -159,21 +160,9 @@ def build(
 
 def _write_valid_region_mask(image: dict, destination: Path) -> None:
     import cv2  # noqa: PLC0415
-    import numpy as np  # noqa: PLC0415
 
     width, height = int(image["width"]), int(image["height"])
-    region = image["valid_region"]
-    mask = np.full((height, width), 255, dtype=np.uint8)
-    if region["kind"] == "circle":
-        mask.fill(0)
-        cv2.circle(
-            mask,
-            (round(region["cx"] * width), round(region["cy"] * height)),
-            round(region["r"] * width),
-            255,
-            thickness=-1,
-            lineType=cv2.LINE_AA,
-        )
+    mask = valid_region.render_mask(image["valid_region"], width, height) * 255
     destination.parent.mkdir(parents=True, exist_ok=True)
     if not cv2.imwrite(str(destination), mask):
         raise RuntimeError(f"failed to write mask: {destination}")

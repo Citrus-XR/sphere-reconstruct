@@ -30,7 +30,7 @@ FULL_FRAME_DIAGONAL_MM = math.hypot(36.0, 24.0)
 @register
 class PrepareImages(Stage):
     name = StageName.PREPARE_IMAGES
-    impl_version = "1.2"
+    impl_version = "1.3"
 
     def collect_inputs(self, ctx: StageContext) -> list[FileRef]:
         candidates = [
@@ -208,14 +208,7 @@ class PrepareImages(Stage):
         prefix = f"sources/{source['id']}/"
         group_ids = {sensor: f"{source['id']}:native-fisheye:{sensor}" for sensor in ("front", "back")}
         region = fisheye_region.load_region(ctx.project_dir, source["id"])
-        effective_regions = {}
-        for index in range(2):
-            requested = region[f"lens{index}"]
-            safe_radius = approximations[index].forward_radius_px / width * 0.995
-            effective_regions[f"lens{index}"] = {
-                **requested,
-                "r": min(float(requested["r"]), safe_radius),
-            }
+        maximum_theta_rad = math.pi / 2 * 0.995
         images = []
         image_names = {"front": [], "back": []}
         for frame in source["frames"]:
@@ -233,7 +226,12 @@ class PrepareImages(Stage):
                         camera_group_id=group_ids[sensor],
                         sensor_id=sensor,
                         projection_name="dual_fisheye",
-                        valid_region={"kind": "circle", **effective_regions[f"lens{lens}"]},
+                        valid_region={
+                            "kind": "opencv_fisheye",
+                            "params": list(approximations[lens].params),
+                            "max_theta_rad": maximum_theta_rad,
+                            "physical_circle": region[f"lens{lens}"],
+                        },
                     )
                 )
         baseline = native_rig.baseline_from_lens_centers(calibration["lenses"])
@@ -271,7 +269,8 @@ class PrepareImages(Stage):
                         "rms_error_px": approximations[index].rms_error_px,
                         "maximum_error_px": approximations[index].maximum_error_px,
                         "forward_radius_px": approximations[index].forward_radius_px,
-                        "effective_valid_radius_ratio": effective_regions[f"lens{index}"]["r"],
+                        "forward_theta_limit_deg": math.degrees(maximum_theta_rad),
+                        "physical_valid_radius_ratio": float(region[f"lens{index}"]["r"]),
                     }
                     for index, sensor in enumerate(("front", "back"))
                 ],

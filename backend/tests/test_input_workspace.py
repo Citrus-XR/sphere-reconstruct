@@ -2,6 +2,8 @@
 
 import json
 
+from PIL import Image as PilImage
+
 from sphere_reconstruct.colmap import input_workspace
 
 
@@ -81,7 +83,12 @@ def test_mixed_workspace_materializes_batches_masks_and_rig(tmp_path):
                 "sensor_id": "front",
                 "width": 100,
                 "height": 100,
-                "valid_region": {"kind": "circle", "cx": 0.5, "cy": 0.5, "r": 0.45},
+                "valid_region": {
+                    "kind": "opencv_fisheye",
+                    "params": [25.0, 25.0, 55.0, 50.0, 0.0, 0.0, 0.0, 0.0],
+                    "max_theta_rad": 1.4,
+                    "physical_circle": {"cx": 0.5, "cy": 0.5, "r": 0.49},
+                },
             },
             {
                 "name": names[1],
@@ -145,7 +152,12 @@ def test_workspace_without_feature_masks_keeps_only_physical_valid_regions(tmp_p
                 "sensor_id": "front",
                 "width": 100,
                 "height": 100,
-                "valid_region": {"kind": "circle", "cx": 0.5, "cy": 0.5, "r": 0.45},
+                "valid_region": {
+                    "kind": "opencv_fisheye",
+                    "params": [25.0, 25.0, 55.0, 50.0, 0.0, 0.0, 0.0, 0.0],
+                    "max_theta_rad": 1.4,
+                    "physical_circle": {"cx": 0.5, "cy": 0.5, "r": 0.49},
+                },
             }
         ],
     }
@@ -157,7 +169,11 @@ def test_workspace_without_feature_masks_keeps_only_physical_valid_regions(tmp_p
 
     assert spec.feature_masks_enabled is False
     assert spec.mask_path == "masks"
-    assert (output / "masks" / "sources/primary/front/frame_000000.jpg.png").is_file()
+    mask_path = output / "masks" / "sources/primary/front/frame_000000.jpg.png"
+    assert mask_path.is_file()
+    with PilImage.open(mask_path) as mask:
+        assert mask.getpixel((55, 50)) == 255
+        assert mask.getpixel((1, 50)) == 0
 
 
 def test_workspace_with_full_regions_and_feature_masks_disabled_has_no_mask_path(tmp_path):

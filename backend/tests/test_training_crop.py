@@ -62,6 +62,28 @@ def test_crop_plan_updates_principal_point_and_observations(tmp_path: Path):
     assert model.read_images_bin(tmp_path / "images.bin") == cropped.images
 
 
+def test_crop_plan_uses_calibrated_fisheye_forward_bounds():
+    catalog = {
+        "images": [
+            {
+                "name": "front/frame.jpg",
+                "width": 64,
+                "height": 64,
+                "valid_region": {
+                    "kind": "opencv_fisheye",
+                    "params": [20.0, 21.0, 32.0, 33.0, 0.0, 0.0, 0.0, 0.0],
+                    "max_theta_rad": 0.5,
+                    "physical_circle": {"cx": 0.5, "cy": 0.5, "r": 0.49},
+                },
+            }
+        ]
+    }
+
+    plan = training_crop.build_plan(_reconstruction(), catalog)
+
+    assert plan.images["front/frame.jpg"] == training_crop.CropRect(16, 16, 48, 48)
+
+
 def test_inconsistent_crop_for_shared_camera_is_rejected():
     reconstruction = _reconstruction()
     reconstruction.images[2] = model.Image(

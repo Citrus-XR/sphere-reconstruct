@@ -18,6 +18,7 @@ from ..domain.mask_artifact import (
 )
 from ..domain.pipeline_state import StageName
 from ..imaging import masks as mask_utils
+from ..imaging import valid_region
 from ..infrastructure.filesystem import sha256_file
 from ..pipeline.manifest import register
 from ..pipeline.stage import ProgressSpan, Stage, StageContext, new_manifest
@@ -26,7 +27,7 @@ from ..settings import get_settings
 
 class _GenerateMasks(Stage):
     purpose: MaskPurpose
-    impl_version = "1.2"
+    impl_version = "1.3"
 
     def normalize_params(self, raw: dict) -> dict:
         settings = get_settings().sam3
@@ -222,14 +223,10 @@ class GenerateTrainingMasks(_GenerateMasks):
 
 
 def _compose_valid_mask(region: dict, dynamic: np.ndarray, width: int, height: int) -> tuple[np.ndarray, float]:
-    if region["kind"] == "circle":
-        circle = (region["cx"] * width, region["cy"] * height, region["r"] * width)
-        valid = mask_utils.valid_region_mask(width, height, circle, exclude=dynamic)
-        circle_mask = mask_utils.circle_mask(width, height, *circle)
-        valid_area = int(circle_mask.sum()) or 1
-        coverage = float(((circle_mask > 0) & (dynamic > 0)).sum()) / valid_area
-        return valid, coverage
-    return np.where(dynamic > 0, 0, 255).astype(np.uint8), mask_utils.coverage_ratio(dynamic)
+    camera_valid = valid_region.render_mask(region, width, height)
+    valid_area = int(camera_valid.sum()) or 1
+    coverage = float(((camera_valid > 0) & (dynamic > 0)).sum()) / valid_area
+    return (camera_valid & (dynamic == 0)).astype(np.uint8), coverage
 
 
 def _mask_statistics(manifest: dict) -> dict:

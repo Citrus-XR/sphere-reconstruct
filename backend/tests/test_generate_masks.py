@@ -14,6 +14,7 @@ from sphere_reconstruct.sam3 import engine as sam3_engine  # noqa: E402
 from sphere_reconstruct.stages.generate_masks import (  # noqa: E402
     GenerateFeatureMasks,
     GenerateTrainingMasks,
+    _compose_valid_mask,
 )
 
 _TRAINING_PROMPT = "person,camera operator,person's shadow"
@@ -138,3 +139,20 @@ def test_generate_masks_combines_fisheye_valid_circle(tmp_path, monkeypatch):
     assert mask[128, 245] == 255
     assert mask[128, 10] == 0
     assert mask[2, 2] == 0
+
+
+def test_generate_masks_combines_calibrated_fisheye_hemisphere():
+    dynamic = np.zeros((100, 100), dtype=np.uint8)
+    region = {
+        "kind": "opencv_fisheye",
+        "params": [25.0, 25.0, 55.0, 50.0, 0.0, 0.0, 0.0, 0.0],
+        "max_theta_rad": 1.4,
+        "physical_circle": {"cx": 0.5, "cy": 0.5, "r": 0.49},
+    }
+
+    mask, coverage = _compose_valid_mask(region, dynamic, 100, 100)
+
+    assert mask[50, 55] == 1
+    assert mask[50, 1] == 0
+    assert mask[0, 55] == 0
+    assert coverage == 0.0

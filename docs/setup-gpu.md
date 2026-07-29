@@ -199,8 +199,9 @@ decision loop は前回採用 frame に依存するため sequential のまま�
 
 INSV native は `offset_v3` の front / back MEI calibration を別々の `OPENCV_FISHEYE` へ fit する。
 COLMAP perspective fisheye は forward hemisphere 専用なので、valid radius は calibrated 180° radius の
-99.5% 以下へ clamp する。Reliable physical intrinsics / rig extrinsics は固定し、全 camera が固定済みなら
-view-graph calibration を skip する。
+scalar clamp にしない。Principal point、fx / fy、k1–k4 から pixel ごとの ray angle を評価し、89.55° 未満と
+physical image circle の積集合を mask にする。Reliable physical intrinsics / rig extrinsics は固定し、全
+camera が固定済みなら view-graph calibration を skip する。
 
 Single-source video は Sequential + loop closure + transitive matching。COLMAP 4.1.1 は folder-major sensor
 境界を誤った temporal pair として展開するため、runtime は upstream
@@ -261,6 +262,10 @@ observation、mask を同じ offset で更新する。jpegtran が無ければ o
 
 Native distorted / fisheye / ERP dataset は MRNF または MCMC + GUT。IGS+ は GUT と併用できず、ERP を
 扱えない。Recommended MRNF は segment mask、PPISP、novel-view controller を有効にする。
+
+`undistort=false` では original camera model と distortion coefficient を GUT rasterizer が直接使う。Dataset
+load 時に出る `Undistort: source -> destination` は split-view 用 metadata の事前計算であり、training image
+を destination size へ変換した意味ではない。Actual training size は image loader の resize log で確認する。
 
 ```text
 LichtFeld-Studio --config <dataset>/train_configs/train_config.mrnf.json \

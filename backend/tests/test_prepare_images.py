@@ -1,6 +1,7 @@
 """Mixed source を canonical image catalog へ変換する。"""
 
 import json
+import math
 from pathlib import Path
 
 from PIL import Image
@@ -194,11 +195,15 @@ def test_native_fisheye_and_phone_create_separate_camera_groups(tmp_path):
     assert len(native_groups) == 2
     assert native_groups[0]["camera_params"] != native_groups[1]["camera_params"]
     assert all(group["refine_intrinsics"] is False for group in native_groups)
-    assert all(
-        image["valid_region"]["r"] < 0.46
+    native_regions = [
+        image["valid_region"]
         for image in catalog["images"]
         if image["projection"] == "dual_fisheye"
-    )
+    ]
+    assert all(region["kind"] == "opencv_fisheye" for region in native_regions)
+    assert all(region["max_theta_rad"] < math.pi / 2 for region in native_regions)
+    assert all(len(region["params"]) == 8 for region in native_regions)
+    assert all(region["physical_circle"]["r"] > 0 for region in native_regions)
     numeric = [call[1] for call in progress_calls if call[1] is not None]
     assert numeric == sorted(numeric)
     assert numeric[-1] == 0.99

@@ -1,6 +1,6 @@
 """LFStudio 学習用 native fisheye の無効な外周を lossless crop する。
 
-円形有効領域を含む JPEG MCU 境界へ外向きに丸めるため、有効 pixel は一つも捨てない。
+Camera-model valid region を含む JPEG MCU 境界へ外向きに丸めるため、有効 pixel は一つも捨てない。
 画像 crop と同時に camera 主点および images.bin の 2D 観測を平行移動し、COLMAP dataset としての
 整合性を維持する。JPEG は再圧縮せず jpegtran の係数領域 transform を使う。
 """
@@ -17,6 +17,7 @@ from pathlib import Path
 
 from PIL import Image as PilImage
 
+from ..imaging import valid_region
 from .model import Camera, Image, ImagePoint2D, Reconstruction
 
 _PRINCIPAL_POINT_INDICES = {
@@ -197,15 +198,15 @@ def crop_masks(
 def _record_rect(record: dict, alignment: int) -> CropRect:
     width, height = int(record["width"]), int(record["height"])
     region = record.get("valid_region", {"kind": "full"})
-    if region.get("kind") != "circle":
+    if region.get("kind") == "full":
         return CropRect(0, 0, width, height)
-    cx = float(region["cx"]) * width
-    cy = float(region["cy"]) * height
-    radius = float(region["r"]) * width
-    left = max(0, math.floor((cx - radius) / alignment) * alignment)
-    top = max(0, math.floor((cy - radius) / alignment) * alignment)
-    right = min(width, math.ceil((cx + radius) / alignment) * alignment)
-    bottom = min(height, math.ceil((cy + radius) / alignment) * alignment)
+    valid_left, valid_top, valid_right, valid_bottom = valid_region.bounding_box(
+        region, width, height
+    )
+    left = max(0, math.floor(valid_left / alignment) * alignment)
+    top = max(0, math.floor(valid_top / alignment) * alignment)
+    right = min(width, math.ceil(valid_right / alignment) * alignment)
+    bottom = min(height, math.ceil(valid_bottom / alignment) * alignment)
     if right <= left or bottom <= top:
         raise ValueError(f"invalid fisheye crop rectangle for {record['name']}")
     return CropRect(left, top, right, bottom)
