@@ -180,6 +180,25 @@ def write_images_bin(
                 progress(image_number, len(images))
 
 
+def write_points3D_bin(path: Path, points: dict[int, Point3D]) -> None:
+    with path.open("wb") as file:
+        file.write(struct.pack("<Q", len(points)))
+        for point_id in sorted(points):
+            point = points[point_id]
+            file.write(
+                struct.pack(
+                    "<QdddBBBd",
+                    point.point3D_id,
+                    *point.xyz,
+                    *point.rgb,
+                    point.error,
+                )
+            )
+            file.write(struct.pack("<Q", len(point.track)))
+            for image_id, point2d_index in point.track:
+                file.write(struct.pack("<ii", image_id, point2d_index))
+
+
 def _percentile(sorted_values, fraction: float) -> float:
     if not sorted_values:
         return 0.0

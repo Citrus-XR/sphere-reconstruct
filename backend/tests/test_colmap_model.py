@@ -114,3 +114,13 @@ def test_camera_center_uses_colmap_world_to_camera_convention():
         -2.0,
         -3.0,
     )
+
+
+def test_points3d_writer_roundtrips_tracks(tmp_path):
+    points = {
+        7: model.Point3D(7, (1.0, 2.0, 3.0), (10, 20, 30), 0.4, [(2, 5), (3, 8)])
+    }
+
+    model.write_points3D_bin(tmp_path / "points3D.bin", points)
+
+    assert model.read_points3D_bin(tmp_path / "points3D.bin") == points
