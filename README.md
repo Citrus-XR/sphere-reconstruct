@@ -374,6 +374,7 @@ Detail hallucination / temporal inconsistency risk もあるため denoise Step�
 | Legacy raw sparse | 190 | 23:01 | 21.176 | 0.7477 | Baseline |
 | Calibrated raw sparse | 190 | 33:49 | 20.492 | 0.7430 | Seam は改善、円形変形と遠方 ghost 残存 |
 | Calibrated raw + low-RS frame filter | 190 | 33:32 | — | — | 目視改善は小さい |
+| **Crop-correct + stock-compatible raw** | 192 | 36:02 | 20.262 | 0.7334 | 円/直線/ghost の visual acceptance 待ち |
 | **Official stitched ERP reference** | 80 | **30:21** | **21.770** | **0.8611** | 円形は良好、公式 seam に大きい局所 offset |
 
 PSNR / SSIM は各 dataset 自身の training cameras に対する値で、camera / target が異なる行を直接 ranking しない。
@@ -386,8 +387,8 @@ roma-short-official-erp-reference.ply
 ```
 
 全 PLY は 1,000,000 records finite。同じ P95 scene-radius normalization の maximum-scale P99 は legacy raw
-0.0506、calibrated raw 0.0720、low-RS raw 0.0677、official ERP 0.0711。Scale tail だけでは visual quality を
-判定できない。
+0.0506、calibrated raw 0.0720、low-RS raw 0.0677、crop-correct compatible 0.0747、official ERP 0.0711。
+Scale tail だけでは visual quality を判定できない。
 
 Overlap RoMa feature から約 0.06° rig correction を推定した実験は cross-sensor track と SfM residual を悪化させた。
 Parallax / dynamics に引かれたため採用せず metadata extrinsic を保持する。Official ERP 自体も optical-flow warp を
@@ -397,6 +398,14 @@ Parallax / dynamics に引かれたため採用せず metadata extrinsic を保�
 baseline にはしない。Seam 改善は full rig extrinsics の効果、残った shape deformation は内参 crop と consumer
 inverse の二つの独立 bug で説明できる。Low-motion single-lens interior pilot では crop 修正により lens0 の
 SO(3) RANSAC inlier が 50.9%→88.3%、angular median が 0.342°→0.108°へ改善した。
+Crop-correct compatible run は 96 captures / 192 cameras で、旧 95 / 190 と validation set が異なるうえ、stock
+LFStudio workaround の radial-only approximation を使う。そのため PSNR / SSIM の小差より、円形、直線、細い
+pole、遠景 ghost の目視 A/B を acceptance criterion とする。Result:
+
+```text
+lfstudio-runs/roma-short-crop-correct-compatible-1m-2048/
+roma-short-crop-correct-compatible.ply
+```
 
 ## Frontend
 
