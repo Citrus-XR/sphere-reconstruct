@@ -379,12 +379,7 @@ Detail hallucination / temporal inconsistency risk もあるため denoise Step�
 
 PSNR / SSIM は各 dataset 自身の training cameras に対する値で、camera / target が異なる行を直接 ranking しない。
 Official ERP が高い SSIM を得た事実は trainer が単独で破綻していない control になるが、raw lens calibration と
-official optical-flow / rolling-shutter stitch の効果を分離しない。Official output:
-
-```text
-lfstudio-runs/roma-short-official-erp-reference-1m-2048/
-roma-short-official-erp-reference.ply
-```
+official optical-flow / rolling-shutter stitch の効果を分離しない。
 
 全 PLY は 1,000,000 records finite。同じ P95 scene-radius normalization の maximum-scale P99 は legacy raw
 0.0506、calibrated raw 0.0720、low-RS raw 0.0677、crop-correct compatible 0.0747、official ERP 0.0711。
@@ -400,12 +395,7 @@ inverse の二つの独立 bug で説明できる。Low-motion single-lens inter
 SO(3) RANSAC inlier が 50.9%→88.3%、angular median が 0.342°→0.108°へ改善した。
 Crop-correct compatible run は 96 captures / 192 cameras で、旧 95 / 190 と validation set が異なるうえ、stock
 LFStudio workaround の radial-only approximation を使う。そのため PSNR / SSIM の小差より、円形、直線、細い
-pole、遠景 ghost の目視 A/B を acceptance criterion とする。Result:
-
-```text
-lfstudio-runs/roma-short-crop-correct-compatible-1m-2048/
-roma-short-crop-correct-compatible.ply
-```
+pole、遠景 ghost の目視 A/B を acceptance criterion とする。
 
 ## Frontend
 
@@ -455,7 +445,7 @@ Actual UI path:
 
 ```bash
 PLAYWRIGHT_BASE_URL=http://127.0.0.1:8787 \
-SPHERE_E2E_SOURCE=/path/to/short.insv \
+SPHERE_E2E_SOURCE=<short.insv> \
 pnpm --dir frontend test:e2e
 ```
 
