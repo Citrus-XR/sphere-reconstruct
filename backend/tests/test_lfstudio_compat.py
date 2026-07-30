@@ -1,6 +1,11 @@
 """Stock LFStudio 用 camera-model workaround を検証する。"""
 
 from sphere_reconstruct.colmap import lfstudio_compat, model, training_crop
+from sphere_reconstruct.stages.export_dataset import ExportDataset
+
+
+def test_camera_only_stock_workaround_is_not_default():
+    assert ExportDataset().normalize_params({})["lfstudio_stock_thin_prism_workaround"] is False
 
 
 def test_thin_prism_export_uses_consistent_opencv_model_after_crop():

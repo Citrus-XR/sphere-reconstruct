@@ -98,7 +98,7 @@ class ExportDataset(Stage):
                 raw.get("optimize_fisheye_training_images", True)
             ),
             "lfstudio_stock_thin_prism_workaround": bool(
-                raw.get("lfstudio_stock_thin_prism_workaround", True)
+                raw.get("lfstudio_stock_thin_prism_workaround", False)
             ),
             "feature_masks_enabled": bool(raw.get("feature_masks_enabled", True)),
             "training_masks_enabled": bool(raw.get("training_masks_enabled", True)),

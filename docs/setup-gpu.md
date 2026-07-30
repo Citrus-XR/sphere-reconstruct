@@ -282,7 +282,7 @@ LichtFeld-Studio --config <dataset>/train_configs/train_config.mrnf.json \
 - GUT on、`undistort=false`
 - resolved segment mask
 - PPISP / controller off
-- Stock LFStudio THIN_PRISM workaround on
+- Experimental camera-only radial approximation off
 - max width 2048
 - general cap 2M、30,000 iterations
 
@@ -290,9 +290,9 @@ LichtFeld-Studio --config <dataset>/train_configs/train_config.mrnf.json \
 ない。Actual size は `Image info` log を見る。
 
 Stock LFStudio の THIN_PRISM inverse は non-radial delta を前回 UV から五回減算し、forward と inverse が
-一致しない。Lens1 は 2048 scale で maximum 約 11.4 px。Default export は reconstruction の THIN_PRISM を
-保持し、training `cameras.bin` だけを OPENCV_FISHEYE approximation へ変換する。修正版 build では UI から
-workaround を無効化する。`undistort=true` は別の prism packing bug があるため代替にしない。
+一致しない。Lens1 は 2048 scale で maximum 約 11.4 px。Training `cameras.bin` だけを OPENCV_FISHEYE へ
+変える実験は、sensor ごとの近似誤差で二眼 ghost を悪化させたため default off。LFStudio source patch、または
+RGB / mask / observation を同じ mapping で再投影する。`undistort=true` は別の prism packing bug がある。
 
 12 GB RTX 4070 Ti の Parktest は 2.4M / 2304 で OOM、2M / 2048 で完走。旧 eval preset は UI default より
 means LR 6.4 倍、scaling LR 約 2.86 倍で巨大な sky splat を生成した。PPISP off でも再現したため、config は

@@ -190,8 +190,9 @@ v0.5.3 で tangential / prism の適用位置が異なるため、両 consumer r
 
 Forward 式だけでなく `ray -> pixel -> ray` を consumer 実装そのもので検証する。Stock LFStudio の
 THIN_PRISM inverse は fixed-point iteration が前回 UV から delta を繰り返し減算するため forward と一致せず、
-non-radial 項が大きい sensor で円を非対称に変形する。修正版 build を保証できない export は、native / COLMAP
-camera を変更せず、training camera だけを internally consistent な OPENCV_FISHEYE approximation へ変換する。
+non-radial 項が大きい sensor で円を非対称に変形する。Camera metadata だけを OPENCV_FISHEYE approximation
+へ交換してはいけない。Sensor ごとの approximation error が異なると cross-sensor ray がずれる。修正版 build を
+保証できない場合は、RGB、mask、2D observation と camera を同じ inverse map で一回だけ再投影する。
 原因箇所は [LFStudio v0.5.3 Cameras.cuh](https://github.com/MrNeRF/LichtFeld-Studio/blob/d8c50c6a3e2273cb74130a6e9023de8d068af52d/src/training/rasterization/gsplat/Cameras.cuh#L1147-L1160)。
 正しい fixed point は毎回 `uv = uv_distorted - delta(uv)` とし、元の observed UV を保持する。Patched build の
 roundtrip test が通るまで `undistort=true` へ逃げない。この経路にも prism packing bug がある。Repository の

@@ -184,7 +184,7 @@ export const DEFAULT_PARAMS: StageParams = {
   size: 1024,
   emitTrainConfigs: true,
   optimizeFisheyeTrainingImages: true,
-  lfstudioStockThinPrismWorkaround: true,
+  lfstudioStockThinPrismWorkaround: false,
 }
 
 const sharpnessCandidates = (level: StageParams['sharpnessLevel']) =>

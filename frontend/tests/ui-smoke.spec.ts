@@ -747,7 +747,7 @@ test('feature, matching, and mapper controls have localized names and explanatio
   await expect(page.getByText('Predicts local ground near the primary camera path with equal weight per camera sample, then moves its median height to dataset Y=0.', { exact: true })).toBeVisible()
   await page.getByText('Export', { exact: true }).click()
   await expect(page.getByText('Optimize fisheye training images', { exact: true })).toBeVisible()
-  await expect(page.getByText('Avoid stock LFStudio fisheye inverse bug', { exact: true })).toBeVisible()
+  await expect(page.getByText('Experimental: LFStudio radial approximation', { exact: true })).toBeVisible()
   await page.getByText('Sparse reconstruction', { exact: true }).click()
 
   await page.getByTitle('Settings').click()

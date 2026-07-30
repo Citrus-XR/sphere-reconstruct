@@ -300,10 +300,10 @@ Fisheye JPEG は valid region を含む MCU boundary で lossless crop し、pri
 
 Stock LFStudio v0.5.3 / current master の `THIN_PRISM_FISHEYE` inverse は、各 iteration で元の distorted UV から
 解く代わりに前回 UV から non-radial delta を繰り返し減算する。Lens1 では 2048 training scale でも maximum
-約 11.4 px の forward/inverse 不一致となり、円を非対称に変形する。Default export workaround は SfM の精密な
-THIN_PRISM model を保持し、学習用 `cameras.bin` だけを internally consistent な `OPENCV_FISHEYE` approximation
-へ変換する。画像は再 resample しない。Crop-correct 3840 scale の approximation maximum は lens0 1.58 px、
-lens1 4.52 px で、stock inverse より小さい。修正版 LFStudio を使う場合は Export Inspector で無効化できる。
+約 11.4 px の forward/inverse 不一致となり、円を非対称に変形する。Camera だけを `OPENCV_FISHEYE`
+approximation へ変換する実験は、単一 sensor を鮮明にした一方、lens0 / lens1 の異なる近似誤差
+(3840 scale maximum 1.58 / 4.52 px) により cross-sensor ray をずらし、二眼 ghost を悪化させた。従って既定は
+無効。正しい修正は LFStudio source patch、または RGB / mask / observation を同じ mapping で再投影すること。
 Source build 用の修正は [scripts/patches/lichtfeld-thin-prism-inverse.patch](scripts/patches/lichtfeld-thin-prism-inverse.patch)。
 `undistort=true` にも prism packing bug があるため workaround にしない。
 
@@ -317,7 +317,7 @@ LichtFeld-Studio --config <dataset>/train_configs/train_config.mrnf.json \
 - MRNF UI defaults、GUT、segment mask
 - `undistort=false`
 - PPISP / novel-view controller off
-- Stock LFStudio THIN_PRISM workaround on
+- Experimental camera-only radial approximation off
 - max width 2048、general cap 2M、30,000 iterations
 
 PPISP は exposure / vignetting / response の appearance model で denoiser ではない。旧 eval preset は means LR
@@ -374,7 +374,7 @@ Detail hallucination / temporal inconsistency risk もあるため denoise Step�
 | Legacy raw sparse | 190 | 23:01 | 21.176 | 0.7477 | Baseline |
 | Calibrated raw sparse | 190 | 33:49 | 20.492 | 0.7430 | Seam は改善、円形変形と遠方 ghost 残存 |
 | Calibrated raw + low-RS frame filter | 190 | 33:32 | — | — | 目視改善は小さい |
-| **Crop-correct + stock-compatible raw** | 192 | 36:02 | 20.262 | 0.7334 | 円/直線/ghost の visual acceptance 待ち |
+| Crop-correct + camera-only radial approximation | 192 | 36:02 | 20.262 | 0.7334 | 単眼は鮮明、二眼 alignment / ghost は退行 |
 | **Official stitched ERP reference** | 80 | **30:21** | **21.770** | **0.8611** | 円形は良好、公式 seam に大きい局所 offset |
 
 PSNR / SSIM は各 dataset 自身の training cameras に対する値で、camera / target が異なる行を直接 ranking しない。
@@ -393,9 +393,9 @@ Parallax / dynamics に引かれたため採用せず metadata extrinsic を保�
 baseline にはしない。Seam 改善は full rig extrinsics の効果、残った shape deformation は内参 crop と consumer
 inverse の二つの独立 bug で説明できる。Low-motion single-lens interior pilot では crop 修正により lens0 の
 SO(3) RANSAC inlier が 50.9%→88.3%、angular median が 0.342°→0.108°へ改善した。
-Crop-correct compatible run は 96 captures / 192 cameras で、旧 95 / 190 と validation set が異なるうえ、stock
-LFStudio workaround の radial-only approximation を使う。そのため PSNR / SSIM の小差より、円形、直線、細い
-pole、遠景 ghost の目視 A/B を acceptance criterion とする。
+Crop-correct radial run は 96 captures / 192 cameras で、旧 95 / 190 と validation set が異なる。目視では
+単一 sensor が鮮明になる一方、二 sensor を同時に見ると alignment と ghost が退行した。Camera model だけを
+交換する方法は正しい coordinate transform ではないため、default / recommendation から除外した。
 
 ## Frontend
 
