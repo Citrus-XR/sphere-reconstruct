@@ -464,8 +464,9 @@ Scene grid は finite double-sided plane、depth-test on / depth-write off。Gro
 viewer Y=0 に置き、opaque alpha-tested point depth の後ろへ描画するため、view rotation 時に grid が消える、
 点群を透過して前面へ張り付く、巨大 infinite plane の precision flicker を避ける。
 
-Scene View の wheel は fly / middle-pan の移動速度を `0.125x` から `16x` の倍数段階で変更し、変更値を view
-中央へ短時間表示する。Wheel 自体は camera position を前後移動しないため、inspection 中に視点を崩さない。
+Scene View の wheel は fly / middle-pan の移動速度を `0.001x` から `16x` の対数段階で変更し、変更値を view
+中央へ短時間表示する。Near / Far clipping plane も scene scale と速度倍率へ追従し、低速 detail inspection
+では Near を縮小して Far を scene 周囲へ絞る。Wheel 自体は camera position を前後移動しない。
 
 ## Architecture and extension
 

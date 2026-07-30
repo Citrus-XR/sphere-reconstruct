@@ -5,6 +5,7 @@ import {
   configureGridMaterial,
   formatMovementSpeed,
   panViewPosition,
+  sceneClippingPlanes,
   stepMovementSpeed,
 } from '../src/viewers/viewMath'
 
@@ -59,9 +60,16 @@ test('scene grid keeps perspective depth without occluding point geometry', () =
 
 test('movement speed follows bounded half and double steps', () => {
   expect(stepMovementSpeed(1, -1)).toBe(0.5)
-  expect(stepMovementSpeed(0.5, -1)).toBe(0.25)
-  expect(stepMovementSpeed(0.125, -1)).toBe(0.125)
+  expect(stepMovementSpeed(0.01, -1)).toBe(0.005)
+  expect(stepMovementSpeed(0.001, -1)).toBe(0.001)
   expect(stepMovementSpeed(1, 1)).toBe(2)
   expect(stepMovementSpeed(16, 1)).toBe(16)
   expect(formatMovementSpeed(0.5)).toBe('0.5x')
+  expect(formatMovementSpeed(0.001)).toBe('0.001x')
+})
+
+test('camera clipping planes follow scene scale and movement speed', () => {
+  expect(sceneClippingPlanes(1000, 1)).toEqual({ near: 0.01, far: 100000 })
+  expect(sceneClippingPlanes(1000, 0.001)).toEqual({ near: 0.00001, far: 2000 })
+  expect(sceneClippingPlanes(1000, 16)).toEqual({ near: 0.16, far: 1600000 })
 })

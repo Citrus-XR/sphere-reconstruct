@@ -56,7 +56,7 @@ export const SceneHierarchy = ({
 }) => {
   const { t } = useSettings()
   const [expandCams, setExpandCams] = useState(false)
-  const [expandPhotos, setExpandPhotos] = useState(true)
+  const [expandPhotos, setExpandPhotos] = useState(false)
   const [collapsedPhotoSources, setCollapsedPhotoSources] = useState<Set<string>>(() => new Set())
   const framesBySource = useMemo(() => {
     const grouped = new Map<string, FrameInfo[]>()

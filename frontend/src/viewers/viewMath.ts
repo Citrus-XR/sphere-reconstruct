@@ -1,6 +1,8 @@
 import * as THREE from 'three'
 
-export const MOVEMENT_SPEED_MULTIPLIERS = [0.125, 0.25, 0.5, 1, 2, 4, 8, 16] as const
+export const MOVEMENT_SPEED_MULTIPLIERS = [
+  0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.25, 0.5, 1, 2, 4, 8, 16,
+] as const
 
 export const stepMovementSpeed = (current: number, direction: -1 | 1): number => {
   const currentIndex = MOVEMENT_SPEED_MULTIPLIERS.reduce((closest, value, index) => (
@@ -17,6 +19,15 @@ export const stepMovementSpeed = (current: number, direction: -1 | 1): number =>
 }
 
 export const formatMovementSpeed = (value: number): string => `${value}x`
+
+export const sceneClippingPlanes = (sceneScale: number, speedMultiplier: number): {
+  near: number
+  far: number
+} => {
+  const near = Math.max(0.000001, sceneScale * 0.00001 * speedMultiplier)
+  const far = Math.max(sceneScale * 2, sceneScale * 100 * speedMultiplier, near * 1000)
+  return { near, far }
+}
 
 // Local quaternion の累積は通常 mouse look に roll を混入させるため、YXZ から毎回再構成する。
 export const composeViewQuaternion = (

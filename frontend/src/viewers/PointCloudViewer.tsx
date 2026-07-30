@@ -10,6 +10,7 @@ import {
   configureGridMaterial,
   formatMovementSpeed,
   panViewPosition,
+  sceneClippingPlanes,
   stepMovementSpeed,
 } from './viewMath'
 import { useSettings } from '../ui/settings'
@@ -125,13 +126,23 @@ const FlyControls = ({ scale, center, selectedPos, onSpeedChange }: {
     angles.current = { yaw: value.y, pitch: value.x, roll: value.z }
   }
 
+  const applyClippingPlanes = () => {
+    const clipping = sceneClippingPlanes(scale, speedMultiplier.current)
+    camera.near = clipping.near
+    camera.far = clipping.far
+    camera.updateProjectionMatrix()
+  }
+
   const fitTo = (tgt: THREE.Vector3, dist: number) => {
     camera.position.set(tgt.x, tgt.y, tgt.z + dist)
     camera.up.set(0, 1, 0)
     angles.current = { yaw: 0, pitch: 0, roll: 0 }
     applyOrientation()
   }
-  useEffect(() => { fitTo(center, scale) }, [center, scale]) // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    fitTo(center, scale)
+    applyClippingPlanes()
+  }, [center, scale]) // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     const dom = gl.domElement
@@ -200,6 +211,7 @@ const FlyControls = ({ scale, center, selectedPos, onSpeedChange }: {
         wheelAccumulator.current < 0 ? 1 : -1,
       )
       wheelAccumulator.current = 0
+      applyClippingPlanes()
       onSpeedChange(speedMultiplier.current)
     }
     const kd = (e: KeyboardEvent) => {
@@ -265,7 +277,7 @@ export const PointCloudViewer = ({
   showPoints: boolean; showCams: boolean
   selectedCameraId: number | null; onPickCamera: (id: number) => void
 }) => {
-  const { t, theme } = useSettings()
+  const { t } = useSettings()
   const tex = useCircleTexture()
   const [points, setPoints] = useState<ParsedPoints | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -277,11 +289,25 @@ export const PointCloudViewer = ({
   const speedNoticeTimer = useRef<number | null>(null)
   // 背景色: 明示指定が無ければテーマの --bg に追従する (テーマ切替で更新).
   const [bgOverride, setBgOverride] = useState<string | null>(null)
-  const [themeBg, setThemeBg] = useState('#171717')
-  useEffect(() => {
-    const v = getComputedStyle(document.documentElement).getPropertyValue('--bg').trim()
-    if (v) setThemeBg(v)
-  }, [theme])
+  const [themeBg, setThemeBg] = useState(() => (
+    getComputedStyle(document.documentElement).getPropertyValue('--bg').trim() || '#171717'
+  ))
+  useLayoutEffect(() => {
+    const root = document.documentElement
+    const update = () => {
+      const value = getComputedStyle(root).getPropertyValue('--bg').trim()
+      if (value) setThemeBg(value)
+    }
+    const themeObserver = new MutationObserver(update)
+    themeObserver.observe(root, { attributes: true, attributeFilter: ['data-theme'] })
+    const colorScheme = window.matchMedia('(prefers-color-scheme: dark)')
+    colorScheme.addEventListener('change', update)
+    update()
+    return () => {
+      themeObserver.disconnect()
+      colorScheme.removeEventListener('change', update)
+    }
+  }, [])
   const bg = bgOverride ?? themeBg
 
   const showSpeedNotice = useCallback((value: number) => {

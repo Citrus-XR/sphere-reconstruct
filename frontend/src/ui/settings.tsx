@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useState, type ReactNode } from 'react'
+import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useState, type ReactNode } from 'react'
 import { detectLang, translate, type Lang } from './i18n'
 
 export type Theme = 'auto' | 'light' | 'dark'
@@ -24,11 +24,17 @@ export const SettingsProvider = ({ children }: { children: ReactNode }) => {
   const [theme, setThemeState] = useState<Theme>(() => (localStorage.getItem('theme') as Theme) || 'auto')
   const [lang, setLangState] = useState<Lang>(() => (localStorage.getItem('lang') as Lang) || detectLang())
 
-  useEffect(() => { applyTheme(theme); localStorage.setItem('theme', theme) }, [theme])
+  const setTheme = useCallback((nextTheme: Theme) => {
+    applyTheme(nextTheme)
+    setThemeState(nextTheme)
+  }, [])
+
+  useLayoutEffect(() => { applyTheme(theme) }, [theme])
+  useEffect(() => { localStorage.setItem('theme', theme) }, [theme])
   useEffect(() => { localStorage.setItem('lang', lang) }, [lang])
 
   const value: SettingsCtx = {
-    theme, setTheme: setThemeState,
+    theme, setTheme,
     lang, setLang: setLangState,
     t: (key: string) => translate(lang, key),
   }

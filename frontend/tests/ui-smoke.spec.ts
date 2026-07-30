@@ -9,6 +9,11 @@ const MOCK_PHONE = 'D:\\mixed-inputs\\Phone photos'
 const TRAINING_MASK_PROMPT = "person,camera operator,person's shadow"
 const FEATURE_MASK_PROMPT = `${TRAINING_MASK_PROMPT},animal,sky,tree,vehicle,airplane,water`
 
+const expandPhotos = async (page: Page) => {
+  const toggle = page.getByRole('button', { name: /Photos/ })
+  if (await toggle.getAttribute('aria-expanded') === 'false') await toggle.click()
+}
+
 interface MockOptions {
   sourceKind?: 'insv' | 'erp_video'
   imageName?: string
@@ -438,6 +443,11 @@ test('photo source groups collapse independently', async ({ page }) => {
   const mock = await installUiMock(page, { multipleFrameSources: true })
   await page.goto('/')
 
+  const photosToggle = page.getByRole('button', { name: /Photos/ })
+  await expect(photosToggle).toHaveAttribute('aria-expanded', 'false')
+  await expect(page.locator('[data-source-id]')).toHaveCount(0)
+  await photosToggle.click()
+
   const primaryGroup = page.locator('[data-source-id="s1"]')
   const phoneGroup = page.locator('[data-source-id="s2"]')
   const primaryToggle = primaryGroup.getByRole('button', { name: /Primary 360/ })
@@ -502,6 +512,25 @@ test('mouse wheel adjusts Scene View movement speed with centered feedback', asy
   expect(mock.unexpectedRequests).toEqual([])
 })
 
+test('Scene View background follows the applied theme without one-step lag', async ({ page }) => {
+  const mock = await installUiMock(page)
+  await page.goto('/')
+
+  const background = page.locator('.scene-toolbar input[type="color"]')
+  await page.getByTitle('Settings').click()
+  const theme = page.locator('.pop select').first()
+
+  await theme.selectOption('light')
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'light')
+  await expect(background).toHaveValue('#fdfdfd')
+  await theme.selectOption('dark')
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark')
+  await expect(background).toHaveValue('#111821')
+  await theme.selectOption('light')
+  await expect(background).toHaveValue('#fdfdfd')
+  expect(mock.unexpectedRequests).toEqual([])
+})
+
 test('fisheye valid-region editor can switch its preview frame', async ({ page }) => {
   const mock = await installUiMock(page, { frameCount: 3 })
   await page.goto('/')
@@ -520,6 +549,7 @@ test('photo and dataset camera inspectors share capture summary fields', async (
   const mock = await installUiMock(page)
   await page.goto('/')
 
+  await expandPhotos(page)
   const photo = page.getByText('Frame 0', { exact: true })
   await expect(photo).toBeVisible()
   await photo.click()
@@ -571,6 +601,7 @@ test('photo and dataset camera previews switch between both mask steps', async (
   const mock = await installUiMock(page)
   await page.goto('/')
 
+  await expandPhotos(page)
   await page.getByText('Frame 0', { exact: true }).click()
   let purpose = page.getByRole('group', { name: 'Mask purpose' })
   await expect(purpose.getByRole('button', { name: 'Training' })).toHaveAttribute('aria-pressed', 'true')
@@ -595,6 +626,7 @@ test('a completed SAM3 image becomes previewable before the mask step finishes',
   })
   await page.goto('/')
 
+  await expandPhotos(page)
   await page.getByText('Frame 0', { exact: true }).click()
   await expect(page.getByText('Feature · Dynamic coverage', { exact: true })).toBeVisible({ timeout: 5_000 })
   await page.getByRole('tab', { name: 'Mask' }).click()
@@ -711,6 +743,7 @@ test('switching projects resets inspector selection state', async ({ page }) => 
   const mock = await installUiMock(page, { secondProject: true })
   await page.goto('/')
 
+  await expandPhotos(page)
   await page.getByRole('button', { name: /Frame 0/ }).click()
   await expect(page.getByTestId('capture-summary')).toBeVisible()
 
