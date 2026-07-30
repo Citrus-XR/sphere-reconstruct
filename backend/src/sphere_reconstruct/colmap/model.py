@@ -160,8 +160,10 @@ def write_images_bin(
 ) -> None:
     with path.open("wb") as file:
         file.write(struct.pack("<Q", len(images)))
-        for image_number, image_id in enumerate(sorted(images), 1):
-            image = images[image_id]
+        # LFStudio は images.bin の並び順へ test_every を適用するため、ID sort は
+        # dense/crop Step の前後で validation image を変えてしまう。
+        # https://github.com/MrNeRF/LichtFeld-Studio/blob/d8c50c6a3e2273cb74130a6e9023de8d068af52d/src/training/training_setup.cpp#L493-L500
+        for image_number, image in enumerate(images.values(), 1):
             file.write(
                 struct.pack(
                     "<idddddddi",

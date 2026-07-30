@@ -311,6 +311,12 @@ Fixed-rig intrinsics BA + weak-image filter の A/B training は detail と全�
 Gaussian も visual issue にならなかった。Gaussian scale count だけで quality を reject せず、同一 view の
 thin-object ghosting、sky / ground separation、novel-view stability を最終判定に使う。
 
+RoMaV2 native-ray initialization の 38.17 s X5 A/B は、1M / 2048 / 30k で training-camera PSNR を
+21.176 から 22.104、SSIM を 0.7477 から 0.7572 へ改善したが、自由視点は Sparse initialization の方が
+わずかに鮮明だった。Runtime も 23分01秒から25分38秒へ増えたため、Dense Step は一般 default にしない。
+両 run が同じ camera subset を使うよう `images.bin` の input order を保持する。LFStudio の `test_every` は
+image ID ではなく file order へ適用される。
+
 疎点群は連続 surface ではない。Export statistics の sparse-point radius median / P95 / P99 / maximum で裾を
 確認し、P99 / median が 5 を超える場合は遠景・小視差点が広いことを示す warning として扱う。真の遠景まで
 機械的に消さないため、この warning は point を変更しない。

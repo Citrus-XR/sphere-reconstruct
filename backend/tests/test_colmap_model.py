@@ -124,3 +124,26 @@ def test_points3d_writer_roundtrips_tracks(tmp_path):
     model.write_points3D_bin(tmp_path / "points3D.bin", points)
 
     assert model.read_points3D_bin(tmp_path / "points3D.bin") == points
+
+
+def test_images_writer_preserves_reconstruction_order(tmp_path):
+    images = {
+        20: model.Image(
+            image_id=20,
+            qvec=(1.0, 0.0, 0.0, 0.0),
+            tvec=(0.0, 0.0, 0.0),
+            camera_id=1,
+            name="front/frame_000001.jpg",
+        ),
+        3: model.Image(
+            image_id=3,
+            qvec=(1.0, 0.0, 0.0, 0.0),
+            tvec=(0.0, 0.0, 0.0),
+            camera_id=1,
+            name="back/frame_000001.jpg",
+        ),
+    }
+
+    model.write_images_bin(tmp_path / "images.bin", images)
+
+    assert list(model.read_images_bin(tmp_path / "images.bin")) == [20, 3]

@@ -147,7 +147,7 @@ General default は X5 indoor / outdoor と mixed phone-photo test の実測を�
 | Alignment | IMU rotation | Scale を変更しない |
 | Scale | Observable physical baseline only | 共有 stereo 視差なしでは meter と推測しない |
 | Ground | Trajectory-local median | 水面 / roof / point density bias を抑える |
-| Dense initialization | Off | 1.1GB model と追加時間が必要な opt-in A/B Step |
+| Dense initialization | Off | Short-scene A/B で training-view 指標は改善したが、自由視点の鮮明度は安定して改善せず runtime も 11% 増加 |
 | LFStudio | MRNF UI default + GUT + masks | Distorted camera を扱い、未検証の appearance 補正を既定にしない |
 
 ### Quality presets
@@ -353,6 +353,12 @@ Pinhole DLT へ近似しない。Feature mask、certainty、parallax、ray gap�
 書き換えるため直接利用しない。RoMaV2 v2.0.1 source commit と 1,095,883,548-byte weights は固定し、weights は
 SHA-256 `1557dec0d21b62366465f7ff4d5fdf228cc695d0582e196ad2b80e05230828b7` で検証する。
 
+Dense point は camera-view fidelity を改善できる一方、Gaussian cap が同じなら early densification で容量を
+早く消費する。38.17 s X5 A/B では 7,000 step 時点で Sparse seed が 212,256 Gaussian、Dense seed が
+683,732 Gaussian となり、両方とも最終的に 1M cap へ到達した。従って Step は既定で無効のままにし、疎点が
+不足する scene でのみ A/B を行う。`images.bin` の元の順序は保持する。LFStudio は file order へ
+`test_every` を適用するため、Step 前後で ID sort すると validation set 自体が変わり、比較不能になる。
+
 ## LFStudio export
 
 Export Inspector が表示する 1 個の directory が dataset root。その directory 自体を LichtFeld Studio で
@@ -427,6 +433,22 @@ Camera icon の brown / red は relative photometric loss heatmap で、camera d
 SceneNode Transform が 0 でも actual pose は COLMAP `R/t` にある。
 
 ## Measured comparisons
+
+### RoMaV2 initialization: 38.17 s X5、95 captures / 190 images
+
+同じ MRNF UI default + GUT + segment mask、PPISP off、1M / 2048、30,000 step で比較した。最終 PLY を
+learning rate 0 で読み込み、同じ 24 training-camera view と mask に対して LFStudio v0.5.3 の PSNR / SSIM を
+計算した。これは training camera fidelity であり、未観測自由視点の指標ではない。
+
+| Initialization | Seed points | 7k Gaussians | Runtime | PSNR | SSIM | Free-view observation |
+|---|---:|---:|---:|---:|---:|---|
+| **Sparse COLMAP** | **22,356** | **212,256** | **23分01秒** | 21.176 | 0.7477 | わずかに鮮明 |
+| RoMaV2 native-ray dense | 73,027 | 683,732 | 25分38秒 | **22.104** | **0.7572** | 安定した改善なし |
+
+両 PLY は 100 万 records 全て finite。最大 scale の P99 は Sparse 0.05370、Dense 0.05472、scale 0.5 超は
+2 / 1 個で、Dense が巨大 Gaussian を増やした形跡はない。Dense は camera view の平均誤差を下げ、同じ view
+の gradient retention も上げたが、自由視点の目視では Sparse が少し明瞭だった。一般 default は Sparse のまま、
+次の Dense 実験は追加点数を疎点数に対して制限し、同じ cap 内で error-driven refinement の余地を残す。
 
 ### Features: 38.17 s X5、104 rig captures / 208 images
 
