@@ -10,7 +10,7 @@ from pathlib import Path
 
 from PIL import Image, ImageOps
 
-from ..colmap import native_rig
+from ..colmap import dual_fisheye_rig
 from ..colmap import rig as colmap_rig
 from ..domain.artifacts import FileRef, StageManifest
 from ..domain.pipeline_state import StageName
@@ -30,7 +30,7 @@ FULL_FRAME_DIAGONAL_MM = math.hypot(36.0, 24.0)
 @register
 class PrepareImages(Stage):
     name = StageName.PREPARE_IMAGES
-    impl_version = "1.3"
+    impl_version = "2.0"
 
     def collect_inputs(self, ctx: StageContext) -> list[FileRef]:
         candidates = [
@@ -196,23 +196,24 @@ class PrepareImages(Stage):
             )
             for index, lens in enumerate(lenses)
         ]
-        approximations = [projection.approximate_opencv_fisheye(intr) for intr in intrinsics]
-        if any(approximation.maximum_error_px > 8.0 for approximation in approximations):
+        approximations = [projection.approximate_thin_prism_fisheye(intr) for intr in intrinsics]
+        if any(approximation.maximum_error_px > 1.0 for approximation in approximations):
             raise RuntimeError(
-                f"source {source['label']}: MEI to OPENCV_FISHEYE fit exceeds 8 px; "
+                f"source {source['label']}: MEI to THIN_PRISM_FISHEYE fit exceeds 1 px; "
                 "use pinhole_rig instead"
             )
+        sensors = ("lens0", "lens1")
         params_by_sensor = {
-            sensor: list(approximations[index].params) for index, sensor in enumerate(("front", "back"))
+            sensor: list(approximations[index].params) for index, sensor in enumerate(sensors)
         }
         prefix = f"sources/{source['id']}/"
-        group_ids = {sensor: f"{source['id']}:native-fisheye:{sensor}" for sensor in ("front", "back")}
+        group_ids = {sensor: f"{source['id']}:native-fisheye:{sensor}" for sensor in sensors}
         region = fisheye_region.load_region(ctx.project_dir, source["id"])
         maximum_theta_rad = math.pi / 2 * 0.995
         images = []
-        image_names = {"front": [], "back": []}
+        image_names = {sensor: [] for sensor in sensors}
         for frame in source["frames"]:
-            for lens, sensor in ((0, "front"), (1, "back")):
+            for lens, sensor in enumerate(sensors):
                 name = f"{prefix}{sensor}/frame_{frame['index']:06d}.jpg"
                 image_names[sensor].append(name)
                 images.append(
@@ -227,14 +228,15 @@ class PrepareImages(Stage):
                         sensor_id=sensor,
                         projection_name="dual_fisheye",
                         valid_region={
-                            "kind": "opencv_fisheye",
+                            "kind": "fisheye",
+                            "camera_model": approximations[lens].camera_model,
                             "params": list(approximations[lens].params),
                             "max_theta_rad": maximum_theta_rad,
                             "physical_circle": region[f"lens{lens}"],
                         },
                     )
                 )
-        baseline = native_rig.baseline_from_lens_centers(calibration["lenses"])
+        sensor_extrinsics = dual_fisheye_rig.offset_v3_sensor_extrinsics(lenses)
         progress_span.tick(
             1.0,
             message=f"{source['label']}: {len(images)} native fisheye images catalogued",
@@ -247,32 +249,51 @@ class PrepareImages(Stage):
                 _camera_group(
                     group_ids[sensor],
                     source["id"],
-                    "OPENCV_FISHEYE",
+                    approximations[index].camera_model,
                     params_by_sensor[sensor],
                     image_names[sensor],
                     single_camera=True,
                     single_camera_per_folder=False,
                     refine_intrinsics=False,
                 )
-                for sensor in ("front", "back")
+                for index, sensor in enumerate(sensors)
             ],
-            "rigs": native_rig.build_physical_rig_config(
-                "OPENCV_FISHEYE", params_by_sensor, baseline, prefix=prefix
+            "rigs": dual_fisheye_rig.build_rig_config(
+                approximations[0].camera_model,
+                params_by_sensor,
+                sensor_extrinsics,
+                prefix=prefix,
             ),
             "outputs": [],
             "calibration": {
-                "method": "offset_v3_mei_to_opencv_fisheye",
+                "method": "offset_v3_mei_to_thin_prism_fisheye",
                 "forward_hemisphere_only": True,
+                "rolling_shutter_time_ms": float(
+                    (inspection.get("rolling_shutter") or {}).get("readout_time_ms", 0.0)
+                ),
+                "sensor_extrinsics": {
+                    sensor: {
+                        "rotation_wxyz": list(extrinsic.rotation_wxyz),
+                        "translation_xyz": list(extrinsic.translation_xyz),
+                    }
+                    for sensor, extrinsic in sensor_extrinsics.items()
+                },
                 "lenses": [
                     {
                         "sensor": sensor,
                         "rms_error_px": approximations[index].rms_error_px,
                         "maximum_error_px": approximations[index].maximum_error_px,
+                        "colmap_rms_error_px": approximations[index].colmap_rms_error_px,
+                        "colmap_maximum_error_px": approximations[index].colmap_maximum_error_px,
+                        "lichtfeld_rms_error_px": approximations[index].lichtfeld_rms_error_px,
+                        "lichtfeld_maximum_error_px": approximations[
+                            index
+                        ].lichtfeld_maximum_error_px,
                         "forward_radius_px": approximations[index].forward_radius_px,
                         "forward_theta_limit_deg": math.degrees(maximum_theta_rad),
                         "physical_valid_radius_ratio": float(region[f"lens{index}"]["r"]),
                     }
-                    for index, sensor in enumerate(("front", "back"))
+                    for index, sensor in enumerate(sensors)
                 ],
             },
         }

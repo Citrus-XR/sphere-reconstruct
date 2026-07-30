@@ -99,6 +99,7 @@ def test_parse_extra_metadata_fields_needed_for_imu_timestamps():
         [
             _protobuf_bytes(2, b"Insta360 X5"),
             _protobuf_varint(24, 158_412_034_768),
+            _varint((25 << 3) | 1) + struct.pack("<d", 21.244001388549805),
             _varint((28 << 3) | 1) + struct.pack("<d", 1.6),
             _protobuf_varint(29, 1),
             _protobuf_varint(62, 1),
@@ -108,6 +109,7 @@ def test_parse_extra_metadata_fields_needed_for_imu_timestamps():
     parsed = metadata.parse_extra_metadata(payload)
     assert parsed.camera_type == "Insta360 X5"
     assert parsed.first_frame_timestamp == 158_412_034_768
+    assert parsed.rolling_shutter_time_ms == 21.244001388549805
     assert parsed.gyro_timestamp == 1.6
     assert parsed.has_gyro_timestamp is True
     assert parsed.is_raw_gyro is True

@@ -85,7 +85,8 @@ def test_mixed_workspace_materializes_batches_masks_and_rig(tmp_path):
                 "width": 100,
                 "height": 100,
                 "valid_region": {
-                    "kind": "opencv_fisheye",
+                    "kind": "fisheye",
+                    "camera_model": "OPENCV_FISHEYE",
                     "params": [25.0, 25.0, 55.0, 50.0, 0.0, 0.0, 0.0, 0.0],
                     "max_theta_rad": 1.4,
                     "physical_circle": {"cx": 0.5, "cy": 0.5, "r": 0.49},
@@ -154,7 +155,8 @@ def test_workspace_without_feature_masks_keeps_only_physical_valid_regions(tmp_p
                 "width": 100,
                 "height": 100,
                 "valid_region": {
-                    "kind": "opencv_fisheye",
+                    "kind": "fisheye",
+                    "camera_model": "OPENCV_FISHEYE",
                     "params": [25.0, 25.0, 55.0, 50.0, 0.0, 0.0, 0.0, 0.0],
                     "max_theta_rad": 1.4,
                     "physical_circle": {"cx": 0.5, "cy": 0.5, "r": 0.49},

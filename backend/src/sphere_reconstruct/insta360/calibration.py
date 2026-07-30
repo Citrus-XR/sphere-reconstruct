@@ -5,8 +5,8 @@ INSV / PB / 内蔵 profile / manual override のいずれかから得られた�
 
 - MeiLensCalibration: 1 レンズ. MEI (Mei-Rives) + 拡張 (radial k1-k3, tangential
   p1/p2) + 姿勢 (3 角) + オフセット (tx/ty/tz).
-- DualLensCalibration: 前後 2 レンズ. どちらが front / back かの解釈は
-  「観測を通じて決める」もので, 静的には決め打ちしない.
+- DualLensCalibration: container / calibration block 順の lens0 / lens1。物理的な
+  front / back 名は camera adapter が根拠を持つ場合だけ付ける。
 
 X5 サンプルで観測された offset_v3 の値 (実例):
     lens A: xi=2.0 fx=4278.3 fy=4277.33 cx=2694.63 cy=2681.84

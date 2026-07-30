@@ -17,6 +17,7 @@ from ..domain.pipeline_state import StageName
 from ..domain.source import MediaKind, Projection, SourceAdapter
 from ..imaging import ffmpeg, ffprobe
 from ..infrastructure.filesystem import sha256_file
+from ..insta360 import imu as insv_imu
 from ..pipeline.manifest import register
 from ..pipeline.source_inputs import IMAGE_EXTENSIONS, collect_source_inputs
 from ..pipeline.stage import ProgressSpan, SourceContext, Stage, StageContext, new_manifest
@@ -57,7 +58,7 @@ class _CandidateFrameCache:
 @register
 class ExtractFrames(Stage):
     name = StageName.EXTRACT_FRAMES
-    impl_version = "2.2"
+    impl_version = "2.3"
 
     def collect_inputs(self, ctx: StageContext) -> list[FileRef]:
         return collect_source_inputs(
@@ -81,6 +82,9 @@ class ExtractFrames(Stage):
             "max_clip": float(raw.get("max_clip", 0.25)),
             "min_features": int(raw.get("min_features", 0)),
             "target_motion": float(raw.get("target_motion", 1.5)),
+            "max_rolling_shutter_motion_deg": float(
+                raw.get("max_rolling_shutter_motion_deg", 0.8)
+            ),
             "hwaccel": str(raw.get("hwaccel", extraction.hwaccel)).lower(),
             "require_hwaccel": bool(raw.get("require_hwaccel", extraction.require_hwaccel)),
             "score_workers": int(raw.get("score_workers", extraction.score_workers)),
@@ -177,6 +181,17 @@ class ExtractFrames(Stage):
             )
         lens0, lens1 = pair
         duration = probe.duration or (lens0.nb_frames or 0) / lens0.fps
+        recording = insv_imu.read_imu_recording(source.path)
+        frame_count = lens0.nb_frames or int(round(duration * lens0.fps))
+        rolling_shutter_motion = (
+            insv_imu.rolling_shutter_motion_by_frame(
+                recording,
+                list(range(frame_count)),
+                lens0.fps,
+            )
+            if recording is not None
+            else {}
+        )
         decoder = self._resolve_decoder(ctx, source, ffmpeg_bin)
         progress_span.tick(
             0.02,
@@ -194,6 +209,7 @@ class ExtractFrames(Stage):
             ffmpeg_bin=ffmpeg_bin,
             hwaccel=decoder.method,
             paired_candidates=True,
+            rolling_shutter_motion=rolling_shutter_motion,
             progress_span=progress_span.child(0.02, selection_end),
         )
         output_root = ctx.stage_out_dir / "sources" / source.id
@@ -236,7 +252,24 @@ class ExtractFrames(Stage):
                 "timestamp_sec": source_frame / lens0.fps,
                 "lens0": _final_relpath(paths0[local_index], ctx),
                 "lens1": _final_relpath(paths1[local_index], ctx),
-                **({"score": scores[source_frame]} if source_frame in scores else {}),
+                **(
+                    {
+                        "score": {
+                            **scores.get(source_frame, {}),
+                            **(
+                                {
+                                    "rolling_shutter_motion_deg": rolling_shutter_motion[
+                                        source_frame
+                                    ]
+                                }
+                                if source_frame in rolling_shutter_motion
+                                else {}
+                            ),
+                        }
+                    }
+                    if source_frame in scores or source_frame in rolling_shutter_motion
+                    else {}
+                ),
             }
             for local_index, source_frame in enumerate(indices)
         ]
@@ -371,8 +404,11 @@ class ExtractFrames(Stage):
         ffmpeg_bin: str | None,
         hwaccel: str | None,
         paired_candidates: bool,
+        rolling_shutter_motion: dict[int, float] | None = None,
         progress_span: ProgressSpan,
     ) -> tuple[list[int], dict, dict[int, dict], _CandidateFrameCache | None]:
+        from ..imaging import sampling  # noqa: PLC0415
+
         interval = ctx.params["interval_sec"]
         if interval <= 0:
             raise ValueError("interval_sec must be > 0")
@@ -387,6 +423,24 @@ class ExtractFrames(Stage):
         selection: dict = {"mode": mode}
         scores: dict[int, dict] = {}
         candidate_cache = None
+        rolling_shutter_motion = rolling_shutter_motion or {}
+        if mode == "interval" and rolling_shutter_motion:
+            original_indices = indices
+            adjusted_indices = sampling.prefer_low_rolling_shutter_motion(
+                original_indices,
+                span=max(1, int(round(interval * fps))),
+                motion_by_index=rolling_shutter_motion,
+                maximum_motion_deg=ctx.params["max_rolling_shutter_motion_deg"],
+                frame_bound=nb_frames - 1 if nb_frames else None,
+            )
+            selection["rolling_shutter_adjusted"] = sum(
+                current != original
+                for current, original in zip(adjusted_indices, original_indices, strict=True)
+            )
+            indices = sorted(set(adjusted_indices))
+            selection["maximum_rolling_shutter_motion_deg"] = ctx.params[
+                "max_rolling_shutter_motion_deg"
+            ]
         if mode == "spatial":
             indices, statistics, scores, candidate_cache = self._select_spatial_indices(
                 ctx,
@@ -397,6 +451,7 @@ class ExtractFrames(Stage):
                 ffmpeg_bin=ffmpeg_bin,
                 hwaccel=hwaccel,
                 paired_candidates=paired_candidates,
+                rolling_shutter_motion=rolling_shutter_motion,
                 fallback_count=len(indices),
                 progress_span=progress_span,
             )
@@ -412,6 +467,7 @@ class ExtractFrames(Stage):
                 nb_frames=nb_frames,
                 ffmpeg_bin=ffmpeg_bin,
                 hwaccel=hwaccel,
+                rolling_shutter_motion=rolling_shutter_motion,
                 progress_span=progress_span,
             )
         else:
@@ -436,6 +492,7 @@ class ExtractFrames(Stage):
         nb_frames: int | None,
         ffmpeg_bin: str | None,
         hwaccel: str | None,
+        rolling_shutter_motion: dict[int, float],
         progress_span: ProgressSpan,
     ) -> tuple[list[int], dict[int, dict]]:
         from ..imaging import sampling  # noqa: PLC0415
@@ -492,9 +549,24 @@ class ExtractFrames(Stage):
             scores_by_index = {}
             for group in groups:
                 scores = [sharpness_by_index[index] for index in group]
-                best = sampling.pick_sharpest(scores)
+                safe = [
+                    position
+                    for position, index in enumerate(group)
+                    if rolling_shutter_motion.get(index, 0.0)
+                    <= ctx.params["max_rolling_shutter_motion_deg"]
+                ]
+                if safe:
+                    best = max(safe, key=lambda position: scores[position])
+                else:
+                    best = min(
+                        range(len(group)),
+                        key=lambda position: rolling_shutter_motion.get(group[position], 0.0),
+                    )
                 selected.append(group[best])
-                scores_by_index[group[best]] = {"sharpness": round(float(scores[best]), 1)}
+                scores_by_index[group[best]] = {
+                    "sharpness": round(float(scores[best]), 1),
+                    "rolling_shutter_motion_deg": rolling_shutter_motion.get(group[best], 0.0),
+                }
             progress_span.tick(
                 1.0,
                 message=f"{source.label}: sharpness selection complete",
@@ -518,11 +590,13 @@ class ExtractFrames(Stage):
         paired_candidates: bool,
         fallback_count: int,
         progress_span: ProgressSpan,
+        rolling_shutter_motion: dict[int, float] | None = None,
     ) -> tuple[list[int], dict, dict[int, dict], _CandidateFrameCache | None]:
         import cv2  # noqa: PLC0415
 
         from ..imaging import quality, sampling  # noqa: PLC0415
 
+        rolling_shutter_motion = rolling_shutter_motion or {}
         candidate_fps = ctx.params["candidate_fps"]
         if candidate_fps <= 0:
             raise ValueError("candidate_fps must be > 0")
@@ -593,6 +667,7 @@ class ExtractFrames(Stage):
                     sharpness=sampling.laplacian_sharpness(small),
                     exposure_ok=exposure_ok,
                     feature_count=quality.sift_feature_count(small, downscale=1) if exposure_ok else 0,
+                    rolling_shutter_motion_deg=rolling_shutter_motion.get(index, 0.0),
                 )
                 return index, small, candidate
 
@@ -624,6 +699,9 @@ class ExtractFrames(Stage):
                     min_features=ctx.params["min_features"],
                     target_motion=ctx.params["target_motion"],
                     max_frames=ctx.params["max_frames"],
+                    max_rolling_shutter_motion_deg=ctx.params[
+                        "max_rolling_shutter_motion_deg"
+                    ],
                 ),
                 progress=lambda current, total: motion_span.tick(
                     current / max(1, total),

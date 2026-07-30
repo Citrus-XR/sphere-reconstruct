@@ -140,7 +140,7 @@ def test_project_mei_back_hemisphere_rejected():
     assert uv.shape == (1, 2)
 
 
-def test_x5_mei_calibration_fits_forward_opencv_fisheye():
+def test_mei_calibration_fits_forward_thin_prism_fisheye():
     results = []
     for index, lens in enumerate((_make_lens_a(), _make_lens_b())):
         intr = proj.lens_to_intrinsics(
@@ -150,12 +150,16 @@ def test_x5_mei_calibration_fits_forward_opencv_fisheye():
             target_width=3840,
             target_height=3840,
         )
-        results.append(proj.approximate_opencv_fisheye(intr))
+        results.append(proj.approximate_thin_prism_fisheye(intr))
 
-    assert results[0].rms_error_px < 0.6
-    assert results[0].maximum_error_px < 1.7
-    assert results[1].rms_error_px < 1.6
-    assert results[1].maximum_error_px < 4.6
+    assert results[0].camera_model == "THIN_PRISM_FISHEYE"
+    assert results[0].colmap_rms_error_px < 0.05
+    assert results[0].lichtfeld_rms_error_px < 0.05
+    assert results[0].maximum_error_px < 0.26
+    assert results[1].colmap_rms_error_px < 0.12
+    assert results[1].lichtfeld_rms_error_px < 0.12
+    assert results[1].maximum_error_px < 0.6
+    assert all(len(result.params) == 12 for result in results)
     assert 0.44 < results[0].forward_radius_px / 3840 < 0.46
     assert 0.44 < results[1].forward_radius_px / 3840 < 0.46
     assert results[0].params != results[1].params

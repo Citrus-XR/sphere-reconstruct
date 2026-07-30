@@ -90,6 +90,7 @@ class Candidate:
     sharpness: float
     exposure_ok: bool
     feature_count: int = 0
+    rolling_shutter_motion_deg: float = 0.0
 
 
 @dataclass
@@ -99,6 +100,7 @@ class SpatialConfig:
     target_motion: float = 1.5  # 前選択フレームからの運動量がこれを超えたら次を選ぶ
     min_spacing_frac: float = 0.7  # 最小間隔 = target_motion * これ (これ未満の候補は近すぎ)
     max_frames: int = 0  # 0 = 無制限
+    max_rolling_shutter_motion_deg: float = float("inf")
 
 
 @dataclass
@@ -131,7 +133,7 @@ def select_spatial(
     motion_fn(a_index, b_index): a と b の運動量 (光流中央値 or IMU 回転角). 各候補につき
     1 回だけ呼ぶよう内部でキャッシュする. candidates は時刻昇順であること.
     """
-    reasons = {"blur": 0, "exposure": 0, "few_features": 0}
+    reasons = {"blur": 0, "exposure": 0, "few_features": 0, "rolling_shutter": 0}
     valid: list[Candidate] = []
     for c in candidates:
         if config.min_sharpness > 0 and c.sharpness < config.min_sharpness:
@@ -142,6 +144,9 @@ def select_spatial(
             continue
         if config.min_features > 0 and c.feature_count < config.min_features:
             reasons["few_features"] += 1
+            continue
+        if c.rolling_shutter_motion_deg > config.max_rolling_shutter_motion_deg:
+            reasons["rolling_shutter"] += 1
             continue
         valid.append(c)
 
@@ -180,3 +185,46 @@ def select_spatial(
         rejected_fast=rejected,
         reasons=reasons,
     )
+
+
+def prefer_low_rolling_shutter_motion(
+    centers: list[int],
+    span: int,
+    motion_by_index: dict[int, float],
+    maximum_motion_deg: float,
+    *,
+    frame_bound: int | None = None,
+) -> list[int]:
+    """Move only unsafe interval samples to the nearest low-readout-motion frame."""
+    if not motion_by_index or not np.isfinite(maximum_motion_deg):
+        return centers
+    selected = []
+    for center in centers:
+        center_motion = motion_by_index.get(center)
+        if center_motion is not None and center_motion <= maximum_motion_deg:
+            selected.append(center)
+            continue
+        candidates = candidate_indices(
+            center,
+            max(1, span),
+            max(2, span + 1),
+            fps_bound=frame_bound,
+        )
+        measured = [candidate for candidate in candidates if candidate in motion_by_index]
+        if not measured:
+            selected.append(center)
+            continue
+        safe = [
+            candidate
+            for candidate in measured
+            if motion_by_index[candidate] <= maximum_motion_deg
+        ]
+        if safe:
+            chosen = min(safe, key=lambda candidate: (abs(candidate - center), motion_by_index[candidate]))
+        else:
+            chosen = min(
+                measured,
+                key=lambda candidate: (motion_by_index[candidate], abs(candidate - center)),
+            )
+        selected.append(chosen)
+    return selected

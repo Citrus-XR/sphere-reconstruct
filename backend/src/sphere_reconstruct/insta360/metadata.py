@@ -55,6 +55,7 @@ class FooterNotFoundError(Exception):
 class ExtraMetadata:
     camera_type: str
     first_frame_timestamp: int
+    rolling_shutter_time_ms: float
     gyro_timestamp: float
     has_gyro_timestamp: bool
     is_raw_gyro: bool
@@ -269,6 +270,7 @@ def parse_extra_metadata(data: bytes) -> ExtraMetadata:
     return ExtraMetadata(
         camera_type=camera_type,
         first_frame_timestamp=int(fields.get(24, 0)),
+        rolling_shutter_time_ms=float(fields.get(25, 0.0)),
         gyro_timestamp=float(fields.get(28, 0.0)),
         has_gyro_timestamp=bool(fields.get(29, 0)),
         is_raw_gyro=bool(fields.get(62, 0)),

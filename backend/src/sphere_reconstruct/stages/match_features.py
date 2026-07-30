@@ -21,7 +21,7 @@ from .colmap_progress import matching_progress
 @register
 class MatchFeatures(Stage):
     name = StageName.MATCH_FEATURES
-    impl_version = "2.3"
+    impl_version = "2.4"
 
     def normalize_params(self, raw: dict) -> dict:
         feature_type = str(raw.get("feature_type", "SIFT")).upper()
@@ -47,6 +47,7 @@ class MatchFeatures(Stage):
             "max_num_matches": int(raw.get("max_num_matches", 16384)),
             "guided_matching": bool(raw.get("guided_matching", False)),
             "min_num_inliers": int(raw.get("min_num_inliers", 15)),
+            "rig_verification": bool(raw.get("rig_verification", True)),
         }
 
     def collect_inputs(self, ctx: StageContext) -> list[FileRef]:
@@ -103,9 +104,10 @@ class MatchFeatures(Stage):
         )
         pairing = _resolve_pairing(ctx.params["pairing"], spec, vocab_tree, ctx.params["feature_type"])
         run_transitive = bool(ctx.params["transitive_matching"] and pairing == "sequential")
+        use_rig_verification = bool(spec.rig_config_path and ctx.params["rig_verification"])
         pairing_extra_args = [
             *extra_args,
-            *_rig_verification_args(bool(spec.rig_config_path), enabled=True),
+            *_rig_verification_args(bool(spec.rig_config_path), enabled=use_rig_verification),
         ]
         common = {
             "database_path": database_path,
@@ -173,9 +175,9 @@ class MatchFeatures(Stage):
                 "loop_closure": ctx.params["loop_closure"] if pairing == "sequential" else False,
                 "transitive_matching": run_transitive,
                 "transitive_iterations": (ctx.params["transitive_iterations"] if run_transitive else 0),
-                "rig_verification": bool(spec.rig_config_path),
+                "rig_verification": use_rig_verification,
                 "rig_verification_scope": (
-                    "pairing_graph" if spec.rig_config_path else "disabled"
+                    "pairing_graph" if use_rig_verification else "disabled"
                 ),
                 "gpu_enabled": ctx.params["use_gpu"],
             }

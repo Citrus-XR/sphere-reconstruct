@@ -5,32 +5,15 @@ from __future__ import annotations
 import numpy as np
 
 from ..colmap.model import Camera, Image, qvec_to_rotation
+from ..imaging import fisheye_camera
 
 
 def pixels_to_camera_rays(camera: Camera, pixels: np.ndarray) -> np.ndarray:
     pixels = np.asarray(pixels, dtype=np.float64).reshape((-1, 2))
     params = np.asarray(camera.params, dtype=np.float64)
     model = camera.model
-    if model == "OPENCV_FISHEYE":
-        fx, fy, cx, cy, k1, k2, k3, k4 = params
-        distorted = np.column_stack(((pixels[:, 0] - cx) / fx, (pixels[:, 1] - cy) / fy))
-        theta_distorted = np.linalg.norm(distorted, axis=1)
-        theta = theta_distorted.copy()
-        for _ in range(10):
-            theta2 = theta * theta
-            radial = 1 + k1 * theta2 + k2 * theta2**2 + k3 * theta2**3 + k4 * theta2**4
-            derivative = 1 + 3 * k1 * theta2 + 5 * k2 * theta2**2 + 7 * k3 * theta2**3 + 9 * k4 * theta2**4
-            theta -= np.divide(
-                theta * radial - theta_distorted,
-                derivative,
-                out=np.zeros_like(theta),
-                where=np.abs(derivative) > 1e-12,
-            )
-        azimuth = np.arctan2(distorted[:, 1], distorted[:, 0])
-        sin_theta = np.sin(theta)
-        return np.column_stack(
-            (sin_theta * np.cos(azimuth), sin_theta * np.sin(azimuth), np.cos(theta))
-        )
+    if model in fisheye_camera.SUPPORTED_MODELS:
+        return fisheye_camera.pixels_to_camera_rays(model, params, pixels)
     if model in {"PINHOLE", "SIMPLE_PINHOLE"}:
         if model == "PINHOLE":
             fx, fy, cx, cy = params
@@ -66,16 +49,8 @@ def camera_rays_to_pixels(camera: Camera, rays: np.ndarray) -> np.ndarray:
     rays = np.asarray(rays, dtype=np.float64).reshape((-1, 3))
     params = np.asarray(camera.params, dtype=np.float64)
     model = camera.model
-    if model == "OPENCV_FISHEYE":
-        fx, fy, cx, cy, k1, k2, k3, k4 = params
-        radius = np.linalg.norm(rays[:, :2], axis=1)
-        theta = np.arctan2(radius, rays[:, 2])
-        theta2 = theta * theta
-        theta_distorted = theta * (
-            1 + k1 * theta2 + k2 * theta2**2 + k3 * theta2**3 + k4 * theta2**4
-        )
-        scale = np.divide(theta_distorted, radius, out=np.ones_like(radius), where=radius > 1e-12)
-        return np.column_stack((fx * rays[:, 0] * scale + cx, fy * rays[:, 1] * scale + cy))
+    if model in fisheye_camera.SUPPORTED_MODELS:
+        return fisheye_camera.camera_rays_to_pixels(model, params, rays)
     if model in {"PINHOLE", "SIMPLE_PINHOLE"}:
         if model == "PINHOLE":
             fx, fy, cx, cy = params

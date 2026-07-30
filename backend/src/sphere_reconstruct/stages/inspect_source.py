@@ -30,7 +30,7 @@ from ..pipeline.stage import ProgressSpan, Stage, StageContext, new_manifest
 @register
 class InspectSource(Stage):
     name = StageName.INSPECT_SOURCE
-    impl_version = "2.1"
+    impl_version = "2.2"
 
     def collect_inputs(self, ctx: StageContext) -> list[FileRef]:
         return collect_source_inputs(
@@ -123,6 +123,7 @@ class InspectSource(Stage):
             "footer_size": layout.footer_size,
             "footer": None,
             "offset_v3": None,
+            "rolling_shutter": None,
             "gravity": None,
             "pb": None,
             "calibration_source": None,
@@ -174,6 +175,13 @@ class InspectSource(Stage):
                         summary["calibration_source"] = "offset_v3"
                 else:
                     summary["offset_v3"] = {"found": False}
+
+                extra_metadata = insv_metadata.read_extra_metadata(view)
+                if extra_metadata is not None and extra_metadata.rolling_shutter_time_ms > 0.0:
+                    summary["rolling_shutter"] = {
+                        "readout_time_ms": extra_metadata.rolling_shutter_time_ms,
+                        "correction_applied": False,
+                    }
 
                 # IMU（Gyro record）から重力方向（IMU 座標）を抽出し、再構成の重力整列に使う。
                 grav = insv_imu.extract_gravity(view)
@@ -287,6 +295,14 @@ def _source_statistics(summaries: list[dict]) -> dict:
         "image_collections": sum(source["media_kind"] == "images" for source in summaries),
         "source_images": sum(int(source.get("image_count", 0)) for source in summaries),
         "gravity_sources": sum(bool(source.get("gravity")) for source in summaries),
+        "rolling_shutter_sources": sum(bool(source.get("rolling_shutter")) for source in summaries),
+        "maximum_readout_time_ms": max(
+            (
+                float((source.get("rolling_shutter") or {}).get("readout_time_ms", 0.0))
+                for source in summaries
+            ),
+            default=0.0,
+        ),
         "calibrated_dual_fisheye_sources": sum(
             bool((source.get("offset_v3") or {}).get("valid")) for source in summaries
         ),

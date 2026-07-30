@@ -13,6 +13,7 @@ export interface StageParams {
   minSharpness: number
   minFeatures: number
   maxClip: number
+  maxRollingShutterMotion: number
   featureMaskEnabled: boolean
   featureMaskSize: number
   featureMaskDownsampleOn: boolean
@@ -42,6 +43,7 @@ export interface StageParams {
   maxNumMatches: number
   guidedMatching: boolean
   twoViewMinInliers: number
+  rigVerification: boolean
   mapper: 'global' | 'incremental'
   viewGraphCalibration: boolean
   baUseGpu: boolean
@@ -117,6 +119,7 @@ export const DEFAULT_PARAMS: StageParams = {
   minSharpness: 0,
   minFeatures: 50,
   maxClip: 0.25,
+  maxRollingShutterMotion: 0.8,
   featureMaskEnabled: true,
   featureMaskSize: 2048,
   featureMaskDownsampleOn: true,
@@ -146,6 +149,7 @@ export const DEFAULT_PARAMS: StageParams = {
   maxNumMatches: 16384,
   guidedMatching: false,
   twoViewMinInliers: 15,
+  rigVerification: true,
   mapper: 'global',
   viewGraphCalibration: true,
   baUseGpu: false,
@@ -199,6 +203,7 @@ export const paramsForStage = (
           min_sharpness: params.minSharpness,
           min_features: params.minFeatures,
           max_clip: params.maxClip,
+          max_rolling_shutter_motion_deg: params.maxRollingShutterMotion,
           max_frames: params.maxFrames,
         }
       }
@@ -209,6 +214,7 @@ export const paramsForStage = (
           ? sharpnessCandidates(params.sharpnessLevel)
           : 1,
         max_frames: params.maxFrames,
+        max_rolling_shutter_motion_deg: params.maxRollingShutterMotion,
       }
     case 'prepare_images':
       return { reconstruction_mode: mode, size: params.size, fov_deg: 90 }
@@ -248,6 +254,7 @@ export const paramsForStage = (
         max_num_matches: params.maxNumMatches,
         guided_matching: params.guidedMatching,
         min_num_inliers: params.twoViewMinInliers,
+        rig_verification: params.rigVerification,
       }
     case 'reconstruct':
       return {

@@ -55,10 +55,15 @@ class LensIntrinsics:
 
 
 @dataclass(frozen=True)
-class OpenCVFisheyeApproximation:
-    params: tuple[float, float, float, float, float, float, float, float]
+class ColmapFisheyeApproximation:
+    camera_model: str
+    params: tuple[float, ...]
     rms_error_px: float
     maximum_error_px: float
+    colmap_rms_error_px: float
+    colmap_maximum_error_px: float
+    lichtfeld_rms_error_px: float
+    lichtfeld_maximum_error_px: float
     forward_radius_px: float
 
 
@@ -79,20 +84,26 @@ def lens_to_intrinsics(
     """
     if lens.xi <= 0:
         raise ValueError(f"lens.xi must be > 0 (got {lens.xi})")
-    if single_lens_native_width <= 0 or target_width <= 0:
-        raise ValueError("native/target width must be > 0")
+    if (
+        single_lens_native_width <= 0
+        or lens.ref_image_height <= 0
+        or target_width <= 0
+        or target_height <= 0
+    ):
+        raise ValueError("native/target dimensions must be > 0")
 
     offset_x = lens_index * single_lens_native_width
     native_cx = lens.cx - offset_x
     native_cy = lens.cy
 
-    scale = target_width / single_lens_native_width
+    scale_x = target_width / single_lens_native_width
+    scale_y = target_height / lens.ref_image_height
     return LensIntrinsics(
         xi=lens.xi,
-        fx=lens.fx * scale,
-        fy=lens.fy * scale,
-        cx=native_cx * scale,
-        cy=native_cy * scale,
+        fx=lens.fx * scale_x,
+        fy=lens.fy * scale_y,
+        cx=native_cx * scale_x,
+        cy=native_cy * scale_y,
         k1=lens.k1,
         k2=lens.k2,
         k3=lens.k3,
@@ -103,18 +114,18 @@ def lens_to_intrinsics(
     )
 
 
-def approximate_opencv_fisheye(
+def approximate_thin_prism_fisheye(
     intr: LensIntrinsics,
     *,
     maximum_theta_rad: float = math.pi / 2,
     theta_samples: int = 120,
     azimuth_samples: int = 96,
-) -> OpenCVFisheyeApproximation:
-    """MEI calibration を COLMAP の forward-hemisphere OPENCV_FISHEYE へ近似する。"""
+) -> ColmapFisheyeApproximation:
+    """MEI calibration を COLMAP THIN_PRISM_FISHEYE へ近似する。"""
     # COLMAP の perspective fisheye ray は FOV <= 180° の時だけ正しく、常に rz > 0 を返す。
     # https://github.com/colmap/colmap/blob/a0d785fba74b2664f31edc4a29026a8b27c00f67/src/colmap/sensor/models.h#L290-L347
     if not 0 < maximum_theta_rad <= math.pi / 2:
-        raise ValueError("OPENCV_FISHEYE approximation must stay within the forward hemisphere")
+        raise ValueError("fisheye approximation must stay within the forward hemisphere")
     theta_values = np.linspace(1e-4, maximum_theta_rad, theta_samples)
     azimuth_values = np.linspace(0.0, 2.0 * math.pi, azimuth_samples, endpoint=False)
     theta, azimuth = np.meshgrid(theta_values, azimuth_values, indexing="ij")
@@ -139,18 +150,176 @@ def approximate_opencv_fisheye(
     fx, fy = float(horizontal[0]), float(vertical[0])
     distortion = tuple(float((horizontal[index] / fx + vertical[index] / fy) * 0.5) for index in range(1, 5))
     radial = 1.0 + sum(distortion[index] * theta ** (2 * (index + 1)) for index in range(4))
-    predicted_u = intr.cx + fx * np.cos(azimuth) * theta * radial
-    predicted_v = intr.cy + fy * np.sin(azimuth) * theta * radial
-    error = np.hypot(predicted_u - u, predicted_v - v)
-    edge_radial = maximum_theta_rad * (
-        1.0 + sum(distortion[index] * maximum_theta_rad ** (2 * (index + 1)) for index in range(4))
+    distorted_x = np.cos(azimuth) * theta * radial
+    distorted_y = np.sin(azimuth) * theta * radial
+    radius_squared = distorted_x * distorted_x + distorted_y * distorted_y
+    count = distorted_x.size
+    design = np.zeros((count * 2, 6), dtype=np.float64)
+    target = np.empty(count * 2, dtype=np.float64)
+    x = distorted_x.reshape(-1)
+    y = distorted_y.reshape(-1)
+    radius2 = radius_squared.reshape(-1)
+    design[:count, 0] = 1.0
+    design[:count, 2] = fx * 2.0 * x * y
+    design[:count, 3] = fx * (radius2 + 2.0 * x * x)
+    design[:count, 4] = fx * radius2
+    target[:count] = u.reshape(-1) - fx * x
+    design[count:, 1] = 1.0
+    design[count:, 2] = fy * (radius2 + 2.0 * y * y)
+    design[count:, 3] = fy * 2.0 * x * y
+    design[count:, 5] = fy * radius2
+    target[count:] = v.reshape(-1) - fy * y
+    cx, cy, p1, p2, sx1, sy1 = np.linalg.lstsq(design, target, rcond=None)[0]
+    fitted = _refine_thin_prism_parameters(
+        theta,
+        azimuth,
+        np.asarray(
+            (
+                fx,
+                fy,
+                cx,
+                cy,
+                distortion[0],
+                distortion[1],
+                p1,
+                p2,
+                distortion[2],
+                distortion[3],
+                sx1,
+                sy1,
+            )
+        ),
+        u,
+        v,
     )
-    return OpenCVFisheyeApproximation(
-        params=(fx, fy, intr.cx, intr.cy, *distortion),
-        rms_error_px=float(np.sqrt(np.mean(error**2))),
-        maximum_error_px=float(np.max(error)),
-        forward_radius_px=min(fx, fy) * edge_radial,
+    colmap_u, colmap_v = _thin_prism_prediction(theta, azimuth, fitted)
+    lichtfeld_u, lichtfeld_v = _lichtfeld_thin_prism_prediction(theta, azimuth, fitted)
+    colmap_error = np.hypot(colmap_u - u, colmap_v - v)
+    lichtfeld_error = np.hypot(lichtfeld_u - u, lichtfeld_v - v)
+    boundary_radius = np.hypot(
+        colmap_u[-1] - fitted[2],
+        colmap_v[-1] - fitted[3],
     )
+    return ColmapFisheyeApproximation(
+        camera_model="THIN_PRISM_FISHEYE",
+        params=tuple(float(value) for value in fitted),
+        rms_error_px=float(max(np.sqrt(np.mean(colmap_error**2)), np.sqrt(np.mean(lichtfeld_error**2)))),
+        maximum_error_px=float(max(np.max(colmap_error), np.max(lichtfeld_error))),
+        colmap_rms_error_px=float(np.sqrt(np.mean(colmap_error**2))),
+        colmap_maximum_error_px=float(np.max(colmap_error)),
+        lichtfeld_rms_error_px=float(np.sqrt(np.mean(lichtfeld_error**2))),
+        lichtfeld_maximum_error_px=float(np.max(lichtfeld_error)),
+        forward_radius_px=float(np.median(boundary_radius)),
+    )
+
+
+def _refine_thin_prism_parameters(
+    theta: np.ndarray,
+    azimuth: np.ndarray,
+    initial: np.ndarray,
+    target_u: np.ndarray,
+    target_v: np.ndarray,
+) -> np.ndarray:
+    parameters = initial.astype(np.float64, copy=True)
+    target = np.concatenate((target_u.ravel(), target_v.ravel()))
+    for _ in range(8):
+        predicted = _combined_prediction(theta, azimuth, parameters)
+        combined_target = np.concatenate((target, target))
+        residual = predicted - combined_target
+        jacobian = np.empty((len(residual), len(parameters)), dtype=np.float64)
+        for index in range(len(parameters)):
+            step = 1e-3 if index < 4 else 1e-7
+            shifted = parameters.copy()
+            shifted[index] += step
+            shifted_prediction = _combined_prediction(theta, azimuth, shifted)
+            jacobian[:, index] = (shifted_prediction - predicted) / step
+        delta = np.linalg.lstsq(jacobian, -residual, rcond=None)[0]
+        original_cost = float(np.dot(residual, residual))
+        for fraction in (1.0, 0.5, 0.25, 0.125):
+            candidate = parameters + fraction * delta
+            candidate_prediction = _combined_prediction(theta, azimuth, candidate)
+            candidate_residual = candidate_prediction - combined_target
+            if float(np.dot(candidate_residual, candidate_residual)) < original_cost:
+                parameters = candidate
+                break
+        else:
+            break
+        if np.linalg.norm(delta) < 1e-10:
+            break
+    return parameters
+
+
+def _flatten_prediction(theta: np.ndarray, azimuth: np.ndarray, parameters: np.ndarray):
+    u, v = _thin_prism_prediction(theta, azimuth, parameters)
+    return u.ravel(), v.ravel()
+
+
+def _combined_prediction(theta: np.ndarray, azimuth: np.ndarray, parameters: np.ndarray):
+    # COLMAP は全 distortion を等距離座標へ同時適用するが、LFStudio v0.5.3 は radial 後の
+    # 座標へ tangential / prism を適用する。共有 dataset が両方で同じ pixel ray を近似するよう
+    # 二つの residual を同時に最小化する。
+    # https://github.com/colmap/colmap/blob/a0d785fba74b2664f31edc4a29026a8b27c00f67/src/colmap/sensor/models.h#L2116-L2169
+    # https://github.com/MrNeRF/LichtFeld-Studio/blob/d8c50c6a3e2273cb74130a6e9023de8d068af52d/src/training/rasterization/gsplat/Cameras.cuh#L1042-L1136
+    return np.concatenate(
+        (
+            np.concatenate(_flatten_prediction(theta, azimuth, parameters)),
+            np.concatenate(
+                tuple(
+                    array.ravel()
+                    for array in _lichtfeld_thin_prism_prediction(theta, azimuth, parameters)
+                )
+            ),
+        )
+    )
+
+
+def _thin_prism_prediction(
+    theta: np.ndarray,
+    azimuth: np.ndarray,
+    parameters: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    fx, fy, cx, cy, k1, k2, p1, p2, k3, k4, sx1, sy1 = parameters
+    x = np.cos(azimuth) * theta
+    y = np.sin(azimuth) * theta
+    radius_squared = x * x + y * y
+    radial = radius_squared * (
+        k1 + radius_squared * (k2 + radius_squared * (k3 + radius_squared * k4))
+    )
+    u = cx + fx * (
+        x
+        + x * radial
+        + 2.0 * p1 * x * y
+        + p2 * (radius_squared + 2.0 * x * x)
+        + sx1 * radius_squared
+    )
+    v = cy + fy * (
+        y
+        + y * radial
+        + p1 * (radius_squared + 2.0 * y * y)
+        + 2.0 * p2 * x * y
+        + sy1 * radius_squared
+    )
+    return u, v
+
+
+def _lichtfeld_thin_prism_prediction(
+    theta: np.ndarray,
+    azimuth: np.ndarray,
+    parameters: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    fx, fy, cx, cy, k1, k2, p1, p2, k3, k4, sx1, sy1 = parameters
+    theta2 = theta * theta
+    radial = 1.0 + theta2 * (k1 + theta2 * (k2 + theta2 * (k3 + theta2 * k4)))
+    x = np.cos(azimuth) * theta * radial
+    y = np.sin(azimuth) * theta * radial
+    radius_squared = x * x + y * y
+    u = cx + fx * (
+        x + 2.0 * p1 * x * y + p2 * (radius_squared + 2.0 * x * x) + sx1 * radius_squared
+    )
+    v = cy + fy * (
+        y + p1 * (radius_squared + 2.0 * y * y) + 2.0 * p2 * x * y + sy1 * radius_squared
+    )
+    return u, v
 
 
 # -----------------------------------------------------------------------------

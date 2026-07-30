@@ -34,6 +34,37 @@ def test_opencv_fisheye_pixel_ray_roundtrip():
     np.testing.assert_allclose(np.linalg.norm(rays, axis=1), 1.0, atol=1e-12)
 
 
+def test_thin_prism_fisheye_pixel_ray_roundtrip():
+    camera = Camera(
+        1,
+        "THIN_PRISM_FISHEYE",
+        3840,
+        3840,
+        [
+            1023.2,
+            1023.6,
+            1920.66,
+            1918.89,
+            0.01904,
+            0.02286,
+            0.000594,
+            0.000121,
+            -0.00837,
+            0.00032,
+            -0.0000036,
+            -0.0000174,
+        ],
+        10,
+    )
+    pixels = np.asarray([[1920.66, 1918.89], [800.0, 1000.0], [3000.0, 2500.0]])
+
+    rays = pixels_to_camera_rays(camera, pixels)
+    restored = camera_rays_to_pixels(camera, rays)
+
+    np.testing.assert_allclose(restored, pixels, atol=2e-6)
+    np.testing.assert_allclose(np.linalg.norm(rays, axis=1), 1.0, atol=1e-12)
+
+
 def test_ray_triangulation_recovers_known_point():
     point = np.asarray([[0.25, -0.1, 4.0]])
     origins_a = np.asarray([[0.0, 0.0, 0.0]])

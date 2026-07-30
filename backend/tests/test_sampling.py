@@ -50,3 +50,38 @@ def test_sharpness_of_file(tmp_path):
     cv2.imwrite(str(p), sharp)
     s = sampling.sharpness_of_file(p, downscale=2)
     assert s > 0
+
+
+def test_interval_samples_move_only_when_rolling_shutter_motion_is_unsafe():
+    motion = {index: 0.4 for index in range(41)}
+    motion[10] = 1.2
+    motion[30] = 1.3
+    motion[29] = 0.9
+    motion[31] = 0.3
+
+    selected = sampling.prefer_low_rolling_shutter_motion(
+        [10, 20, 30],
+        span=10,
+        motion_by_index=motion,
+        maximum_motion_deg=0.8,
+        frame_bound=40,
+    )
+
+    assert selected == [9, 20, 31]
+
+
+def test_spatial_selection_reports_rolling_shutter_rejection():
+    candidates = [
+        sampling.Candidate(0, 0, 10.0, True, 100, rolling_shutter_motion_deg=0.2),
+        sampling.Candidate(1, 1, 10.0, True, 100, rolling_shutter_motion_deg=1.2),
+        sampling.Candidate(2, 2, 10.0, True, 100, rolling_shutter_motion_deg=0.3),
+    ]
+
+    result = sampling.select_spatial(
+        candidates,
+        lambda first, second: float(second - first),
+        sampling.SpatialConfig(target_motion=1.0, max_rolling_shutter_motion_deg=0.8),
+    )
+
+    assert result.reasons["rolling_shutter"] == 1
+    assert result.selected_indices == [0, 2]

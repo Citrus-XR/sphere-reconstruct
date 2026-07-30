@@ -10,12 +10,9 @@ from sphere_reconstruct.pipeline.stage import ProgressReporter, StageContext
 from sphere_reconstruct.stages.prepare_images import PrepareImages
 
 
-def _valid_x5_calibration() -> dict:
+def _valid_dual_fisheye_calibration() -> dict:
     common = {
         "xi": 2.0,
-        "yaw": 0.0,
-        "pitch": 0.0,
-        "roll": 90.0,
         "tx": 0.0,
         "ty": 0.0,
         "k1": 0.183,
@@ -32,6 +29,9 @@ def _valid_x5_calibration() -> dict:
         "lenses": [
             {
                 **common,
+                "yaw": 0.615,
+                "pitch": 0.016,
+                "roll": 89.937,
                 "fx": 4278.3,
                 "fy": 4277.33,
                 "cx": 2694.63,
@@ -40,6 +40,9 @@ def _valid_x5_calibration() -> dict:
             },
             {
                 **common,
+                "yaw": -0.718,
+                "pitch": 0.211,
+                "roll": 89.840,
                 "fx": 4296.81,
                 "fy": 4298.54,
                 "cx": 8064.92,
@@ -134,7 +137,7 @@ def test_native_fisheye_and_phone_create_separate_camera_groups(tmp_path):
                 "width": 100,
                 "height": 100,
                 "count": 1,
-                "offset_v3": _valid_x5_calibration(),
+                "offset_v3": _valid_dual_fisheye_calibration(),
                 "frames": [
                     {
                         "index": 0,
@@ -187,11 +190,13 @@ def test_native_fisheye_and_phone_create_separate_camera_groups(tmp_path):
     catalog = json.loads((output / "image_catalog.json").read_text())
     assert len(catalog["images"]) == 3
     assert {group["camera_model"] for group in catalog["camera_groups"]} == {
-        "OPENCV_FISHEYE",
+        "THIN_PRISM_FISHEYE",
         "SIMPLE_RADIAL",
     }
     assert len(json.loads((output / "rig_config.json").read_text())) == 1
-    native_groups = [group for group in catalog["camera_groups"] if group["camera_model"] == "OPENCV_FISHEYE"]
+    native_groups = [
+        group for group in catalog["camera_groups"] if group["camera_model"] == "THIN_PRISM_FISHEYE"
+    ]
     assert len(native_groups) == 2
     assert native_groups[0]["camera_params"] != native_groups[1]["camera_params"]
     assert all(group["refine_intrinsics"] is False for group in native_groups)
@@ -200,14 +205,19 @@ def test_native_fisheye_and_phone_create_separate_camera_groups(tmp_path):
         for image in catalog["images"]
         if image["projection"] == "dual_fisheye"
     ]
-    assert all(region["kind"] == "opencv_fisheye" for region in native_regions)
+    assert all(region["kind"] == "fisheye" for region in native_regions)
+    assert all(region["camera_model"] == "THIN_PRISM_FISHEYE" for region in native_regions)
     assert all(region["max_theta_rad"] < math.pi / 2 for region in native_regions)
-    assert all(len(region["params"]) == 8 for region in native_regions)
+    assert all(len(region["params"]) == 12 for region in native_regions)
     assert all(region["physical_circle"]["r"] > 0 for region in native_regions)
     numeric = [call[1] for call in progress_calls if call[1] is not None]
     assert numeric == sorted(numeric)
     assert numeric[-1] == 0.99
     assert any(call[3] == "log.prepare_source_progress" for call in progress_calls)
+    rig = json.loads((output / "rig_config.json").read_text())[0]["cameras"]
+    assert rig[0]["image_prefix"].endswith("/lens0/")
+    assert rig[1]["image_prefix"].endswith("/lens1/")
+    assert rig[1]["cam_from_rig_rotation"] != [0.0, 0.0, 1.0, 0.0]
 
 
 def _write_documents(project, *, sources):

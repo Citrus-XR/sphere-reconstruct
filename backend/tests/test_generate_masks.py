@@ -150,7 +150,8 @@ def test_generate_masks_combines_fisheye_valid_circle(tmp_path, monkeypatch):
 def test_generate_masks_combines_calibrated_fisheye_hemisphere():
     dynamic = np.zeros((100, 100), dtype=np.uint8)
     region = {
-        "kind": "opencv_fisheye",
+        "kind": "fisheye",
+        "camera_model": "OPENCV_FISHEYE",
         "params": [25.0, 25.0, 55.0, 50.0, 0.0, 0.0, 0.0, 0.0],
         "max_theta_rad": 1.4,
         "physical_circle": {"cx": 0.5, "cy": 0.5, "r": 0.49},

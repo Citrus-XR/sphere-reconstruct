@@ -33,7 +33,7 @@ def test_recovers_up_and_aligns_to_dataset_minus_y():
             qvec=_R_to_quat(R_wc),
             tvec=(0.0, 0.0, 0.0),
             camera_id=0,
-            name=f"front/frame_{i:06d}.jpg",
+            name=f"lens0/frame_{i:06d}.jpg",
         )
     g_imu = [0.0, -1.0, 0.0]  # cam 座標での上方向.
 
@@ -99,7 +99,7 @@ def test_timed_alignment_handles_moving_camera_and_time_offset():
             qvec=_R_to_quat(rotation),
             tvec=(0.0, 0.0, 0.0),
             camera_id=0,
-            name=f"front/frame_{index:06d}.jpg",
+            name=f"lens0/frame_{index:06d}.jpg",
         )
         exposure = 1.0 + index * 0.3
         frame_times[index] = exposure

@@ -5,9 +5,10 @@ from __future__ import annotations
 import json
 import math
 from collections.abc import Iterator
-from typing import cast
 
 import numpy as np
+
+from . import fisheye_camera
 
 _BLOCK_WORKING_BYTES = 8 * 1024 * 1024
 
@@ -56,7 +57,7 @@ def bounding_box(region: dict, width: int, height: int) -> tuple[float, float, f
 
 def _mask_blocks(region: dict, width: int, height: int) -> Iterator[tuple[int, np.ndarray]]:
     kind = region.get("kind")
-    block_rows = max(1, _BLOCK_WORKING_BYTES // max(1, width * 8))
+    block_rows = max(1, _BLOCK_WORKING_BYTES // max(1, width * 96))
     pixel_x = np.arange(width, dtype=np.float64)
 
     if kind == "circle":
@@ -72,13 +73,12 @@ def _mask_blocks(region: dict, width: int, height: int) -> Iterator[tuple[int, n
             yield start, block.astype(np.uint8)
         return
 
-    if kind != "opencv_fisheye":
+    if kind != "fisheye":
         raise ValueError(f"unsupported valid region kind: {kind}")
-    params = _fisheye_params(region)
-    fx, fy, cx, cy, *_distortion = params
-    radial_limit_squared = _distorted_radius_limit(params, _maximum_theta(region)) ** 2
-    projection_x_squared = ((pixel_x + 0.5 - cx) / fx) ** 2
-    projection_y_squared = ((np.arange(height, dtype=np.float64) + 0.5 - cy) / fy) ** 2
+    model = str(region["camera_model"])
+    params = tuple(float(value) for value in region["params"])
+    maximum_theta = _maximum_theta(region)
+    fisheye_camera.validate_forward_hemisphere(model, params, maximum_theta)
     physical_circle = region.get("physical_circle")
     circle_terms = (
         _circle_terms(physical_circle, pixel_x, height, width)
@@ -87,11 +87,13 @@ def _mask_blocks(region: dict, width: int, height: int) -> Iterator[tuple[int, n
     )
     for start in range(0, height, block_rows):
         end = min(height, start + block_rows)
-        block = (
-            projection_y_squared[start:end, np.newaxis]
-            + projection_x_squared[np.newaxis, :]
-            < radial_limit_squared
+        grid_x, grid_y = np.meshgrid(
+            pixel_x + 0.5,
+            np.arange(start, end, dtype=np.float64) + 0.5,
         )
+        pixels = np.column_stack((grid_x.ravel(), grid_y.ravel()))
+        theta = fisheye_camera.pixels_to_theta(model, params, pixels)
+        block = (theta < maximum_theta).reshape((end - start, width))
         if circle_terms is not None:
             circle_x_squared, circle_y_squared, circle_radius_squared = circle_terms
             block &= (
@@ -120,59 +122,11 @@ def _circle_terms(
     )
 
 
-def _fisheye_params(region: dict) -> tuple[float, float, float, float, float, float, float, float]:
-    params = tuple(float(value) for value in region["params"])
-    if len(params) != 8:
-        raise ValueError(f"OPENCV_FISHEYE requires 8 parameters: {len(params)}")
-    if params[0] <= 0 or params[1] <= 0:
-        raise ValueError(f"fisheye focal length must be positive: {params[:2]}")
-    return cast(tuple[float, float, float, float, float, float, float, float], params)
-
-
 def _maximum_theta(region: dict) -> float:
     maximum_theta = float(region["max_theta_rad"])
     if not 0 < maximum_theta < math.pi / 2:
         raise ValueError(f"maximum fisheye theta must be within (0, pi/2): {maximum_theta}")
     return maximum_theta
-
-
-def _distorted_radius_limit(
-    params: tuple[float, float, float, float, float, float, float, float],
-    theta: float,
-) -> float:
-    k1, k2, k3, k4 = params[4:]
-    # r(theta) の導関数は x=theta^2 の 4 次式。等間隔 sample は狭い反転区間を
-    # 見落とすため、導関数の極値を与える 3 次式の全実根で正値性を検査する。
-    derivative_coefficients = np.asarray([1.0, 3.0 * k1, 5.0 * k2, 7.0 * k3, 9.0 * k4])
-    stationary_coefficients = np.asarray([3.0 * k1, 10.0 * k2, 21.0 * k3, 36.0 * k4])
-    nonzero = np.flatnonzero(stationary_coefficients)
-    roots = (
-        np.polynomial.polynomial.polyroots(stationary_coefficients[: nonzero[-1] + 1])
-        if len(nonzero)
-        else np.asarray([], dtype=np.complex128)
-    )
-    maximum_x = theta * theta
-    candidates = [0.0, maximum_x]
-    candidates.extend(
-        float(root.real)
-        for root in roots
-        if abs(root.imag) <= 1e-10 * (1.0 + abs(root.real))
-        and 0.0 < root.real < maximum_x
-    )
-    derivative_values = np.polynomial.polynomial.polyval(candidates, derivative_coefficients)
-    if np.any(derivative_values <= 1e-10):
-        raise ValueError("fisheye radial distortion is not monotonic within the valid hemisphere")
-
-    theta_squared = theta * theta
-    radial = 1.0 + theta_squared * (
-        k1 + theta_squared * (k2 + theta_squared * (k3 + theta_squared * k4))
-    )
-    distorted = theta * radial
-    if not math.isfinite(distorted) or distorted <= 0:
-        raise ValueError(f"invalid fisheye distorted radius: {distorted}")
-    return distorted
-
-
 def _validate_dimensions(width: int, height: int) -> None:
     if width <= 0 or height <= 0:
         raise ValueError(f"image dimensions must be positive: {width}x{height}")

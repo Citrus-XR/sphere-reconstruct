@@ -16,8 +16,11 @@ Insta360 の inst box 末尾 record 群のうち id=3 (Gyro) が IMU. 非 raw (f
 
 from __future__ import annotations
 
+import math
 import struct
 from dataclasses import dataclass
+
+import numpy as np
 
 IMU_RECORD_TYPE = 0x0300  # inst box record id=3 (Gyro). 0x0300 は旧観測メモの表記.
 GYRO_RECORD_ID = 3
@@ -48,6 +51,8 @@ class ImuRecording:
     orientation: str
     camera_type: str
     is_raw: bool
+    gyro_range_dps: int | None
+    rolling_shutter_time_ms: float
 
 
 def parse_imu_payload(payload: bytes) -> list[ImuSample]:
@@ -154,7 +159,42 @@ def read_imu_recording(path) -> ImuRecording | None:
         orientation=orientation,
         camera_type=extra.camera_type,
         is_raw=extra.is_raw_gyro,
+        gyro_range_dps=extra.gyro_range,
+        rolling_shutter_time_ms=extra.rolling_shutter_time_ms,
     )
+
+
+def rolling_shutter_motion_by_frame(
+    recording: ImuRecording,
+    frame_indices: list[int],
+    fps: float,
+) -> dict[int, float]:
+    """Estimate top-to-bottom angular motion for each video frame."""
+    if fps <= 0.0:
+        raise ValueError(f"invalid fps: {fps}")
+    if recording.rolling_shutter_time_ms <= 0.0 or not recording.samples:
+        return {}
+    if recording.is_raw:
+        if not recording.gyro_range_dps:
+            raise ValueError("raw gyro recording is missing gyro_range_dps")
+        scale = recording.gyro_range_dps / 32768.0
+    else:
+        scale = 180.0 / math.pi
+    timestamps = np.asarray(recording.timestamps_sec, dtype=np.float64)
+    speeds = np.linalg.norm(
+        np.asarray([sample.gyro_xyz for sample in recording.samples], dtype=np.float64),
+        axis=1,
+    ) * scale
+    readout_seconds = recording.rolling_shutter_time_ms / 1000.0
+    frame_array = np.asarray(frame_indices, dtype=np.int64)
+    frame_times = frame_array.astype(np.float64) / fps
+    right = np.searchsorted(timestamps, frame_times, side="left")
+    right = np.clip(right, 0, len(timestamps) - 1)
+    left = np.maximum(0, right - 1)
+    choose_left = np.abs(frame_times - timestamps[left]) <= np.abs(timestamps[right] - frame_times)
+    nearest = np.where(choose_left, left, right)
+    motions = speeds[nearest] * readout_seconds
+    return {int(index): float(motion) for index, motion in zip(frame_array, motions, strict=True)}
 
 
 def _select_ambiguous_format(payload: bytes) -> list[ImuSample]:

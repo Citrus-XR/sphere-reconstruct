@@ -6,8 +6,11 @@ import struct
 
 from sphere_reconstruct.insta360.imu import (
     IMU_ENTRY_SIZE,
+    ImuRecording,
+    ImuSample,
     parse_imu_payload,
     parse_raw_imu_payload,
+    rolling_shutter_motion_by_frame,
     sample_rate_hz,
 )
 
@@ -54,3 +57,23 @@ def test_parse_raw_entry():
     assert sample.timestamp_us == 1_000
     assert sample.accel_xyz == (10.0, -20.0, 30.0)
     assert sample.gyro_xyz == (1.0, 2.0, 3.0)
+
+
+def test_rolling_shutter_motion_uses_recorded_range_and_readout():
+    recording = ImuRecording(
+        samples=[
+            ImuSample(0, (0.0, 0.0, 0.0), (3276.8, 0.0, 0.0)),
+            ImuSample(1_000_000, (0.0, 0.0, 0.0), (6553.6, 0.0, 0.0)),
+        ],
+        timestamps_sec=[0.0, 1.0],
+        orientation="yzX",
+        camera_type="Generic dual fisheye",
+        is_raw=True,
+        gyro_range_dps=2000,
+        rolling_shutter_time_ms=20.0,
+    )
+
+    motion = rolling_shutter_motion_by_frame(recording, [0, 30], fps=30.0)
+
+    assert abs(motion[0] - 4.0) < 1e-9
+    assert abs(motion[30] - 8.0) < 1e-9

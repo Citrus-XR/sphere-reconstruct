@@ -4,7 +4,7 @@ import { api, frameImageUrl, type FisheyeRegion, type LensCircle } from '../api/
 import { useSettings } from '../ui/settings'
 
 // 魚眼の円形有効領域をフレーム画像上で調整する. 中心/半径をドラッグ, ズームで拡大確認.
-// レンズ端の反射/汚れを外周から除外する. lens0=front, lens1=back を個別調整.
+// レンズ端の反射/汚れを外周から除外する。物理的な前後名を仮定せず lens index で扱う。
 
 type Handle = 'center' | 'radius' | null
 const DEFAULT_CIRCLE: LensCircle = { cx: 0.5, cy: 0.5, r: 0.459 }
@@ -83,8 +83,8 @@ export const FisheyeRegionEditor = ({
       <div className="hint" style={{ marginBottom: 8 }}>{t('regionHelp')}</div>
       <div style={{ display: 'flex', gap: 8, marginBottom: 8, alignItems: 'center', flexWrap: 'wrap' }}>
         <select className="input" style={{ maxWidth: 130 }} value={lens} onChange={e => setLens(Number(e.target.value) as 0 | 1)}>
-          <option value={0}>front (lens0)</option>
-          <option value={1}>back (lens1)</option>
+          <option value={0}>lens0</option>
+          <option value={1}>lens1</option>
         </select>
         <button className="btn" disabled={save.isPending} onClick={() => save.mutate()}>{t('save')}</button>
         {savedMsg && <span className="mono" style={{ color: 'var(--accent)' }}>{t('saved')}</span>}

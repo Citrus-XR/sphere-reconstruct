@@ -51,6 +51,10 @@ def test_rig_verification_args_are_only_emitted_for_a_rig():
     assert _rig_verification_args(False, enabled=True) == []
 
 
+def test_rig_verification_can_be_disabled_for_diagnostics():
+    assert MatchFeatures().normalize_params({"rig_verification": False})["rig_verification"] is False
+
+
 def test_rig_verification_runs_on_pairing_graph_before_transitive(tmp_path: Path, monkeypatch):
     from sphere_reconstruct.stages import match_features as module
 

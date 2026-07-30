@@ -34,7 +34,7 @@ const installUiMock = async (page: Page, options: MockOptions = {}) => {
   const sourceKind = options.sourceKind ?? 'insv'
   const reconMode = options.reconMode ?? (sourceKind === 'insv' ? 'native_fisheye' : 'equirectangular')
   const imageName = options.imageName ?? (sourceKind === 'insv'
-    ? 'sources/s1/front/frame_000000.jpg' : 'sources/s1/frame_000000.jpg')
+    ? 'sources/s1/lens0/frame_000000.jpg' : 'sources/s1/frame_000000.jpg')
   const unexpectedRequests: string[] = []
   const reruns: Array<{ stage: string; body: Record<string, Record<string, unknown>> }> = []
   const sourceAdds: Array<Record<string, unknown>> = []
@@ -218,7 +218,7 @@ const installUiMock = async (page: Page, options: MockOptions = {}) => {
         return
       }
       const maskNames = sourceKind === 'insv' && reconMode !== 'pinhole_rig'
-        ? ['sources/s1/front/frame_000000.jpg', 'sources/s1/back/frame_000000.jpg']
+        ? ['sources/s1/lens0/frame_000000.jpg', 'sources/s1/lens1/frame_000000.jpg']
         : [imageName]
       const incrementalPending = options.incrementalFeatureMask
         && purpose === 'feature' && maskRequests.feature === 1
@@ -585,7 +585,7 @@ test('photo and dataset camera inspectors share capture summary fields', async (
   const cameras = page.getByText(/Dataset · Cameras/)
   await expect(cameras).toBeVisible()
   await cameras.click()
-  const camera = page.getByText('sources/s1/front/frame_000000.jpg', { exact: true })
+  const camera = page.getByText('sources/s1/lens0/frame_000000.jpg', { exact: true })
   await expect(camera).toBeVisible()
   await camera.click()
   summary = page.getByTestId('capture-summary')
@@ -634,6 +634,20 @@ test('dense initialization is an independent opt-in step with bounded defaults',
   expect(mock.unexpectedRequests).toEqual([])
 })
 
+test('frame extraction exposes and submits rolling-shutter motion limit', async ({ page }) => {
+  const mock = await installUiMock(page)
+  await page.goto('/')
+
+  await page.getByText('Frame extraction', { exact: true }).click()
+  const limit = page.getByRole('slider', { name: 'Rolling-shutter rotation limit' })
+  await expect(limit).toHaveValue('0.8')
+  await limit.fill('0.6')
+  await page.getByRole('button', { name: 'Regenerate', exact: true }).click()
+  await expect.poll(() => mock.reruns.length).toBe(1)
+  expect(mock.reruns[0].body.params_by_stage.extract_frames.max_rolling_shutter_motion_deg).toBe(0.6)
+  expect(mock.unexpectedRequests).toEqual([])
+})
+
 test('photo and dataset camera previews switch between both mask steps', async ({ page }) => {
   const mock = await installUiMock(page)
   await page.goto('/')
@@ -648,7 +662,7 @@ test('photo and dataset camera previews switch between both mask steps', async (
   await expect(page.locator('img[alt="Mask"]')).toHaveAttribute('src', /purpose=feature/)
 
   await page.getByText(/Dataset · Cameras/).click()
-  await page.getByText('sources/s1/front/frame_000000.jpg', { exact: true }).click()
+  await page.getByText('sources/s1/lens0/frame_000000.jpg', { exact: true }).click()
   purpose = page.getByRole('group', { name: 'Mask purpose' })
   await page.getByRole('tab', { name: 'Mask' }).click()
   await purpose.getByRole('button', { name: 'Feature' }).click()
@@ -697,6 +711,7 @@ test('feature, matching, and mapper controls have localized names and explanatio
   await expect(page.getByText('Matches per image pair (max_num_matches)', { exact: true })).toBeVisible()
   await expect(page.getByText('Two-view minimum inliers (two-view min_num_inliers)', { exact: true })).toBeVisible()
   await expect(page.getByText('Geometry-guided matching (guided_matching)', { exact: true })).toBeVisible()
+  await expect(page.getByText('Generalized rig verification', { exact: true })).toBeVisible()
 
   await page.getByText('Sparse reconstruction', { exact: true }).click()
   await expect(page.getByText('Reconstruction solver (mapper)', { exact: true })).toBeVisible()
@@ -730,6 +745,7 @@ test('feature, matching, and mapper controls have localized names and explanatio
   await expect(page.getByText('特征匹配器 (matcher_type)', { exact: true })).toBeVisible()
   await expect(page.getByText('图像配对策略 (pairing)', { exact: true })).toBeVisible()
   await expect(page.getByText('双视图最少内点数 (two-view min_num_inliers)', { exact: true })).toBeVisible()
+  await expect(page.getByText('Generalized rig 验证', { exact: true })).toBeVisible()
   await page.getByText('特征抽取', { exact: true }).click()
   await expect(page.getByText('特征抽取最大图像尺寸 (max_image_size)', { exact: true })).toBeVisible()
   await expect(page.getByText('每张图像最大特征数 (max_num_features)', { exact: true })).toBeVisible()

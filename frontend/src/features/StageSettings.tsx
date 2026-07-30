@@ -201,7 +201,7 @@ export const StageSettings = ({
               <div className="predict">{t('predSpatial')}</div>
               {frameSelection?.reasons && (
                 <div className="hint" style={{ marginTop: 4 }}>
-                  {t('selReasons')}: 🌫 {frameSelection.reasons.blur} · ☀ {frameSelection.reasons.exposure} · ✦ {frameSelection.reasons.few_features}
+                  {t('selReasons')}: 🌫 {frameSelection.reasons.blur} · ☀ {frameSelection.reasons.exposure} · ✦ {frameSelection.reasons.few_features} · RS {frameSelection.reasons.rolling_shutter ?? 0}
                   {' '}({t('selKept')}: {frameSelection.selected}/{frameSelection.candidates ?? '—'})
                   {frameSelection.fallback && ` · ${t('selFallback')}`}
                 </div>
@@ -215,6 +215,10 @@ export const StageSettings = ({
               onChange={e => setParams({ maxFrames: Number(e.target.value) })} />
             <div className="hint">{t('hint_maxframes')}</div>
           </div>
+
+          <Slider label={t('lbl_rsMotion')} hint={t('hint_rsMotion')} min={0.1} max={2} step={0.1}
+            value={params.maxRollingShutterMotion}
+            onChange={v => setParams({ maxRollingShutterMotion: v })} fmt={v => `${v.toFixed(1)}°`} />
 
           {params.method === 'spatial' && (
             <div className="ctl">
@@ -400,6 +404,13 @@ export const StageSettings = ({
                 onChange={() => setParams({ guidedMatching: !params.guidedMatching })} /> {t('f_guidedMatching')}
             </label>
             <div className="hint">{t('hint_guidedMatching')}</div>
+          </div>
+          <div className="ctl">
+            <label style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
+              <input type="checkbox" checked={params.rigVerification}
+                onChange={() => setParams({ rigVerification: !params.rigVerification })} /> {t('lbl_rigVerification')}
+            </label>
+            <div className="hint">{t('hint_rigVerification')}</div>
           </div>
         </>
       )}

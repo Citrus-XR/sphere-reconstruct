@@ -282,7 +282,7 @@ export interface StagesStatus {
   stages: StageStatus[]
 }
 
-// 魚眼の円形有効領域 (正規化 cx/cy/r, 画像幅基準). lens0=front, lens1=back.
+// 魚眼の円形有効領域 (正規化 cx/cy/r, 画像幅基準)。物理的な前後名は adapter が決める。
 export interface LensCircle {
   cx: number
   cy: number
@@ -301,7 +301,7 @@ export interface FrameSelection {
   selected: number
   candidates?: number
   fallback?: boolean
-  reasons?: { blur: number; exposure: number; few_features: number }
+  reasons?: { blur: number; exposure: number; few_features: number; rolling_shutter?: number }
 }
 
 export interface FrameInfo {
@@ -389,9 +389,9 @@ export type ParsedImageName = {
 
 // COLMAP image name を入力 workspace の 3 layout に分解する.
 export const parseImageName = (name: string): ParsedImageName | null => {
-  const native = name.match(/^sources\/([^/]+)\/(front|back)\/frame_(\d+)\.(?:jpg|jpeg|png)$/i)
+  const native = name.match(/^sources\/([^/]+)\/(lens0|lens1)\/frame_(\d+)\.(?:jpg|jpeg|png)$/i)
   if (native) {
-    return { kind: 'native', sourceId: native[1], view: native[2], lens: native[2] === 'front' ? 0 : 1, index: Number(native[3]) }
+    return { kind: 'native', sourceId: native[1], view: native[2], lens: native[2] === 'lens0' ? 0 : 1, index: Number(native[3]) }
   }
   const pinhole = name.match(/^sources\/([^/]+)\/(.+)_lens(\d+)\/frame_(\d+)\.(?:jpg|jpeg|png)$/i)
   if (pinhole) {

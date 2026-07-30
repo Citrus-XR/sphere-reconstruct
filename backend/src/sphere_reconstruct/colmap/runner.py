@@ -187,7 +187,7 @@ def feature_extractor(
         feature_type,
     ]
     if single_camera_per_folder:
-        # rig 使用時: 各サブフォルダを独立カメラにする (pinhole rig は 12, native は front/back の 2).
+        # rig 使用時: 各サブフォルダを独立カメラにする (pinhole rig は 12, native は lens0/lens1 の 2).
         args += ["--ImageReader.single_camera_per_folder", "1"]
     else:
         args += ["--ImageReader.single_camera", "1" if single_camera else "0"]

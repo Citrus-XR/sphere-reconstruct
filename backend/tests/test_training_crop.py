@@ -70,7 +70,8 @@ def test_crop_plan_uses_calibrated_fisheye_forward_bounds():
                 "width": 64,
                 "height": 64,
                 "valid_region": {
-                    "kind": "opencv_fisheye",
+                    "kind": "fisheye",
+                    "camera_model": "OPENCV_FISHEYE",
                     "params": [20.0, 21.0, 32.0, 33.0, 0.0, 0.0, 0.0, 0.0],
                     "max_theta_rad": 0.5,
                     "physical_circle": {"cx": 0.5, "cy": 0.5, "r": 0.49},

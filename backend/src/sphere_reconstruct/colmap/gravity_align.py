@@ -29,7 +29,7 @@ DATASET_TO_VIEWER = np.diag([1.0, -1.0, -1.0])
 # 旧 API 用. 時刻同期版は撮影ごとに mounting を robust 推定する.
 MOUNTING_R = np.eye(3)
 
-_FRONT_FRAME = re.compile(r"(?:^|/)(?:front|front_lens0)/frame_(\d+)\.[^.]+$")
+_FRONT_FRAME = re.compile(r"(?:^|/)(?:lens0|front_lens0)/frame_(\d+)\.[^.]+$")
 
 
 def _quat_to_R(qvec) -> np.ndarray:
@@ -102,7 +102,7 @@ def _skew(v: np.ndarray) -> np.ndarray:
 
 
 def _is_front(name: str) -> bool:
-    return name.startswith("front/") or "lens0" in name
+    return "lens0" in name
 
 
 def compute_align_rotation(
@@ -264,7 +264,7 @@ def reference_camera_centers(
 ) -> list[tuple[float, float, float]]:
     """Rig の reference sensor だけの camera center を返す。
 
-    Native / pinhole rig は ``front`` / ``front_lens0`` を reference として生成する。未知の naming
+    Native / pinhole rig は ``lens0`` / ``front_lens0`` を reference として生成する。未知の naming
     では登録数が最大の単一 camera ID を選び、複数 sensor の baseline を軌跡移動と誤認しない。
     """
     centers = [

@@ -60,7 +60,7 @@ export const FrameInspector = ({
       record => record.source_id === info?.source_id && record.capture_index === info?.source_index,
     ) ?? []
     return isInsv
-      ? candidates.find(record => new RegExp(`(^|/)${lens === 0 ? 'front' : 'back'}/`).test(record.name))
+      ? candidates.find(record => new RegExp(`(^|/)lens${lens}/`).test(record.name))
       : candidates[0]
   }
   const masksByPurpose = {
