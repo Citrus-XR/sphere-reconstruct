@@ -314,6 +314,8 @@ thin-object ghosting、sky / ground separation、novel-view stability を最終�
 RoMaV2 native-ray initialization の 38.17 s X5 A/B は、1M / 2048 / 30k で training-camera PSNR を
 21.176 から 22.104、SSIM を 0.7477 から 0.7572 へ改善したが、自由視点は Sparse initialization の方が
 わずかに鮮明だった。Runtime も 23分01秒から25分38秒へ増えたため、Dense Step は一般 default にしない。
+追加点を 10,000 に制限した balanced run は PSNR 21.623、SSIM 0.7510、runtime 25分49秒となり、指標は
+中間になったが速度は回復しなかった。
 両 run が同じ camera subset を使うよう `images.bin` の input order を保持する。LFStudio の `test_every` は
 image ID ではなく file order へ適用される。
 Dense candidate memory は全 image pair へ均等配分し、小さい追加点 cap でも trajectory 前半だけで matching を

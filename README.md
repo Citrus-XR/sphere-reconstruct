@@ -445,12 +445,15 @@ learning rate 0 で読み込み、同じ 24 training-camera view と mask に対
 | Initialization | Seed points | 7k Gaussians | Runtime | PSNR | SSIM | Free-view observation |
 |---|---:|---:|---:|---:|---:|---|
 | **Sparse COLMAP** | **22,356** | **212,256** | **23分01秒** | 21.176 | 0.7477 | わずかに鮮明 |
-| RoMaV2 native-ray dense | 73,027 | 683,732 | 25分38秒 | **22.104** | **0.7572** | 安定した改善なし |
+| RoMaV2 + 10k balanced | 32,356 | 313,236 | 25分49秒 | 21.623 | 0.7510 | 確認待ち |
+| RoMaV2 + 50,671 | 73,027 | 683,732 | 25分38秒 | **22.104** | **0.7572** | 安定した改善なし |
 
 両 PLY は 100 万 records 全て finite。最大 scale の P99 は Sparse 0.05370、Dense 0.05472、scale 0.5 超は
 2 / 1 個で、Dense が巨大 Gaussian を増やした形跡はない。Dense は camera view の平均誤差を下げ、同じ view
-の gradient retention も上げたが、自由視点の目視では Sparse が少し明瞭だった。一般 default は Sparse のまま、
-次の Dense 実験は追加点数を疎点数に対して制限し、同じ cap 内で error-driven refinement の余地を残す。
+の gradient retention も上げたが、自由視点の目視では Sparse が少し明瞭だった。10k balanced は 96/96 pair を
+均等に処理し、50,441 raw candidate から 10,000 点を残した。7k 時点の Gaussian 数と camera-view 指標は
+Sparse / 50k Dense の中間になったが、最終的に同じ 1M cap へ到達するため runtime は短縮しなかった。
+一般 default は Sparse のままとし、Dense は sparse coverage が明確に不足する scene の opt-in とする。
 
 ### Features: 38.17 s X5、104 rig captures / 208 images
 
