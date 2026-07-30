@@ -29,6 +29,17 @@ $env:SPHERE_WITH_SAM3="1"
 .\scripts\start-windows.ps1
 ```
 
+RoMaV2 dense initialization も導入する場合:
+
+```powershell
+$env:SPHERE_WITH_DENSE="1"
+.\scripts\start-windows.ps1
+```
+
+Installer は約 1.1GB の v2.0.1 weights を `.runtime/torch/hub/checkpoints` へ atomic download し、release
+asset の SHA-256 を検証する。Step は heavy worker でのみ torch / RoMaV2 を import し、FastAPI process へ
+CUDA context を持ち込まない。
+
 Machine 固有 config:
 
 ```powershell

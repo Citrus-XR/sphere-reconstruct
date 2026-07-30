@@ -25,13 +25,20 @@ $env:SPHERE_WITH_SAM3="1"
 .\scripts\start-windows.ps1
 ```
 
+RoMaV2 dense initialization も導入する場合 (初回 model 約 1.1GB):
+
+```powershell
+$env:SPHERE_WITH_DENSE="1"
+.\scripts\start-windows.ps1
+```
+
 ### Linux
 
 COLMAP 4.1+、FFmpeg、FFprobe を system package で用意する。
 
 ```bash
 ./scripts/start-linux.sh
-SPHERE_WITH_SAM3=1 ./scripts/start-linux.sh
+SPHERE_WITH_SAM3=1 SPHERE_WITH_DENSE=1 ./scripts/start-linux.sh
 ```
 
 ### macOS
@@ -85,6 +92,7 @@ Sources
   -> align_reconstruction           # rotation only                            │
   -> restore_metric_scale           # observable stereo baseline -> meters     │
   -> position_ground                # trajectory-local ground -> Y=0           │
+  -> dense_initialization           # optional RoMaV2 + native ray points       │
   -> export_dataset <---------------- resolved training / feature mask ---------┘
 ```
 
@@ -100,7 +108,8 @@ Sources
 | Sparse reconstruction | registered cameras / points | Alignment 以降 |
 | Gravity alignment | rotation 済み sparse model | Scale 以降 |
 | Restore real size | metric sparse model、または unscaled の明示 | Ground / export |
-| Position from predicted ground | origin 補正済み model | Export |
+| Position from predicted ground | origin 補正済み model | Dense initialization / export |
+| Dense initialization | sparse point を保持した dense seed model | Export |
 | Export | LFStudio dataset root、preview、configs | なし |
 
 Artifact は temporary directory へ書き、成功時だけ atomic replace する。Inspector statistics は default で
@@ -138,6 +147,7 @@ General default は X5 indoor / outdoor と mixed phone-photo test の実測を�
 | Alignment | IMU rotation | Scale を変更しない |
 | Scale | Observable physical baseline only | 共有 stereo 視差なしでは meter と推測しない |
 | Ground | Trajectory-local median | 水面 / roof / point density bias を抑える |
+| Dense initialization | Off | 1.1GB model と追加時間が必要な opt-in A/B Step |
 | LFStudio | MRNF UI default + GUT + masks | Distorted camera を扱い、未検証の appearance 補正を既定にしない |
 
 ### Quality presets
@@ -331,6 +341,17 @@ Primary trajectory 周囲の local points を集め、camera sample ごとの gr
 遠方の water、roof、point density が origin を支配しない。Terrain は変形せず Y translation だけを適用する。
 Parktest は 246,780 support points、91.3% trajectory coverage から Y を −0.579 m 平行移動した。予測 camera
 height median 0.532 m は、抽出 frame で確認できる低い手持ち姿勢と一致した。
+
+### Dense initialization
+
+RoMaV2 の dense correspondence を reference / neighbor pair ごとに生成し、COLMAP camera model の pixel を
+unit bearing ray へ戻して ray-ray triangulation する。`OPENCV_FISHEYE` は k1–k4 を Newton iteration で反転し、
+Pinhole DLT へ近似しない。Feature mask、certainty、parallax、ray gap、native reprojection error、voxel dedupe、
+追加 point hard cap を通過した点だけを元の sparse model へ追記する。
+
+既定は無効。原版 LichtFeld densification plugin は nonlinear 360 projection を扱わず、camera を PINHOLE へ
+書き換えるため直接利用しない。RoMaV2 v2.0.1 source commit と 1,095,883,548-byte weights は固定し、weights は
+SHA-256 `1557dec0d21b62366465f7ff4d5fdf228cc695d0582e196ad2b80e05230828b7` で検証する。
 
 ## LFStudio export
 
@@ -528,6 +549,8 @@ Project 全体は [GNU General Public License v3.0 or later](LICENSE)、SPDX ide
 - [GLOMAP paper](https://arxiv.org/abs/2407.20219): global positioning formulation
 - [LichtFeld Studio](https://github.com/MrNeRF/LichtFeld-Studio): loader、GUT、MRNF、mask、PPISP
 - [PPISP](https://github.com/nv-tlabs/ppisp): appearance compensation / controller
+- [RoMaV2](https://github.com/Parskatt/RoMaV2): dense correspondence for optional native-ray initialization
+- [DINOv3](https://github.com/facebookresearch/dinov3): RoMaV2 descriptor backbone (custom license)
 - [liquid-glass-react](https://github.com/rdev/liquid-glass-react): MIT-licensed progressive glass decoration
 - [Icônes Fluent collection](https://icones.js.org/collection/fluent) / [Fluent UI System Icons](https://github.com/microsoft/fluentui-system-icons): UI icon source
 - [telemetry-parser](https://github.com/AdrianEddy/telemetry-parser): Insta360 metadata

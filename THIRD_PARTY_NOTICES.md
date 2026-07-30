@@ -1,6 +1,6 @@
 # Third-party notices
 
-Frontend の visual surface と icon は次の project を利用する。Application 本体の
+Frontend の visual surface / icon と optional dense initialization は次の project を利用する。Application 本体の
 `GPL-3.0-or-later` と、各 dependency の license は独立して適用される。
 
 ## liquid-glass-react
@@ -26,6 +26,20 @@ https://github.com/shuding/liquid-glass を基にしている。
 - Pinned package: `@fluentui/react-icons@2.0.334`
 - License: MIT
 - Copyright (c) 2020 Microsoft Corporation
+
+## RoMaV2
+
+- Source: https://github.com/Parskatt/RoMaV2
+- Pinned source commit: `95c9968145c8906b7b59383258e9f73b02853d89`
+- Pinned weights: `romav2.0.1.pt`
+- Source license: MIT
+- Copyright (c) 2025 Johan Edstedt
+
+RoMaV2 は DINOv3 code / model を descriptor backbone として利用する。DINOv3 は MIT ではなく Meta の
+custom DINOv3 License が適用される。利用・再配布時は次を確認する。
+
+- Source and license: https://github.com/facebookresearch/dinov3
+- Pinned source revision used by RoMaV2: `adc254450203739c8149213a7a69d8d905b4fcfa`
 
 ## MIT License text
 

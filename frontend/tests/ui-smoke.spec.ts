@@ -122,7 +122,7 @@ const installUiMock = async (page: Page, options: MockOptions = {}) => {
     const projectMatch = path.match(/^\/api\/projects\/(p1|p2)/)
     const projectId = projectMatch?.[1]
     if (projectId && path === `/api/projects/${projectId}/stages`) {
-      const names = ['inspect_source', 'extract_frames', 'prepare_images', 'generate_feature_masks', 'generate_training_masks', 'extract_features', 'match_features', 'reconstruct', 'align_reconstruction', 'restore_metric_scale', 'position_ground', 'export_dataset']
+      const names = ['inspect_source', 'extract_frames', 'prepare_images', 'generate_feature_masks', 'generate_training_masks', 'extract_features', 'match_features', 'reconstruct', 'align_reconstruction', 'restore_metric_scale', 'position_ground', 'dense_initialization', 'export_dataset']
       const extras: Record<string, Record<string, unknown>> = {
         inspect_source: { kind: 'insv', file_size: 1024, gravity_samples: 42 },
         extract_frames: { frames: 1, selection_mode: 'interval', selected: 1 },
@@ -142,6 +142,7 @@ const installUiMock = async (page: Page, options: MockOptions = {}) => {
         align_reconstruction: { applied: true, spread_deg: 0.4, preview_points: 42 },
         restore_metric_scale: { applied: true, metric: true, scale_factor: 445, baseline_pairs: 2 },
         position_ground: { applied: true, ground_y: 5, support_points: 1200 },
+        dense_initialization: { enabled: false, method: 'passthrough', base_points: 42, new_points: 0, total_points: 42 },
         export_dataset: { images: 2, total_points: 42, validation: { loadable: true, training_ready: true }, lfstudio_training_metrics: 'external' },
       }
       await route.fulfill({ json: { project_id: 'p1', state: 'exported', stages: names.map(stage => ({
@@ -323,6 +324,7 @@ test('IDE loads the split pipeline and environment diagnostics', async ({ page }
   await expect(page.getByText('Extract features', { exact: true })).toBeVisible()
   await expect(page.getByText('Match features', { exact: true })).toBeVisible()
   await expect(page.getByText('Gravity alignment', { exact: true })).toBeVisible()
+  await expect(page.getByText('Dense initialization', { exact: true })).toBeVisible()
   await expect(page.getByText('Export', { exact: true })).toBeVisible()
 
   await page.getByTitle('Settings').click()
@@ -614,6 +616,21 @@ test('feature and training masks are independent steps with distinct defaults', 
   await expect(page.getByText('Training-mask prompt', { exact: true }).locator('..').locator('input'))
     .toHaveValue(TRAINING_MASK_PROMPT)
   await expect(page.getByText('2048px', { exact: true })).toBeVisible()
+  expect(mock.unexpectedRequests).toEqual([])
+})
+
+test('dense initialization is an independent opt-in step with bounded defaults', async ({ page }) => {
+  const mock = await installUiMock(page)
+  await page.goto('/')
+
+  await page.getByText('Dense initialization', { exact: true }).click()
+  const enabled = page.getByRole('checkbox', { name: 'Enable RoMaV2 dense initialization' })
+  await expect(enabled).not.toBeChecked()
+  await expect(page.getByRole('button', { name: /Dense initialization skip/ })).toBeVisible()
+  await enabled.check()
+  await expect(page.getByRole('combobox')).toHaveValue('turbo')
+  await expect(page.getByText('25%', { exact: true })).toBeVisible()
+  await expect(page.getByRole('spinbutton', { name: 'Hard cap for added points' })).toHaveValue('200000')
   expect(mock.unexpectedRequests).toEqual([])
 })
 

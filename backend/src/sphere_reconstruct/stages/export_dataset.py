@@ -51,21 +51,21 @@ from ..settings import get_settings
 @register
 class ExportDataset(Stage):
     name = StageName.EXPORT_DATASET
-    impl_version = "2.2"
+    impl_version = "2.3"
 
     def collect_inputs(self, ctx: StageContext) -> list[FileRef]:
         candidates = [
-            ctx.project_dir / "manifests" / "position_ground.json",
+            ctx.project_dir / "manifests" / "dense_initialization.json",
             ctx.project_dir / "restore_metric_scale" / "scale_restoration.json",
             ctx.project_dir / "manifests" / "extract_features.json",
             ctx.project_dir / "extract_features" / "input_spec.json",
             ctx.project_dir / "prepare_images" / "image_catalog.json",
             ctx.project_dir / "position_ground" / "ground_position.json",
-            ctx.project_dir / "position_ground" / "sparse" / "0" / "rigs.bin",
-            ctx.project_dir / "position_ground" / "sparse" / "0" / "cameras.bin",
-            ctx.project_dir / "position_ground" / "sparse" / "0" / "frames.bin",
-            ctx.project_dir / "position_ground" / "sparse" / "0" / "images.bin",
-            ctx.project_dir / "position_ground" / "sparse" / "0" / "points3D.bin",
+            ctx.project_dir / "dense_initialization" / "sparse" / "0" / "rigs.bin",
+            ctx.project_dir / "dense_initialization" / "sparse" / "0" / "cameras.bin",
+            ctx.project_dir / "dense_initialization" / "sparse" / "0" / "frames.bin",
+            ctx.project_dir / "dense_initialization" / "sparse" / "0" / "images.bin",
+            ctx.project_dir / "dense_initialization" / "sparse" / "0" / "points3D.bin",
         ]
         purpose = export_purpose(
             feature_enabled=ctx.params["feature_masks_enabled"],
@@ -106,9 +106,9 @@ class ExportDataset(Stage):
         manifest.inputs = ctx.inputs_for(self)
         manifest.params = ctx.params
 
-        model_dir = ctx.project_dir / "position_ground" / "sparse" / "0"
+        model_dir = ctx.project_dir / "dense_initialization" / "sparse" / "0"
         if not (model_dir / "cameras.bin").exists():
-            raise RuntimeError("position_ground must run first (sparse/0 missing)")
+            raise RuntimeError("dense_initialization must run first (sparse/0 missing)")
 
         ctx.progress.info("reading aligned reconstruction", progress=0.0, key="log.export_start")
         recon = colmap_model.read_model(model_dir)

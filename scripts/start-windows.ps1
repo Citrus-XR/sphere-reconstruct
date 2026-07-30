@@ -61,9 +61,15 @@ Write-Host "[2/7] Backend 依存関係"
 Push-Location backend
 $extras = @("--extra", "imaging", "--extra", "aliked")
 if ($env:SPHERE_WITH_SAM3 -eq "1") { $extras += @("--extra", "sam3") }
+if ($env:SPHERE_WITH_DENSE -eq "1") { $extras += @("--extra", "dense") }
 uv sync @extras
 Assert-NativeSuccess "Backend dependency synchronization"
 Pop-Location
+
+if ($env:SPHERE_WITH_DENSE -eq "1") {
+    & backend\.venv\Scripts\python.exe scripts\install_romav2.py
+    Assert-NativeSuccess "RoMaV2 model installation"
+}
 
 if (-not $env:SPHERE_FILESYSTEM__ALLOWED_ROOTS) {
     $configuredRoots = & backend\.venv\Scripts\python.exe -c "import json; from sphere_reconstruct.settings import get_settings; print(json.dumps([str(path) for path in get_settings().filesystem.allowed_roots]))"

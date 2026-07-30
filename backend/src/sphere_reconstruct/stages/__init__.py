@@ -8,6 +8,7 @@ FastAPI 側からは import しない (Torch などを引きずり込まない�
 
 from . import (
     align_reconstruction,  # noqa: F401
+    dense_initialization,  # noqa: F401
     export_dataset,  # noqa: F401
     extract_features,  # noqa: F401
     extract_frames,  # noqa: F401

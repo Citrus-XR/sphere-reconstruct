@@ -15,7 +15,12 @@ pnpm --dir frontend build
 echo "[2/5] Backend 依存関係"
 backend_extras=(--extra imaging --extra aliked)
 if [[ "${SPHERE_WITH_SAM3:-0}" == "1" ]]; then backend_extras+=(--extra sam3); fi
+if [[ "${SPHERE_WITH_DENSE:-0}" == "1" ]]; then backend_extras+=(--extra dense); fi
 (cd backend && uv sync "${backend_extras[@]}")
+
+if [[ "${SPHERE_WITH_DENSE:-0}" == "1" ]]; then
+  backend/.venv/bin/python scripts/install_romav2.py
+fi
 
 if [[ -z "${SPHERE_FILESYSTEM__ALLOWED_ROOTS:-}" ]]; then
   configured_roots="$(backend/.venv/bin/python -c 'import json; from sphere_reconstruct.settings import get_settings; print(json.dumps([str(path) for path in get_settings().filesystem.allowed_roots]))')"

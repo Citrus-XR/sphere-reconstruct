@@ -1,7 +1,7 @@
 """パイプライン全体の状態遷移.
 
 Main reconstruction branch は EXTRACTED から FEATURES_EXTRACTED -> MATCHED -> RECONSTRUCTED ->
-ALIGNED -> SCALE_RESTORED -> GROUNDED -> EXPORTED へ進む。Feature mask は SfM branch、training mask は export branch にだけ接続し、
+ALIGNED -> SCALE_RESTORED -> GROUNDED -> DENSIFIED -> EXPORTED へ進む。Feature mask は SfM branch、training mask は export branch にだけ接続し、
 どちらも独立して生成・破棄できる。
 
 各ステージは冪等。入力が変わった場合は consumer graph だけを transitive invalidate し、独立
@@ -26,6 +26,7 @@ class PipelineState(StrEnum):
     ALIGNED = "aligned"
     SCALE_RESTORED = "scale_restored"
     GROUNDED = "grounded"
+    DENSIFIED = "densified"
     EXPORTED = "exported"
 
     def order(self) -> int:
@@ -47,7 +48,8 @@ _ORDER: dict[PipelineState, int] = {
     PipelineState.ALIGNED: 8,
     PipelineState.SCALE_RESTORED: 9,
     PipelineState.GROUNDED: 10,
-    PipelineState.EXPORTED: 11,
+    PipelineState.DENSIFIED: 11,
+    PipelineState.EXPORTED: 12,
 }
 
 
@@ -65,6 +67,7 @@ class StageName(StrEnum):
     ALIGN_RECONSTRUCTION = "align_reconstruction"
     RESTORE_METRIC_SCALE = "restore_metric_scale"
     POSITION_GROUND = "position_ground"
+    DENSE_INITIALIZATION = "dense_initialization"
     EXPORT_DATASET = "export_dataset"
 
 
@@ -80,6 +83,7 @@ STAGE_TO_STATE: dict[StageName, PipelineState] = {
     StageName.ALIGN_RECONSTRUCTION: PipelineState.ALIGNED,
     StageName.RESTORE_METRIC_SCALE: PipelineState.SCALE_RESTORED,
     StageName.POSITION_GROUND: PipelineState.GROUNDED,
+    StageName.DENSE_INITIALIZATION: PipelineState.DENSIFIED,
     StageName.EXPORT_DATASET: PipelineState.EXPORTED,
 }
 
@@ -96,6 +100,7 @@ STAGE_ORDER: tuple[StageName, ...] = (
     StageName.ALIGN_RECONSTRUCTION,
     StageName.RESTORE_METRIC_SCALE,
     StageName.POSITION_GROUND,
+    StageName.DENSE_INITIALIZATION,
     StageName.EXPORT_DATASET,
 )
 
@@ -115,7 +120,8 @@ _STAGE_CONSUMERS: dict[StageName, tuple[StageName, ...]] = {
     StageName.RECONSTRUCT: (StageName.ALIGN_RECONSTRUCTION,),
     StageName.ALIGN_RECONSTRUCTION: (StageName.RESTORE_METRIC_SCALE,),
     StageName.RESTORE_METRIC_SCALE: (StageName.POSITION_GROUND,),
-    StageName.POSITION_GROUND: (StageName.EXPORT_DATASET,),
+    StageName.POSITION_GROUND: (StageName.DENSE_INITIALIZATION,),
+    StageName.DENSE_INITIALIZATION: (StageName.EXPORT_DATASET,),
     StageName.EXPORT_DATASET: (),
 }
 

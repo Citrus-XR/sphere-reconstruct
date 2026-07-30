@@ -61,6 +61,17 @@ export interface StageParams {
   alignmentMethod: 'auto' | 'imu' | 'none'
   metricScaleMethod: 'auto' | 'rig' | 'none'
   groundPositionMethod: 'auto' | 'points' | 'none'
+  denseEnabled: boolean
+  denseQuality: 'turbo' | 'fast' | 'base' | 'high'
+  denseReferenceFraction: number
+  denseNeighbors: number
+  denseMatchesPerPair: number
+  denseConfidenceThreshold: number
+  denseReprojectionThreshold: number
+  denseMinimumParallax: number
+  denseMaximumPoints: number
+  denseVoxelRatio: number
+  denseUseFeatureMasks: boolean
   size: number
   emitTrainConfigs: boolean
   optimizeFisheyeTrainingImages: boolean
@@ -154,6 +165,17 @@ export const DEFAULT_PARAMS: StageParams = {
   alignmentMethod: 'auto',
   metricScaleMethod: 'auto',
   groundPositionMethod: 'auto',
+  denseEnabled: false,
+  denseQuality: 'turbo',
+  denseReferenceFraction: 0.25,
+  denseNeighbors: 2,
+  denseMatchesPerPair: 2000,
+  denseConfidenceThreshold: 0.2,
+  denseReprojectionThreshold: 1.5,
+  denseMinimumParallax: 0.5,
+  denseMaximumPoints: 200000,
+  denseVoxelRatio: 0.0005,
+  denseUseFeatureMasks: true,
   size: 1024,
   emitTrainConfigs: true,
   optimizeFisheyeTrainingImages: true,
@@ -252,6 +274,20 @@ export const paramsForStage = (
       return { method: params.metricScaleMethod }
     case 'position_ground':
       return { method: params.groundPositionMethod }
+    case 'dense_initialization':
+      return {
+        enabled: params.denseEnabled,
+        quality: params.denseQuality,
+        reference_fraction: params.denseReferenceFraction,
+        neighbors_per_reference: params.denseNeighbors,
+        matches_per_pair: params.denseMatchesPerPair,
+        confidence_threshold: params.denseConfidenceThreshold,
+        reprojection_threshold_px: params.denseReprojectionThreshold,
+        minimum_parallax_deg: params.denseMinimumParallax,
+        maximum_new_points: params.denseMaximumPoints,
+        voxel_size_ratio: params.denseVoxelRatio,
+        use_feature_masks: params.denseUseFeatureMasks,
+      }
     case 'export_dataset':
       return {
         emit_train_configs: params.emitTrainConfigs,

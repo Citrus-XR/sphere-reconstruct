@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import platform
@@ -29,6 +30,7 @@ def diagnose() -> dict:
         "vocab_tree": _vocab_tree_check(),
         "jpegtran": _jpegtran_check(),
         "sam3": _sam3_check(),
+        "romav2": _romav2_check(),
         "cuda_runtime": _cuda_runtime_check(),
     }
     required = ("workspace", "filesystem_roots", "ffmpeg", "ffprobe", "colmap")
@@ -240,6 +242,27 @@ def _sam3_check() -> dict:
         "optional": True,
         "message": check.message,
         "checkpoint_size": check.checkpoint_size,
+    }
+
+
+def _romav2_check() -> dict:
+    package_present = importlib.util.find_spec("romav2") is not None
+    model = (
+        Path(__file__).resolve().parents[3]
+        / ".runtime"
+        / "torch"
+        / "hub"
+        / "checkpoints"
+        / "romav2.0.1.pt"
+    )
+    model_ready = model.is_file() and model.stat().st_size == 1_095_883_548
+    return {
+        "ok": package_present and model_ready,
+        "optional": True,
+        "path": str(model),
+        "package_present": package_present,
+        "model_ready": model_ready,
+        "message": "ok" if package_present and model_ready else "optional RoMaV2 dense runtime not installed",
     }
 
 

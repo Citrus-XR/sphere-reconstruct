@@ -22,6 +22,11 @@ def test_latest_transform_preview_follows_pipeline_order(tmp_path):
     grounded.write_text("grounded")
     assert _latest_transform_preview(tmp_path, "reconstruction.json") == grounded
 
+    dense = tmp_path / "dense_initialization" / "preview" / "reconstruction.json"
+    dense.parent.mkdir(parents=True)
+    dense.write_text("dense")
+    assert _latest_transform_preview(tmp_path, "reconstruction.json") == dense
+
 
 def test_latest_transform_preview_requires_one_completed_transform(tmp_path):
     with pytest.raises(HTTPException, match="preview not available"):

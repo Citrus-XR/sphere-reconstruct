@@ -76,6 +76,9 @@ def test_summary_state_follows_last_main_branch_artifact(tmp_path):
     _populate(tmp_path)
     (tmp_path / StageName.EXPORT_DATASET.value).rmdir()
     manifest_path(tmp_path, StageName.EXPORT_DATASET.value).unlink()
+    assert derive_pipeline_state(tmp_path) == PipelineState.DENSIFIED
+    (tmp_path / StageName.DENSE_INITIALIZATION.value).rmdir()
+    manifest_path(tmp_path, StageName.DENSE_INITIALIZATION.value).unlink()
     assert derive_pipeline_state(tmp_path) == PipelineState.GROUNDED
     (tmp_path / StageName.POSITION_GROUND.value).rmdir()
     manifest_path(tmp_path, StageName.POSITION_GROUND.value).unlink()

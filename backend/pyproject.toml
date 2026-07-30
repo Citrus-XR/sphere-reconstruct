@@ -75,6 +75,9 @@ aliked = [
     "onnxruntime>=1.19; sys_platform == 'darwin'",
     "opencv-python-headless>=4.10",
 ]
+dense = [
+    "romav2==2.0.1",
+]
 
 [build-system]
 requires = ["hatchling"]
@@ -90,6 +93,7 @@ package = true
 [tool.uv.sources]
 torch = [{ index = "pytorch-cu128", marker = "sys_platform == 'win32' or sys_platform == 'linux'" }]
 torchvision = [{ index = "pytorch-cu128", marker = "sys_platform == 'win32' or sys_platform == 'linux'" }]
+romav2 = { git = "https://github.com/Parskatt/RoMaV2.git", rev = "95c9968145c8906b7b59383258e9f73b02853d89" }
 
 [[tool.uv.index]]
 name = "pytorch-cu128"

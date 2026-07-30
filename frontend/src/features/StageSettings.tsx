@@ -504,6 +504,52 @@ export const StageSettings = ({
         </div>
       )}
 
+      {stage === 'dense_initialization' && (
+        <>
+          <label className="ctl" style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+            <input type="checkbox" checked={params.denseEnabled}
+              onChange={event => setParams({ denseEnabled: event.target.checked })} />
+            {t('denseEnable')}
+          </label>
+          <div className="hint" style={{ marginBottom: 8 }}>{t('denseHint')}</div>
+          <div className="ctl">
+            <label>{t('denseQuality')}</label>
+            <select className="input" value={params.denseQuality}
+              disabled={!params.denseEnabled}
+              onChange={event => setParams({ denseQuality: event.target.value as StageParams['denseQuality'] })}>
+              <option value="turbo">Turbo (320px)</option>
+              <option value="fast">Fast (512px)</option>
+              <option value="base">Base (640px)</option>
+              <option value="high">High (640/960px)</option>
+            </select>
+          </div>
+          <Slider label={t('denseReferences')} hint={t('denseReferencesHint')} min={0.05} max={1} step={0.05}
+            value={params.denseReferenceFraction} onChange={value => setParams({ denseReferenceFraction: value })}
+            fmt={value => `${Math.round(value * 100)}%`} />
+          <Slider label={t('denseNeighbors')} hint={t('denseNeighborsHint')} min={1} max={6} step={1}
+            value={params.denseNeighbors} onChange={value => setParams({ denseNeighbors: Math.round(value) })}
+            fmt={value => String(Math.round(value))} />
+          <NumField label={t('denseMatches')} value={params.denseMatchesPerPair}
+            onChange={value => setParams({ denseMatchesPerPair: value })} />
+          <NumField label={t('denseMaximumPoints')} value={params.denseMaximumPoints}
+            onChange={value => setParams({ denseMaximumPoints: value })} />
+          <label className="ctl" style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+            <input type="checkbox" checked={params.denseUseFeatureMasks} disabled={!params.denseEnabled}
+              onChange={event => setParams({ denseUseFeatureMasks: event.target.checked })} />
+            {t('denseUseMasks')}
+          </label>
+          <div className="inspector-section-title">{t('advanced')}</div>
+          <NumField label={t('denseConfidence')} value={params.denseConfidenceThreshold} step={0.05}
+            onChange={value => setParams({ denseConfidenceThreshold: value })} />
+          <NumField label={t('denseReprojection')} value={params.denseReprojectionThreshold} step={0.1}
+            onChange={value => setParams({ denseReprojectionThreshold: value })} />
+          <NumField label={t('denseParallax')} value={params.denseMinimumParallax} step={0.1}
+            onChange={value => setParams({ denseMinimumParallax: value })} />
+          <NumField label={t('denseVoxelRatio')} value={params.denseVoxelRatio} step={0.0001}
+            onChange={value => setParams({ denseVoxelRatio: value })} />
+        </>
+      )}
+
       {stage === 'prepare_images' && reconMode === 'pinhole_rig' && (
         <Slider label={t('lblPinholeSize')} hint={t('hintPinholeSize')} min={512} max={2048} step={128}
           value={params.size} onChange={value => setParams({ size: Math.round(value) })} fmt={value => `${value}px`} />

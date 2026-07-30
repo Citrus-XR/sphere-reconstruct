@@ -273,6 +273,7 @@ export const App = () => {
     'align_reconstruction',
     'restore_metric_scale',
     'position_ground',
+    'dense_initialization',
     'export_dataset',
   ]
   const stageIsFresh = (stage: NonNullable<typeof stagesData>['stages'][number]): boolean => {
@@ -426,8 +427,11 @@ export const App = () => {
   for (const s of stagesData?.stages ?? []) {
     const en = s.stage === 'generate_feature_masks'
       ? params.featureMaskEnabled
-      : s.stage === 'generate_training_masks' ? params.trainingMaskEnabled : true
-    const toggleable = s.stage === 'generate_feature_masks' || s.stage === 'generate_training_masks'
+      : s.stage === 'generate_training_masks' ? params.trainingMaskEnabled
+      : s.stage === 'dense_initialization' ? params.denseEnabled : true
+    const toggleable = s.stage === 'generate_feature_masks'
+      || s.stage === 'generate_training_masks'
+      || s.stage === 'dense_initialization'
     const done = stageIsFresh(s)
     const stale = s.status === 'stale' || (s.has_output && !done)
     const running = ['running', 'queued'].includes(s.status ?? '')

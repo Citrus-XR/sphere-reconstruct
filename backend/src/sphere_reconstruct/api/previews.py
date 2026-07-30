@@ -329,7 +329,7 @@ async def reconstruction_points(project_id: str):
 
 
 def _latest_transform_preview(project_dir: Path, filename: str) -> Path:
-    for stage in ("position_ground", "restore_metric_scale", "align_reconstruction"):
+    for stage in ("dense_initialization", "position_ground", "restore_metric_scale", "align_reconstruction"):
         path = project_dir / stage / "preview" / filename
         if path.is_file():
             return path

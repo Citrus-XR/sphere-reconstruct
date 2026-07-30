@@ -134,7 +134,10 @@ def _write_mask_artifact(
 def _execute(project: Path, raw_params: dict | None = None) -> Path:
     output = project / ".export_dataset.tmp"
     output.mkdir()
-    reconstruction = colmap_model.read_model(project / "position_ground" / "sparse" / "0")
+    dense_model = project / "dense_initialization" / "sparse" / "0"
+    if not dense_model.exists():
+        shutil.copytree(project / "position_ground" / "sparse" / "0", dense_model)
+    reconstruction = colmap_model.read_model(dense_model)
     names = [image.name for image in reconstruction.images.values()]
     spec = InputSpec(
         version=3,
