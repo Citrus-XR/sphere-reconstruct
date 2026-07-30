@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from ..colmap import metric_scale
 from ..colmap import model as colmap_model
@@ -16,7 +17,7 @@ from . import similarity_transform
 @register
 class RestoreMetricScale(Stage):
     name = StageName.RESTORE_METRIC_SCALE
-    impl_version = "1.0"
+    impl_version = "1.1"
 
     def normalize_params(self, raw: dict) -> dict:
         method = str(raw.get("method", "auto")).lower()
@@ -61,10 +62,8 @@ class RestoreMetricScale(Stage):
                     encoding="utf-8"
                 )
             )
-            rig_config = json.loads(
-                (ctx.project_dir / "prepare_images" / "rig_config.json").read_text(
-                    encoding="utf-8"
-                )
+            rig_config = _load_rig_config(
+                ctx.project_dir / "prepare_images" / "rig_config.json"
             )
             result = metric_scale.estimate_metric_scale(reconstruction, catalog, rig_config)
             if not result.get("metric") and ctx.params["method"] == "rig":
@@ -102,3 +101,8 @@ class RestoreMetricScale(Stage):
             "metric scale restoration complete", progress=0.99, key="log.metric_scale_complete"
         )
         return manifest
+
+
+def _load_rig_config(path: Path) -> list[dict]:
+    """rig_config が無い単眼/ERP dataset は物理 baseline を持たない。"""
+    return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else []

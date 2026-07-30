@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from sphere_reconstruct.colmap.metric_scale import estimate_metric_scale
 from sphere_reconstruct.colmap.model import Camera, Image, Point3D, Reconstruction
+from sphere_reconstruct.stages.restore_metric_scale import _load_rig_config
 
 
 def _reconstruction(model_units_per_meter: float) -> tuple[Reconstruction, dict, list[dict]]:
@@ -116,3 +117,7 @@ def test_back_to_back_rig_without_shared_capture_points_is_not_metric():
     assert result["baseline_pairs"] == 12
     assert result["stereo_points"] == 0
     assert result["stereo_captures"] == 0
+
+
+def test_dataset_without_rig_config_has_no_physical_baseline(tmp_path):
+    assert _load_rig_config(tmp_path / "rig_config.json") == []
