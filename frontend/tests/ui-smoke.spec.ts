@@ -478,6 +478,30 @@ test('middle mouse drag activates Scene View panning', async ({ page }) => {
   expect(mock.unexpectedRequests).toEqual([])
 })
 
+test('mouse wheel adjusts Scene View movement speed with centered feedback', async ({ page }) => {
+  const mock = await installUiMock(page)
+  await page.goto('/')
+
+  const canvas = page.locator('canvas').first()
+  const bounds = await canvas.boundingBox()
+  expect(bounds).not.toBeNull()
+  await page.mouse.move(bounds!.x + bounds!.width / 2, bounds!.y + bounds!.height / 2)
+
+  await page.mouse.wheel(0, 100)
+  const feedback = page.locator('.scene-speed-feedback')
+  await expect(feedback).toHaveText('0.5x')
+  let feedbackBounds = await feedback.boundingBox()
+  expect(feedbackBounds).not.toBeNull()
+  expect(Math.abs(feedbackBounds!.x + feedbackBounds!.width / 2 - (bounds!.x + bounds!.width / 2))).toBeLessThan(3)
+  expect(Math.abs(feedbackBounds!.y + feedbackBounds!.height / 2 - (bounds!.y + bounds!.height / 2))).toBeLessThan(3)
+
+  await page.mouse.wheel(0, -100)
+  await expect(feedback).toHaveText('1x')
+  await page.mouse.wheel(0, -100)
+  await expect(feedback).toHaveText('2x')
+  expect(mock.unexpectedRequests).toEqual([])
+})
+
 test('fisheye valid-region editor can switch its preview frame', async ({ page }) => {
   const mock = await installUiMock(page, { frameCount: 3 })
   await page.goto('/')

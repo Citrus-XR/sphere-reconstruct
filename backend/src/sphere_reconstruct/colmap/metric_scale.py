@@ -17,6 +17,7 @@ def estimate_metric_scale(
     rig_config: list[dict],
     *,
     min_pairs: int = 8,
+    min_stereo_points: int = 8,
     max_relative_mad: float = 0.02,
 ) -> dict:
     sensors = _sensor_centers(rig_config)
@@ -25,6 +26,7 @@ def estimate_metric_scale(
 
     registered = {image.name.replace("\\", "/"): image for image in reconstruction.images.values()}
     captures: dict[tuple[str, int], list[tuple[str, np.ndarray]]] = defaultdict(list)
+    observation_context: dict[int, tuple[tuple[str, int], str]] = {}
     for record in image_catalog["images"]:
         name = str(record["name"]).replace("\\", "/")
         image = registered.get(name)
@@ -33,9 +35,11 @@ def estimate_metric_scale(
         prefix = next((item for item in sensors if name.startswith(item)), None)
         if prefix is None:
             continue
-        captures[(str(record["source_id"]), int(record["capture_index"]))].append(
+        capture_key = (str(record["source_id"]), int(record["capture_index"]))
+        captures[capture_key].append(
             (prefix, np.asarray(image.camera_center, dtype=float))
         )
+        observation_context[image.image_id] = (capture_key, prefix)
 
     ratios = []
     physical_distances = []
@@ -58,6 +62,21 @@ def estimate_metric_scale(
             "metric": False,
             "reason": "too_few_registered_rig_baselines",
             "baseline_pairs": len(ratios),
+        }
+
+    stereo_points, stereo_captures = _stereo_observability(
+        reconstruction, observation_context
+    )
+    if stereo_points < min_stereo_points or stereo_captures < min_pairs:
+        return {
+            "applied": False,
+            "metric": False,
+            "reason": "rig_baseline_not_observable",
+            "baseline_pairs": len(ratios),
+            "stereo_points": stereo_points,
+            "stereo_captures": stereo_captures,
+            "imu_scale_role": "validation_only",
+            "imu_scale_reason": "accelerometer_double_integration_is_drift_unbounded",
         }
     ratios_array = np.asarray(ratios)
     median = float(np.median(ratios_array))
@@ -91,9 +110,34 @@ def estimate_metric_scale(
         "reconstructed_baseline_median": float(
             np.median(np.asarray(reconstructed_distances)[inliers])
         ),
+        "stereo_points": stereo_points,
+        "stereo_captures": stereo_captures,
         "imu_scale_role": "validation_only",
         "imu_scale_reason": "accelerometer_double_integration_is_drift_unbounded",
     }
+
+
+def _stereo_observability(
+    reconstruction: Reconstruction,
+    observation_context: dict[int, tuple[tuple[str, int], str]],
+) -> tuple[int, int]:
+    stereo_points = 0
+    constrained_captures: set[tuple[str, int]] = set()
+    for point in reconstruction.points3D.values():
+        sensors_by_capture: dict[tuple[str, int], set[str]] = defaultdict(set)
+        for image_id, _ in point.track:
+            context = observation_context.get(image_id)
+            if context is not None:
+                capture_key, sensor = context
+                sensors_by_capture[capture_key].add(sensor)
+        point_constrains_scale = False
+        for capture_key, sensors_in_capture in sensors_by_capture.items():
+            if len(sensors_in_capture) >= 2:
+                constrained_captures.add(capture_key)
+                point_constrains_scale = True
+        if point_constrains_scale:
+            stereo_points += 1
+    return stereo_points, len(constrained_captures)
 
 
 def _sensor_centers(rig_config: list[dict]) -> dict[str, np.ndarray]:

@@ -83,7 +83,7 @@ Sources
        ├─ generate_feature_masks -> extract_features -> match_features -> reconstruct
        └─ generate_training_masks ---------------------------------------------┐
   -> align_reconstruction           # rotation only                            │
-  -> restore_metric_scale           # physical rig baseline -> meters          │
+  -> restore_metric_scale           # observable stereo baseline -> meters     │
   -> position_ground                # trajectory-local ground -> Y=0           │
   -> export_dataset <---------------- resolved training / feature mask ---------┘
 ```
@@ -99,7 +99,7 @@ Sources
 | Matching | verified two-view graph | SfM 以降 |
 | Sparse reconstruction | registered cameras / points | Alignment 以降 |
 | Gravity alignment | rotation 済み sparse model | Scale 以降 |
-| Restore real size | meter-scale sparse model | Ground / export |
+| Restore real size | metric sparse model、または unscaled の明示 | Ground / export |
 | Position from predicted ground | origin 補正済み model | Export |
 | Export | LFStudio dataset root、preview、configs | なし |
 
@@ -136,7 +136,7 @@ General default は X5 indoor / outdoor と mixed phone-photo test の実測を�
 | Mapper | Global + gated fallback | Global を試し、失敗時は original DB から Incremental |
 | BA GPU | Capability dependent | Ceres CUDA + cuDSS の両方がある時だけ On |
 | Alignment | IMU rotation | Scale を変更しない |
-| Scale | Physical rig baseline | IMU 二重積分を使わない |
+| Scale | Observable physical baseline only | 共有 stereo 視差なしでは meter と推測しない |
 | Ground | Trajectory-local median | 水面 / roof / point density bias を抑える |
 | LFStudio | MRNF UI default + GUT + masks | Distorted camera を扱い、未検証の appearance 補正を既定にしない |
 
@@ -317,9 +317,13 @@ Parktest は 1,694 frame 中 1,501 inliers、time offset 15 ms で整列し、ca
 ### Restore real size
 
 IMU orientation だけでは SfM scale は決まらない。Acceleration 二重積分は bias が距離へ発散するため、
-scale 推定には使わない。Known physical sensor baseline と、同じ capture の reconstructed camera-center
-distance の robust median から meter scale を復元する。Baseline 不明 source では推測しない。Parktest は
-1,694 / 1,694 baseline が inlier で、physical / reconstructed median とも 0.0322733 m、scale factor は 1.0。
+scale 推定には使わない。Known physical sensor baseline は、同じ capture の複数 sensor が十分な 3D point を
+共有し、baseline が reprojection objective から観測可能な場合だけ meter scale の根拠にする。
+
+Rig 外参を固定すると reconstructed sensor distance は設定 baseline と常に一致するため、その一致だけで metric
+と判定するのは循環論法。Parktest の背面 dual-fisheye は共有 stereo 視差が不足し、intrinsics BA 後も camera
+trajectory scale が 1.72 倍変化した。従ってこの source は meter と表示せず、VIO / control point / overlapping
+stereo など独立の尺度拘束が得られるまで unscaled とする。
 
 ### Position from predicted ground
 
@@ -439,6 +443,15 @@ FastDVDnet preprocessing と raw training を 30k まで比較した。
 dependency は削除した。Night scene は raw image + SIFT pose を基準にし、appearance 補正は別の opt-in
 比較として扱う。
 
+### Parktest pose refinement
+
+Fixed-rig BA で per-sensor focal length、principal point、fisheye distortion と各 frame pose を再最適化し、
+弱い 46 / 3,388 images を training dataset から除いた。COLMAP mean reprojection error は 0.941 px から
+0.829 px へ低下し、front camera の 2 px 超 observation は 17.5% から 9.1%、back は 12.5% から 7.7% へ
+減少した。同じ MRNF + GUT + mask、2M / 2048、PPISP off の 30k training は visual comparison で detail と
+全体画質が改善し、遠景の大 Gaussian も問題を生じなかった。ただし細い pole 等は理想精度に未達で、次の改善は
+Gaussian cap ではなく calibration prior、weak-frame policy、または visual-inertial pose constraint を対象にする。
+
 ## Frontend UI
 
 Frontend は React 19 + TypeScript + Vite、Scene View は React Three Fiber / Three.js。Toolbar と primary
@@ -450,6 +463,9 @@ Icon は [Icônes Fluent collection](https://icones.js.org/collection/fluent) �
 Scene grid は finite double-sided plane、depth-test on / depth-write off。Ground positioning 済み model は
 viewer Y=0 に置き、opaque alpha-tested point depth の後ろへ描画するため、view rotation 時に grid が消える、
 点群を透過して前面へ張り付く、巨大 infinite plane の precision flicker を避ける。
+
+Scene View の wheel は fly / middle-pan の移動速度を `0.125x` から `16x` の倍数段階で変更し、変更値を view
+中央へ短時間表示する。Wheel 自体は camera position を前後移動しないため、inspection 中に視点を崩さない。
 
 ## Architecture and extension
 

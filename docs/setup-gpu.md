@@ -202,9 +202,15 @@ decision loop は前回採用 frame に依存するため sequential のまま�
 INSV native は `offset_v3` の front / back MEI calibration を別々の `OPENCV_FISHEYE` へ fit する。
 COLMAP perspective fisheye は forward hemisphere 専用なので、valid radius は calibrated 180° radius の
 scalar clamp にしない。Principal point、fx / fy、k1–k4 から pixel ごとの ray angle を評価し、89.55° 未満と
-physical image circle の積集合を mask にする。Reliable physical intrinsics / rig extrinsics は固定し、全
-camera が固定済みなら view-graph calibration を skip する。Physical circle schema v2 は image-edge
-coordinates を使う。旧 schema の saved circle は移動せず UI で review / resave を要求する。
+physical image circle の積集合を mask にする。Physical calibration は initialization prior とし、full
+registration 後の BA では per-sensor intrinsics を refine できる。Metric scale を保持する場合は rig extrinsics
+を固定する。全 camera が固定済みなら mapper 前の view-graph calibration は skip する。Physical circle schema
+v2 は image-edge coordinates を使う。旧 schema の saved circle は移動せず UI で review / resave を要求する。
+
+Physical baseline は、同じ capture の複数 sensor が共有 3D point を持つ時だけ global scale を拘束する。背面
+dual-fisheye のように共有 stereo 視差が無い rig では、設定 baseline と reconstructed sensor spacing の一致は
+metric scale の証拠にならない。Parktest の fixed-rig intrinsics BA は reprojection error を 0.941 px から
+0.829 px へ改善した一方、trajectory scale が 1.72 倍変化したため、独立の尺度拘束なしでは meter と表示しない。
 
 Single-source video は Sequential + loop closure + transitive matching。COLMAP 4.1.1 は folder-major sensor
 境界を誤った temporal pair として展開するため、runtime は upstream
@@ -289,6 +295,10 @@ means LR 6.4 倍、scaling LR 約 2.86 倍で、parktest の scene scale 22.895 
 同じ dataset を UI default MRNF + GUT + segment mask、PPISP off、2M / 2048 で再学習すると 30,000 step を
 61分18秒で完走した。10 m 超 splat は 12,434、10 m 超かつ opacity 0.5 超は 1,091 へ減少した。ただし
 50 m 超が 1,404 残るため、runtime success と数値改善の後にも sky / ground separation の visual acceptance を行う。
+
+Fixed-rig intrinsics BA + weak-image filter の A/B training は detail と全体画質を改善し、増加した遠景の大
+Gaussian も visual issue にならなかった。Gaussian scale count だけで quality を reject せず、同一 view の
+thin-object ghosting、sky / ground separation、novel-view stability を最終判定に使う。
 
 疎点群は連続 surface ではない。Export statistics の sparse-point radius median / P95 / P99 / maximum で裾を
 確認し、P99 / median が 5 を超える場合は遠景・小視差点が広いことを示す warning として扱う。真の遠景まで

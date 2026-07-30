@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from sphere_reconstruct.colmap.metric_scale import estimate_metric_scale
-from sphere_reconstruct.colmap.model import Camera, Image, Reconstruction
+from sphere_reconstruct.colmap.model import Camera, Image, Point3D, Reconstruction
 
 
 def _reconstruction(model_units_per_meter: float) -> tuple[Reconstruction, dict, list[dict]]:
@@ -13,6 +13,7 @@ def _reconstruction(model_units_per_meter: float) -> tuple[Reconstruction, dict,
     }
     physical_baseline = 0.032
     images = {}
+    points = {}
     records = []
     for capture in range(12):
         front_center = (float(capture), 0.0, 0.0)
@@ -41,6 +42,14 @@ def _reconstruction(model_units_per_meter: float) -> tuple[Reconstruction, dict,
                     "capture_index": capture,
                 }
             )
+        point_id = capture + 1
+        points[point_id] = Point3D(
+            point_id,
+            (float(capture), 0.0, 4.0),
+            (128, 128, 128),
+            0.5,
+            [(capture * 2 + 1, 0), (capture * 2 + 2, 0)],
+        )
     rig = [
         {
             "cameras": [
@@ -56,7 +65,7 @@ def _reconstruction(model_units_per_meter: float) -> tuple[Reconstruction, dict,
             ]
         }
     ]
-    return Reconstruction(cameras, images, {}), {"images": records}, rig
+    return Reconstruction(cameras, images, points), {"images": records}, rig
 
 
 def test_normalized_rig_recovers_meter_scale():
@@ -69,6 +78,8 @@ def test_normalized_rig_recovers_meter_scale():
     assert result["model_units_per_meter"] == 0.0025
     assert result["scale_factor"] == 400.0
     assert result["baseline_pairs"] == 12
+    assert result["stereo_points"] == 12
+    assert result["stereo_captures"] == 12
     assert result["relative_mad"] < 1e-12
 
 
@@ -92,3 +103,16 @@ def test_monocular_rig_does_not_guess_scale_from_imu():
         "metric": False,
         "reason": "rig_has_no_physical_baseline",
     }
+
+
+def test_back_to_back_rig_without_shared_capture_points_is_not_metric():
+    reconstruction, catalog, rig = _reconstruction(1.0)
+    reconstruction.points3D.clear()
+
+    result = estimate_metric_scale(reconstruction, catalog, rig)
+
+    assert result["metric"] is False
+    assert result["reason"] == "rig_baseline_not_observable"
+    assert result["baseline_pairs"] == 12
+    assert result["stereo_points"] == 0
+    assert result["stereo_captures"] == 0

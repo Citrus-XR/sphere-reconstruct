@@ -1,11 +1,17 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { Canvas, useThree, useFrame } from '@react-three/fiber'
 import { GizmoHelper, GizmoViewport, Grid } from '@react-three/drei'
 import * as THREE from 'three'
 import { fetchPoints, type ParsedPoints, type ReconstructionData } from '../api/client'
 import { GlassSurface } from '../components/GlassSurface'
 import { AppIcon } from '../components/AppIcon'
-import { composeViewQuaternion, configureGridMaterial, panViewPosition } from './viewMath'
+import {
+  composeViewQuaternion,
+  configureGridMaterial,
+  formatMovementSpeed,
+  panViewPosition,
+  stepMovementSpeed,
+} from './viewMath'
 import { useSettings } from '../ui/settings'
 
 const useCircleTexture = () =>
@@ -95,14 +101,19 @@ const typing = () => {
 
 const PITCH_LIMIT = Math.PI / 2 - 0.01
 
-const FlyControls = ({ scale, center, selectedPos }: {
-  scale: number; center: THREE.Vector3; selectedPos: THREE.Vector3 | null
+const FlyControls = ({ scale, center, selectedPos, onSpeedChange }: {
+  scale: number
+  center: THREE.Vector3
+  selectedPos: THREE.Vector3 | null
+  onSpeedChange: (speed: number) => void
 }) => {
   const { camera, gl } = useThree()
   const interaction = useRef<'look' | 'pan' | null>(null)
   const capturedPointer = useRef<number | null>(null)
   const keys = useRef<Record<string, boolean>>({})
   const angles = useRef({ yaw: 0, pitch: 0, roll: 0 })
+  const speedMultiplier = useRef(1)
+  const wheelAccumulator = useRef(0)
 
   const applyOrientation = () => {
     const value = angles.current
@@ -162,15 +173,34 @@ const FlyControls = ({ scale, center, selectedPos }: {
         )
         applyOrientation()
       } else if (interaction.current === 'pan') {
-        panViewPosition(camera.position, camera.quaternion, e.movementX, e.movementY, scale)
+        panViewPosition(
+          camera.position,
+          camera.quaternion,
+          e.movementX,
+          e.movementY,
+          scale * speedMultiplier.current,
+        )
       }
     }
     const onCtx = (e: Event) => e.preventDefault()
     const onAux = (e: MouseEvent) => { if (e.button === 1) e.preventDefault() }
     const onWheel = (e: WheelEvent) => {
       e.preventDefault()
-      const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion)
-      camera.position.addScaledVector(fwd, -e.deltaY * scale * 0.0009)
+      const normalizedDelta = e.deltaY * (
+        e.deltaMode === WheelEvent.DOM_DELTA_LINE
+          ? 16
+          : e.deltaMode === WheelEvent.DOM_DELTA_PAGE
+            ? dom.clientHeight
+            : 1
+      )
+      wheelAccumulator.current += normalizedDelta
+      if (Math.abs(wheelAccumulator.current) < 50) return
+      speedMultiplier.current = stepMovementSpeed(
+        speedMultiplier.current,
+        wheelAccumulator.current < 0 ? 1 : -1,
+      )
+      wheelAccumulator.current = 0
+      onSpeedChange(speedMultiplier.current)
     }
     const kd = (e: KeyboardEvent) => {
       if (typing()) return
@@ -202,7 +232,7 @@ const FlyControls = ({ scale, center, selectedPos }: {
       window.removeEventListener('keydown', kd); window.removeEventListener('keyup', ku)
       stopInteraction()
     }
-  }, [camera, gl, scale, center, selectedPos])
+  }, [camera, gl, scale, center, selectedPos, onSpeedChange])
 
   useFrame((_, dt) => {
     const k = keys.current
@@ -220,7 +250,8 @@ const FlyControls = ({ scale, center, selectedPos }: {
       (k.KeyS || k.ArrowDown ? 1 : 0) - (k.KeyW || k.ArrowUp ? 1 : 0),
     )
     if (v.lengthSq() === 0) return
-    const speed = scale * 0.9 * dt * (k.ShiftLeft || k.ShiftRight ? 3 : 1)
+    const speed = scale * 0.9 * speedMultiplier.current * dt
+      * (k.ShiftLeft || k.ShiftRight ? 3 : 1)
     v.normalize().multiplyScalar(speed).applyQuaternion(camera.quaternion)
     camera.position.add(v)
   })
@@ -241,6 +272,9 @@ export const PointCloudViewer = ({
   const [pointSize, setPointSize] = useState(2.5)
   const [showGrid, setShowGrid] = useState(true)
   const [showCenter, setShowCenter] = useState(true)
+  const [speedNotice, setSpeedNotice] = useState<{ value: number; revision: number } | null>(null)
+  const speedNoticeRevision = useRef(0)
+  const speedNoticeTimer = useRef<number | null>(null)
   // 背景色: 明示指定が無ければテーマの --bg に追従する (テーマ切替で更新).
   const [bgOverride, setBgOverride] = useState<string | null>(null)
   const [themeBg, setThemeBg] = useState('#171717')
@@ -249,6 +283,20 @@ export const PointCloudViewer = ({
     if (v) setThemeBg(v)
   }, [theme])
   const bg = bgOverride ?? themeBg
+
+  const showSpeedNotice = useCallback((value: number) => {
+    speedNoticeRevision.current += 1
+    setSpeedNotice({ value, revision: speedNoticeRevision.current })
+    if (speedNoticeTimer.current !== null) window.clearTimeout(speedNoticeTimer.current)
+    speedNoticeTimer.current = window.setTimeout(() => {
+      setSpeedNotice(null)
+      speedNoticeTimer.current = null
+    }, 900)
+  }, [])
+
+  useEffect(() => () => {
+    if (speedNoticeTimer.current !== null) window.clearTimeout(speedNoticeTimer.current)
+  }, [])
 
   useEffect(() => {
     let alive = true
@@ -306,6 +354,12 @@ export const PointCloudViewer = ({
         </div>
       </GlassSurface>
 
+      {speedNotice && (
+        <div key={speedNotice.revision} className="scene-speed-feedback" role="status" aria-live="polite">
+          {formatMovementSpeed(speedNotice.value)}
+        </div>
+      )}
+
       <Canvas camera={{ position: [0, 0, 10], near: 0.01, far: 100000, fov: 55 }}>
         <color attach="background" args={[bg]} />
         <ambientLight intensity={0.9} />
@@ -321,7 +375,8 @@ export const PointCloudViewer = ({
             <meshBasicMaterial color="#ff5577" />
           </mesh>
         )}
-        <FlyControls scale={scene.scale} center={scene.center} selectedPos={selectedPos} />
+        <FlyControls scale={scene.scale} center={scene.center} selectedPos={selectedPos}
+          onSpeedChange={showSpeedNotice} />
         <GizmoHelper alignment="top-right" margin={[56, 92]}>
           <GizmoViewport axisColors={['#ff5566', '#4caf50', '#4488ff']} labelColor="#fff" />
         </GizmoHelper>

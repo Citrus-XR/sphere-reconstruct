@@ -1,5 +1,23 @@
 import * as THREE from 'three'
 
+export const MOVEMENT_SPEED_MULTIPLIERS = [0.125, 0.25, 0.5, 1, 2, 4, 8, 16] as const
+
+export const stepMovementSpeed = (current: number, direction: -1 | 1): number => {
+  const currentIndex = MOVEMENT_SPEED_MULTIPLIERS.reduce((closest, value, index) => (
+    Math.abs(value - current) < Math.abs(MOVEMENT_SPEED_MULTIPLIERS[closest] - current)
+      ? index
+      : closest
+  ), 0)
+  const nextIndex = THREE.MathUtils.clamp(
+    currentIndex + direction,
+    0,
+    MOVEMENT_SPEED_MULTIPLIERS.length - 1,
+  )
+  return MOVEMENT_SPEED_MULTIPLIERS[nextIndex]
+}
+
+export const formatMovementSpeed = (value: number): string => `${value}x`
+
 // Local quaternion の累積は通常 mouse look に roll を混入させるため、YXZ から毎回再構成する。
 export const composeViewQuaternion = (
   yaw: number,

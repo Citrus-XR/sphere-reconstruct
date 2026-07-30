@@ -131,7 +131,7 @@ input[type="color"] { width: 28px; height: 20px; padding: 1px; border: 1px solid
 
 .error { color: var(--error); }
 
-/* ===== Unity 風 IDE レイアウト ===== */
+/* ===== IDE レイアウト ===== */
 .ide {
   position: fixed; inset: 0;
   display: grid;
@@ -222,6 +222,16 @@ input[type="color"] { width: 28px; height: 20px; padding: 1px; border: 1px solid
   display: flex; align-items: center; gap: 9px; padding: 5px 9px; border-radius: 12px; font-size: 11px;
   font-family: var(--mono-font); }
 .scene-metric { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+.scene-speed-feedback { position: absolute; left: 50%; top: 50%; z-index: 8;
+  transform: translate(-50%, -50%); pointer-events: none; min-width: 58px; padding: 8px 14px;
+  border: 1px solid var(--glass-border); border-radius: 999px; background: var(--glass-strong);
+  box-shadow: var(--glass-shadow); backdrop-filter: blur(14px) saturate(125%); color: var(--fg);
+  font: 600 15px/1 var(--mono-font); text-align: center; letter-spacing: .02em;
+  animation: scene-speed-feedback-in 140ms ease-out; }
+@keyframes scene-speed-feedback-in {
+  from { opacity: 0; transform: translate(-50%, -50%) scale(.88); }
+  to { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+}
 
 /* ===== テーマ手動切替 (data-theme が prefers-color-scheme を上書き) ===== */
 :root[data-theme="light"] {
@@ -321,7 +331,7 @@ input[type="color"] { width: 28px; height: 20px; padding: 1px; border: 1px solid
 .seg button.on { background: var(--accent); color: #fff; }
 
 @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
-  .ide-top, .ide-status, .modal, .pop, .scene-toolbar, .scene-info, .flexlayout__tab {
+  .ide-top, .ide-status, .modal, .pop, .scene-toolbar, .scene-info, .scene-speed-feedback, .flexlayout__tab {
     background: var(--bg-elev);
   }
   .liquid-glass-background { display: none; }
@@ -330,6 +340,7 @@ input[type="color"] { width: 28px; height: 20px; padding: 1px; border: 1px solid
 @media (prefers-reduced-motion: reduce) {
   .btn, .liquid-glass-background .glass { transition: none !important; }
   .btn:hover:not(:disabled), .btn:active:not(:disabled) { transform: none; }
+  .scene-speed-feedback { animation: none; }
 }
 
 /* Photos と Dataset Camera が共有する Inspector の視覚契約. */

@@ -4,7 +4,7 @@ import { api, type Project } from '../api/client'
 import { useSettings } from '../ui/settings'
 import { AppIcon } from './AppIcon'
 
-// Unity Hub 風のプロジェクト管理ウィンドウ: 一覧 (更新時刻降順) / 新規作成 (名前入力) /
+// ローカルプロジェクト管理ウィンドウ: 一覧 (更新時刻降順) / 新規作成 (名前入力) /
 // 削除 (ディスクから完全削除, ソース動画は消さない, 確認あり).
 export const ProjectManager = ({
   projects, currentId, onSelect, onClose,

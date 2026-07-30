@@ -1,6 +1,12 @@
 import { expect, test } from '@playwright/test'
 import * as THREE from 'three'
-import { composeViewQuaternion, configureGridMaterial, panViewPosition } from '../src/viewers/viewMath'
+import {
+  composeViewQuaternion,
+  configureGridMaterial,
+  formatMovementSpeed,
+  panViewPosition,
+  stepMovementSpeed,
+} from '../src/viewers/viewMath'
 
 test('mouse yaw and pitch do not introduce camera roll', () => {
   for (const [yaw, pitch] of [[0.8, 0.4], [-1.7, 0.9], [2.4, -0.7]]) {
@@ -49,4 +55,13 @@ test('scene grid keeps perspective depth without occluding point geometry', () =
   expect(material.side).toBe(THREE.DoubleSide)
   expect(material.polygonOffset).toBe(true)
   expect(material.polygonOffsetFactor).toBe(1)
+})
+
+test('movement speed follows bounded half and double steps', () => {
+  expect(stepMovementSpeed(1, -1)).toBe(0.5)
+  expect(stepMovementSpeed(0.5, -1)).toBe(0.25)
+  expect(stepMovementSpeed(0.125, -1)).toBe(0.125)
+  expect(stepMovementSpeed(1, 1)).toBe(2)
+  expect(stepMovementSpeed(16, 1)).toBe(16)
+  expect(formatMovementSpeed(0.5)).toBe('0.5x')
 })
