@@ -29,6 +29,12 @@ export const sceneClippingPlanes = (sceneScale: number, speedMultiplier: number)
   return { near, far }
 }
 
+export const wheelZoomDistance = (
+  sceneScale: number,
+  wheelDelta: number,
+  speedMultiplier: number,
+): number => -wheelDelta * sceneScale * 0.0009 * speedMultiplier
+
 // Local quaternion の累積は通常 mouse look に roll を混入させるため、YXZ から毎回再構成する。
 export const composeViewQuaternion = (
   yaw: number,

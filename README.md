@@ -465,8 +465,9 @@ viewer Y=0 に置き、opaque alpha-tested point depth の後ろへ描画する�
 点群を透過して前面へ張り付く、巨大 infinite plane の precision flicker を避ける。
 
 Scene View の wheel は fly / middle-pan の移動速度を `0.001x` から `16x` の対数段階で変更し、変更値を view
-中央へ短時間表示する。Near / Far clipping plane も scene scale と速度倍率へ追従し、低速 detail inspection
-では Near を縮小して Far を scene 周囲へ絞る。Wheel 自体は camera position を前後移動しない。
+中央へ短時間表示する。速度変更は right-look 中の wheel に限定する。通常 wheel は current speed multiplier に
+比例して camera を前後移動する。Near / Far clipping plane も scene scale と速度倍率へ追従し、低速 detail
+inspection では Near を縮小して Far を scene 周囲へ絞る。
 
 ## Architecture and extension
 

@@ -7,6 +7,7 @@ import {
   panViewPosition,
   sceneClippingPlanes,
   stepMovementSpeed,
+  wheelZoomDistance,
 } from '../src/viewers/viewMath'
 
 test('mouse yaw and pitch do not introduce camera roll', () => {
@@ -72,4 +73,10 @@ test('camera clipping planes follow scene scale and movement speed', () => {
   expect(sceneClippingPlanes(1000, 1)).toEqual({ near: 0.01, far: 100000 })
   expect(sceneClippingPlanes(1000, 0.001)).toEqual({ near: 0.00001, far: 2000 })
   expect(sceneClippingPlanes(1000, 16)).toEqual({ near: 0.16, far: 1600000 })
+})
+
+test('ordinary wheel zoom distance follows the movement-speed multiplier', () => {
+  expect(wheelZoomDistance(1000, 100, 1)).toBeCloseTo(-90)
+  expect(wheelZoomDistance(1000, 100, 0.5)).toBeCloseTo(-45)
+  expect(wheelZoomDistance(1000, -100, 2)).toBeCloseTo(180)
 })

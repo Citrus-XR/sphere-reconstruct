@@ -399,7 +399,8 @@ input[type="color"] { width: 28px; height: 20px; padding: 1px; border: 1px solid
 /* 処理中の点滅バッジ (黄) */
 @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: .2; } }
 .hier-badge.running { background: #f5c518 !important; animation: blink .8s infinite; }
-.btn.stop { background: var(--error); }
+.btn.stop { background: var(--error); color: #fff; border-color: color-mix(in srgb, var(--error) 76%, white); }
+.btn.stop svg { color: #fff; }
 
 :root[data-theme="dark"] .dock-content { color: var(--fg); }
 :root[data-theme="dark"] .dock-content .btn:not(.btn-secondary):not(.stop) {

@@ -498,6 +498,9 @@ test('mouse wheel adjusts Scene View movement speed with centered feedback', asy
   await page.mouse.move(bounds!.x + bounds!.width / 2, bounds!.y + bounds!.height / 2)
 
   await page.mouse.wheel(0, 100)
+  await expect(page.locator('.scene-speed-feedback')).toHaveCount(0)
+  await page.mouse.down({ button: 'right' })
+  await page.mouse.wheel(0, 100)
   const feedback = page.locator('.scene-speed-feedback')
   await expect(feedback).toHaveText('0.5x')
   let feedbackBounds = await feedback.boundingBox()
@@ -509,6 +512,23 @@ test('mouse wheel adjusts Scene View movement speed with centered feedback', asy
   await expect(feedback).toHaveText('1x')
   await page.mouse.wheel(0, -100)
   await expect(feedback).toHaveText('2x')
+  await page.mouse.up({ button: 'right' })
+  expect(mock.unexpectedRequests).toEqual([])
+})
+
+test('stop buttons keep white labels and icons in dark theme', async ({ page }) => {
+  const mock = await installUiMock(page, { runningStage: 'extract_frames', runningProgress: 0.42 })
+  await page.goto('/')
+
+  await page.getByTitle('Settings').click()
+  await page.locator('.pop select').first().selectOption('dark')
+  const stopButtons = page.getByRole('button', { name: 'Stop' })
+  await expect(stopButtons).toHaveCount(2)
+  for (const stopButton of await stopButtons.all()) {
+    await expect(stopButton).toHaveCSS('color', 'rgb(255, 255, 255)')
+    const icon = stopButton.locator('svg')
+    if (await icon.count()) await expect(icon).toHaveCSS('color', 'rgb(255, 255, 255)')
+  }
   expect(mock.unexpectedRequests).toEqual([])
 })
 

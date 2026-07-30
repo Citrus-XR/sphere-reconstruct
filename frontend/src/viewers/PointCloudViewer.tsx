@@ -12,6 +12,7 @@ import {
   panViewPosition,
   sceneClippingPlanes,
   stepMovementSpeed,
+  wheelZoomDistance,
 } from './viewMath'
 import { useSettings } from '../ui/settings'
 
@@ -204,6 +205,15 @@ const FlyControls = ({ scale, center, selectedPos, onSpeedChange }: {
             ? dom.clientHeight
             : 1
       )
+      if (interaction.current !== 'look') {
+        wheelAccumulator.current = 0
+        const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion)
+        camera.position.addScaledVector(
+          forward,
+          wheelZoomDistance(scale, normalizedDelta, speedMultiplier.current),
+        )
+        return
+      }
       wheelAccumulator.current += normalizedDelta
       if (Math.abs(wheelAccumulator.current) < 50) return
       speedMultiplier.current = stepMovementSpeed(
