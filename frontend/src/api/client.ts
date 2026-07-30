@@ -15,7 +15,7 @@ export type PipelineState =
   | 'exported'
 
 export type SourceRole = 'primary' | 'supplemental'
-export type SourceAdapter = 'insta360_insv' | 'generic_video' | 'generic_images'
+export type SourceAdapter = string
 export type MediaKind = 'video' | 'images'
 export type Projection = 'dual_fisheye' | 'equirectangular' | 'perspective'
 export type MaskPurpose = 'feature' | 'training'
@@ -286,6 +286,13 @@ export interface StagesStatus {
 export interface LensCircle {
   cx: number
   cy: number
+  r: number
+  operations: RegionOperation[]
+}
+export interface RegionOperation {
+  mode: 'add' | 'subtract'
+  x: number
+  y: number
   r: number
 }
 export interface FisheyeRegion {

@@ -1,7 +1,7 @@
 """魚眼の有効領域 (円) の永続化.
 
-X5 の各レンズ画像は円形の有効領域を持ち, 外周は黒縁 + レンズ端のケラレ/反射/汚れが
-乗る. 画像から初期円を推定し, UI で中心と半径を確認・調整した結果を project 直下に保存する.
+円形 sensor image の外周にある黒縁・ケラレ・反射・汚れを除くため、画像から初期円を
+推定し、UI で中心と半径を確認・調整した結果を project 直下に保存する。
 
 保存形式 (`<project>/fisheye_regions.json`) は source ID ごとに分離する。
 cx/cy/r は画像幅 W に対する比 (魚眼は正方なので H==W 前提, cy も W 基準で扱う).
@@ -13,14 +13,18 @@ import json
 from pathlib import Path
 
 FILENAME = "fisheye_regions.json"
-REGION_VERSION = 2
+REGION_VERSION = 3
 # 既定半径 (正規化). 実測でレンズ有効円がこの比に収まることが多い.
 DEFAULT_R_NORM = 0.459
-DEFAULT_LENS = {"cx": 0.5, "cy": 0.5, "r": DEFAULT_R_NORM}
+MAX_CUSTOM_OPERATIONS = 2048
+
+
+def _default_lens() -> dict:
+    return {"cx": 0.5, "cy": 0.5, "r": DEFAULT_R_NORM, "operations": []}
 
 
 def default_region() -> dict:
-    return {"lens0": dict(DEFAULT_LENS), "lens1": dict(DEFAULT_LENS)}
+    return {"lens0": _default_lens(), "lens1": _default_lens()}
 
 
 def region_path(project_dir: Path) -> Path:
@@ -40,12 +44,13 @@ def load_region(project_dir: Path, source_id: str) -> dict:
     for lens in ("lens0", "lens1"):
         if isinstance(source_data.get(lens), dict):
             out[lens] = {
-                **DEFAULT_LENS,
-                **{
-                    key: float(source_data[lens][key])
-                    for key in ("cx", "cy", "r")
-                    if key in source_data[lens]
-                },
+                "cx": 0.5,
+                "cy": 0.5,
+                "r": max(
+                    0.01,
+                    min(0.75, float(source_data[lens].get("r", DEFAULT_R_NORM))),
+                ),
+                "operations": _normalize_operations(source_data[lens].get("operations", [])),
             }
     return out
 
@@ -86,19 +91,20 @@ def detect_lens_region(image_path: Path) -> dict:
     binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
     contours, _hierarchy = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
-        return dict(DEFAULT_LENS)
+        return _default_lens()
     contour = max(contours, key=cv2.contourArea)
     if cv2.contourArea(contour) < small.shape[0] * small.shape[1] * 0.2:
-        return dict(DEFAULT_LENS)
-    (center_x, center_y), radius = cv2.minEnclosingCircle(contour)
+        return _default_lens()
+    (_center_x, _center_y), radius = cv2.minEnclosingCircle(contour)
     radius_normalized = radius / small.shape[1]
     # 円が画像端で切れている camera は min-enclosing circle が色収差・反射を含む外周まで拾う。
     # 完全に見える円は 3%、切れた円は 10% 内側へ寄せ、UI で必要なら広げられる初期値にする。
     safety = 0.90 if radius_normalized > 0.5 else 0.97
     return {
-        "cx": _clamp01((center_x + 0.5) / small.shape[1]),
-        "cy": _clamp01((center_y + 0.5) / small.shape[0]),
+        "cx": 0.5,
+        "cy": 0.5,
         "r": max(0.3, min(0.52, radius_normalized * safety)),
+        "operations": [],
     }
 
 
@@ -109,9 +115,10 @@ def save_region(project_dir: Path, source_id: str, data: dict) -> dict:
         d = data.get(lens)
         if isinstance(d, dict):
             out[lens] = {
-                "cx": _clamp01(float(d.get("cx", 0.5))),
-                "cy": _clamp01(float(d.get("cy", 0.5))),
+                "cx": 0.5,
+                "cy": 0.5,
                 "r": max(0.01, min(0.75, float(d.get("r", DEFAULT_R_NORM)))),
+                "operations": _normalize_operations(d.get("operations", [])),
             }
     path = region_path(project_dir)
     document = (
@@ -139,3 +146,33 @@ def circle_px(lens_region: dict, width: int, height: int) -> tuple[float, float,
 
 def _clamp01(v: float) -> float:
     return max(0.0, min(1.0, v))
+
+
+def _normalize_operations(value) -> list[dict]:
+    if not isinstance(value, list):
+        raise ValueError("custom region operations は array でなければなりません")
+    if len(value) > MAX_CUSTOM_OPERATIONS:
+        raise ValueError(
+            f"custom region operations が上限を超えています: {len(value)} > {MAX_CUSTOM_OPERATIONS}"
+        )
+    operations = []
+    for index, operation in enumerate(value):
+        if not isinstance(operation, dict):
+            raise ValueError(f"custom region operation {index} が object ではありません")
+        mode = str(operation.get("mode", ""))
+        if mode not in {"add", "subtract"}:
+            raise ValueError(f"custom region operation {index} の mode が不正です: {mode}")
+        radius = float(operation.get("r", 0.0))
+        if not 0.002 <= radius <= 0.5:
+            raise ValueError(
+                f"custom region operation {index} の radius が範囲外です: {radius}"
+            )
+        operations.append(
+            {
+                "mode": mode,
+                "x": _clamp01(float(operation.get("x", 0.5))),
+                "y": _clamp01(float(operation.get("y", 0.5))),
+                "r": radius,
+            }
+        )
+    return operations

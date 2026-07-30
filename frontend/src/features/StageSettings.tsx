@@ -659,6 +659,15 @@ export const StageSettings = ({
             </label>
             <div className="hint">{t('hint_optimizeFisheyeTrainingImages')}</div>
           </div>
+          <div className="ctl">
+            <label style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
+              <input type="checkbox" checked={params.lfstudioStockThinPrismWorkaround}
+                onChange={() => setParams({
+                  lfstudioStockThinPrismWorkaround: !params.lfstudioStockThinPrismWorkaround,
+                })} /> {t('lbl_lfstudioStockThinPrismWorkaround')}
+            </label>
+            <div className="hint">{t('hint_lfstudioStockThinPrismWorkaround')}</div>
+          </div>
           {exportInfo
             ? <div className="ctl">
                 <label>{t('exportDir')}</label>

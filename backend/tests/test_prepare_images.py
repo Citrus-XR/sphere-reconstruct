@@ -6,6 +6,9 @@ from pathlib import Path
 
 from PIL import Image
 
+from sphere_reconstruct.insta360 import camera_system
+from sphere_reconstruct.insta360.calibration import CalibSource, DualLensCalibration, MeiLensCalibration
+from sphere_reconstruct.insta360.metadata import WindowCropInfo
 from sphere_reconstruct.pipeline.stage import ProgressReporter, StageContext
 from sphere_reconstruct.stages.prepare_images import PrepareImages
 
@@ -229,9 +232,24 @@ def _write_documents(project, *, sources):
     for source in sources:
         inspection = {key: value for key, value in source.items() if key != "frames"}
         if source["projection"] == "dual_fisheye":
-            inspection["offset_v3"] = source.get("offset_v3", {"valid": False})
+            calibration = source.get("offset_v3", {"valid": False})
+            inspection["offset_v3"] = calibration
+            if calibration.get("valid"):
+                system = camera_system.from_offset_v3(
+                    DualLensCalibration(
+                        source=CalibSource.OFFSET_V3,
+                        lenses=[MeiLensCalibration(**lens) for lens in calibration["lenses"]],
+                    ),
+                    window_crop=WindowCropInfo(5376, 5376, 5312, 5312),
+                    rolling_shutter_readout_ms=21.244001,
+                )
+                relative = f"sources/{source['id']}/camera_system.json"
+                path = inspect / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(json.dumps(system.to_dict()))
+                inspection["camera_system_path"] = relative
         inspections.append(inspection)
-    (inspect / "sources.json").write_text(json.dumps({"version": 2, "sources": inspections}))
+    (inspect / "sources.json").write_text(json.dumps({"version": 3, "sources": inspections}))
     (extract / "manifest_frames.json").write_text(
         json.dumps(
             {

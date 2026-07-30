@@ -49,7 +49,7 @@ async def test_first_source_becomes_primary_and_role_can_be_swapped(tmp_path):
 
 
 def test_invalid_adapter_projection_combination_is_rejected():
-    with pytest.raises(ValueError, match="dual-fisheye"):
+    with pytest.raises(ValueError, match="dual_fisheye"):
         source_domain.ProjectSource(
             id="invalid",
             project_id="project",
@@ -59,6 +59,22 @@ def test_invalid_adapter_projection_combination_is_rejected():
             media_kind=source_domain.MediaKind.IMAGES,
             projection=source_domain.Projection.DUAL_FISHEYE,
             path="/images",
+            ordinal=0,
+            enabled=True,
+        )
+
+
+def test_unregistered_adapter_is_rejected_with_its_id():
+    with pytest.raises(ValueError, match="vendor.camera_v1"):
+        source_domain.ProjectSource(
+            id="unknown",
+            project_id="project",
+            label="unknown",
+            role=source_domain.SourceRole.PRIMARY,
+            adapter="vendor.camera_v1",
+            media_kind=source_domain.MediaKind.VIDEO,
+            projection=source_domain.Projection.DUAL_FISHEYE,
+            path="/capture.bin",
             ordinal=0,
             enabled=True,
         )

@@ -1,0 +1,29 @@
+diff --git a/src/training/rasterization/gsplat/Cameras.cuh b/src/training/rasterization/gsplat/Cameras.cuh
+index 5363ff8..9b2325c 100644
+--- a/src/training/rasterization/gsplat/Cameras.cuh
++++ b/src/training/rasterization/gsplat/Cameras.cuh
+@@ -1178,9 +1178,11 @@ struct ThinPrismFisheyeCameraModel
+     }
+ 
+     inline __device__ CameraRay image_point_to_camera_ray(glm::fvec2 image_point) const {
+-        auto uv = (image_point - glm::fvec2{parameters.principal_point[0],
+-                                            parameters.principal_point[1]}) /
+-                  glm::fvec2{parameters.focal_length[0], parameters.focal_length[1]};
++        const auto uv_distorted =
++            (image_point - glm::fvec2{parameters.principal_point[0],
++                                      parameters.principal_point[1]}) /
++            glm::fvec2{parameters.focal_length[0], parameters.focal_length[1]};
++        auto uv = uv_distorted;
+ 
+         // Iteratively remove tangential and thin prism distortion
+         auto const& thin_prism = parameters.thin_prism_coeffs;
+@@ -1192,8 +1194,7 @@ struct ThinPrismFisheyeCameraModel
+             auto const dr2 = uv.x * uv.x + uv.y * uv.y;
+             auto const dx = 2.f * p1 * uv.x * uv.y + p2 * (dr2 + 2.f * uv.x * uv.x) + sx1 * dr2;
+             auto const dy = p1 * (dr2 + 2.f * uv.y * uv.y) + 2.f * p2 * uv.x * uv.y + sy1 * dr2;
+-            uv.x -= dx;
+-            uv.y -= dy;
++            uv = uv_distorted - glm::fvec2{dx, dy};
+         }
+ 
+         auto const delta = length(uv);

@@ -415,24 +415,28 @@ def _complex_selection_filter(
     return ";\n".join(lines)
 
 
-def _paired_selection_filter(stream_index: int, chunks: list[list[int]]) -> str:
+def _paired_selection_filter(
+    stream_ordinal: int,
+    output_index: int,
+    chunks: list[list[int]],
+) -> str:
     """2-stream extraction 用に衝突しない label を持つ selection graph を作る。"""
     if not chunks or any(not chunk for chunk in chunks):
         raise ValueError("paired select には非空 chunk が必要です")
-    output = f"paired_selected{stream_index}"
+    output = f"paired_selected{output_index}"
     if len(chunks) == 1:
-        return f"[0:v:{stream_index}]select={_selection_expression(chunks[0])}[{output}]"
+        return f"[0:v:{stream_ordinal}]select={_selection_expression(chunks[0])}[{output}]"
 
-    chunk_labels = [f"paired_s{stream_index}_chunk{index}" for index in range(len(chunks))]
+    chunk_labels = [f"paired_s{output_index}_chunk{index}" for index in range(len(chunks))]
     lines = [
-        f"[0:v:{stream_index}]split={len(chunks)}"
+        f"[0:v:{stream_ordinal}]split={len(chunks)}"
         + "".join(f"[{label}]" for label in chunk_labels)
     ]
     selected_labels = []
     for index, (chunk, chunk_label) in enumerate(zip(chunks, chunk_labels, strict=True)):
         start = chunk[0]
         relative = [frame - start for frame in chunk]
-        selected = f"paired_s{stream_index}_selected{index}"
+        selected = f"paired_s{output_index}_selected{index}"
         lines.append(
             f"[{chunk_label}]trim=start_frame={start}:end_frame={chunk[-1] + 1},"
             f"select={_selection_expression(relative)},setpts=PTS-STARTPTS[{selected}]"
@@ -590,13 +594,14 @@ def extract_paired_frames(
     frame_indices: Sequence[int],
     out_dir_lens0: Path,
     out_dir_lens1: Path,
+    stream_ordinals: tuple[int, int] = (0, 1),
     ffmpeg_bin: str | None = None,
     progress: Callable[[int, int], None] | None = None,
     jpeg_quality: int = 3,
     max_filter_expression_chars: int = 3000,
     hwaccel: str | None = None,
 ) -> tuple[list[Path], list[Path]]:
-    """INSV 想定. stream 0 と stream 1 の同じ frame index を対で書き出す.
+    """二つの video stream の同じ decoded frame index を対で書き出す。
 
     1 process / 1 demux pass で両 stream を decode する。別 process にすると巨大な INSV を
     2 回読み、同じ storage 上では decode より重い I/O bottleneck になる。
@@ -606,6 +611,8 @@ def extract_paired_frames(
         raise ValueError("frame_indices は昇順かつ重複なしでなければなりません")
     if not indices:
         return [], []
+    if stream_ordinals[0] == stream_ordinals[1] or min(stream_ordinals) < 0:
+        raise ValueError(f"stream_ordinals が不正です: {stream_ordinals}")
 
     binary = _resolve_bin(ffmpeg_bin)
     for directory in (out_dir_lens0, out_dir_lens1):
@@ -618,7 +625,9 @@ def extract_paired_frames(
     chunks = _selection_chunks(indices, max_filter_expression_chars)
     filter_script = out_dir_lens0.parent / ".paired-select.txt"
     filter_script.write_text(
-        _paired_selection_filter(0, chunks) + ";\n" + _paired_selection_filter(1, chunks),
+        _paired_selection_filter(stream_ordinals[0], 0, chunks)
+        + ";\n"
+        + _paired_selection_filter(stream_ordinals[1], 1, chunks),
         encoding="utf-8",
     )
     args = [

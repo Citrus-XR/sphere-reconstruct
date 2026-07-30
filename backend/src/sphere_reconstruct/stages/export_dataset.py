@@ -28,7 +28,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from PIL import Image as PilImage
 
-from ..colmap import gravity_align, lichtfeld_config, train_profile, training_crop
+from ..colmap import gravity_align, lfstudio_compat, lichtfeld_config, train_profile, training_crop
 from ..colmap import model as colmap_model
 from ..colmap.input_workspace import InputSpec
 from ..domain.artifacts import FileRef, StageManifest
@@ -51,7 +51,7 @@ from ..settings import get_settings
 @register
 class ExportDataset(Stage):
     name = StageName.EXPORT_DATASET
-    impl_version = "2.3"
+    impl_version = "3.0"
 
     def collect_inputs(self, ctx: StageContext) -> list[FileRef]:
         candidates = [
@@ -97,6 +97,9 @@ class ExportDataset(Stage):
             "optimize_fisheye_training_images": bool(
                 raw.get("optimize_fisheye_training_images", True)
             ),
+            "lfstudio_stock_thin_prism_workaround": bool(
+                raw.get("lfstudio_stock_thin_prism_workaround", True)
+            ),
             "feature_masks_enabled": bool(raw.get("feature_masks_enabled", True)),
             "training_masks_enabled": bool(raw.get("training_masks_enabled", True)),
         }
@@ -123,20 +126,24 @@ class ExportDataset(Stage):
                 encoding="utf-8"
             )
         )
+        catalog_path = ctx.project_dir / "prepare_images" / "image_catalog.json"
+        catalog = (
+            json.loads(catalog_path.read_text(encoding="utf-8"))
+            if catalog_path.is_file()
+            else None
+        )
         export_recon = recon
         crop_plan: training_crop.CropPlan | None = None
         crop_info: dict = {"enabled": False, "requested": ctx.params["optimize_fisheye_training_images"]}
         if ctx.params["optimize_fisheye_training_images"]:
             jpegtran = training_crop.resolve_jpegtran(get_settings().binaries.jpegtran)
-            catalog_path = ctx.project_dir / "prepare_images" / "image_catalog.json"
             if jpegtran is None:
                 crop_info["skipped_reason"] = "jpegtran_unavailable"
                 ctx.progress.warn(
                     "jpegtran unavailable; preserving original training images",
                     key="log.export_crop_unavailable",
                 )
-            elif catalog_path.is_file():
-                catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
+            elif catalog is not None:
                 candidate = training_crop.build_plan(recon, catalog)
                 if candidate.changed:
                     crop_plan = candidate
@@ -160,6 +167,21 @@ class ExportDataset(Stage):
                     crop_info["skipped_reason"] = "no_circular_padding"
             else:
                 crop_info["skipped_reason"] = "image_catalog_unavailable"
+        compatibility_info = {
+            "requested": ctx.params["lfstudio_stock_thin_prism_workaround"],
+            "applied": False,
+            "consumer": "lichtfeld_stock",
+            "camera_reports": [],
+        }
+        if ctx.params["lfstudio_stock_thin_prism_workaround"]:
+            if catalog is None:
+                raise RuntimeError("LFStudio camera compatibility には image catalog が必要です")
+            export_recon, compatibility_info = lfstudio_compat.apply_stock_camera_workarounds(
+                export_recon,
+                catalog,
+                crop_plan,
+            )
+            compatibility_info["requested"] = True
         out = ctx.stage_out_dir
         outputs: list[FileRef] = []
         train_profile_data = train_profile.compute_profile(recon)
@@ -203,8 +225,9 @@ class ExportDataset(Stage):
             for source in model_dir.iterdir():
                 if source.is_file() and source.suffix.lower() in {".bin", ".txt", ".ini"}:
                     shutil.copy2(source, ds_sparse / source.name)
-            if crop_plan is not None:
+            if crop_plan is not None or compatibility_info["applied"]:
                 colmap_model.write_cameras_bin(ds_sparse / "cameras.bin", export_recon.cameras)
+            if crop_plan is not None:
                 model_crop_span = ProgressSpan(ctx.progress, 0.22, 0.25)
                 colmap_model.write_images_bin(
                     ds_sparse / "images.bin",
@@ -287,7 +310,7 @@ class ExportDataset(Stage):
                 raise RuntimeError("LFStudio export 検証に失敗しました: " + ", ".join(validation["errors"]))
             export_manifest = {
                 "format": "sphere-reconstruct-export",
-                "version": 2,
+                "version": 3,
                 "load_in_lichtfeld_studio": ".",
                 "camera_models": sorted({camera.model for camera in export_recon.cameras.values()}),
                 "images": len(recon.images),
@@ -297,6 +320,7 @@ class ExportDataset(Stage):
                 "mask_source": resolved_mask_source,
                 "image_source": "lossless_fisheye_crop" if crop_plan is not None else "original",
                 "training_crop": crop_info,
+                "lfstudio_camera_compatibility": compatibility_info,
                 "metric_scale": metric_scale_info,
                 "ground_position": ground_position_info,
                 "validation": validation,
@@ -348,6 +372,11 @@ class ExportDataset(Stage):
                     "max_width": cfg_info["recommended_max_width"],
                 },
             }
+            cfg_info["camera_compatibility"] = compatibility_info
+            if compatibility_info["applied"]:
+                cfg_info["gui_integration"]["warnings"].append(
+                    "stock_lfstudio_thin_prism_inverse_workaround_applied"
+                )
             tc_dir = out / "train_configs"
             tc_dir.mkdir(parents=True, exist_ok=True)
             for cname, cfg in configs.items():
@@ -384,7 +413,7 @@ class ExportDataset(Stage):
             "preview_points": preview_points,
             "total_points": len(recon.points3D),
             **recon.summary(),
-            "camera_models": sorted({camera.model for camera in recon.cameras.values()}),
+            "camera_models": sorted({camera.model for camera in export_recon.cameras.values()}),
             "mask_files": validation["matched_mask_count"] if validation else 0,
             "mask_source": (
                 mask_purpose.value
@@ -397,6 +426,7 @@ class ExportDataset(Stage):
             "lfstudio_training_metrics": "external",
             "source_registration": _source_registration(recon, spec),
             "training_crop": crop_info,
+            "lfstudio_camera_compatibility": compatibility_info,
             "metric_scale": metric_scale_info,
             "ground_position": ground_position_info,
         }

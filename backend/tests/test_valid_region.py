@@ -10,6 +10,25 @@ import pytest
 from sphere_reconstruct.imaging import valid_region
 
 
+def test_custom_region_circle_operations_apply_in_order():
+    region = {
+        "kind": "circle",
+        "cx": 0.5,
+        "cy": 0.5,
+        "r": 0.2,
+        "operations": [
+            {"mode": "add", "x": 0.8, "y": 0.5, "r": 0.08},
+            {"mode": "subtract", "x": 0.5, "y": 0.5, "r": 0.05},
+        ],
+    }
+
+    mask = valid_region.render_mask(region, 100, 100)
+
+    assert mask[50, 50] == 0
+    assert mask[50, 80] == 1
+    assert mask[10, 10] == 0
+
+
 def test_opencv_fisheye_mask_intersects_projection_and_physical_circle():
     width = height = 101
     region = {

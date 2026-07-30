@@ -95,11 +95,20 @@ def _protobuf_bytes(field: int, value: bytes) -> bytes:
 
 def test_parse_extra_metadata_fields_needed_for_imu_timestamps():
     gyro_config = _protobuf_varint(1, 32) + _protobuf_varint(2, 2000)
+    window_crop = b"".join(
+        (
+            _protobuf_varint(1, 5376),
+            _protobuf_varint(2, 5376),
+            _protobuf_varint(3, 5312),
+            _protobuf_varint(4, 5312),
+        )
+    )
     payload = b"".join(
         [
             _protobuf_bytes(2, b"Insta360 X5"),
             _protobuf_varint(24, 158_412_034_768),
             _varint((25 << 3) | 1) + struct.pack("<d", 21.244001388549805),
+            _protobuf_bytes(27, window_crop),
             _varint((28 << 3) | 1) + struct.pack("<d", 1.6),
             _protobuf_varint(29, 1),
             _protobuf_varint(62, 1),
@@ -115,3 +124,4 @@ def test_parse_extra_metadata_fields_needed_for_imu_timestamps():
     assert parsed.is_raw_gyro is True
     assert parsed.acc_range == 32
     assert parsed.gyro_range == 2000
+    assert parsed.window_crop == metadata.WindowCropInfo(5376, 5376, 5312, 5312)

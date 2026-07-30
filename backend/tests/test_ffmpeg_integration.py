@@ -24,7 +24,13 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def _make_dual_stream_mp4(dst: Path, duration: float = 2.0, fps: int = 10, size: str = "320x320") -> None:
+def _make_dual_stream_mp4(
+    dst: Path,
+    duration: float = 2.0,
+    fps: int = 10,
+    size: str = "320x320",
+    b_frames: int = 0,
+) -> None:
     """testsrc / smptebars 各 duration 秒 を 2 stream として mux した MP4 を作る."""
     args = [
         "ffmpeg",
@@ -48,6 +54,8 @@ def _make_dual_stream_mp4(dst: Path, duration: float = 2.0, fps: int = 10, size:
         "libx264",
         "-preset",
         "ultrafast",
+        "-bf",
+        str(b_frames),
         "-pix_fmt",
         "yuv420p",
         str(dst),
@@ -65,6 +73,34 @@ def test_ffprobe_detects_dual_streams(tmp_path: Path):
     a, b = pair
     assert a.width == 320 and b.width == 320
     assert a.fps == 10 and b.fps == 10
+
+    timings = ffprobe.frame_timings(mp4, stream_indices=(a.index, b.index))
+    assert len(timings[a.index]) == len(timings[b.index]) == 20
+    assert ffprobe.validate_synchronized_timings(
+        timings[a.index], timings[b.index], maximum_skew_sec=1e-6
+    ) == 0.0
+
+
+def test_packet_timings_restore_b_frame_presentation_order(tmp_path: Path):
+    mp4 = tmp_path / "dual-bframes.mp4"
+    _make_dual_stream_mp4(mp4, duration=1.0, fps=12, size="64x64", b_frames=2)
+    streams = ffprobe.probe(mp4).video_streams
+
+    timings = ffprobe.frame_timings(
+        mp4,
+        stream_indices=(streams[0].index, streams[1].index),
+    )
+
+    assert len(timings[streams[0].index]) == len(timings[streams[1].index]) == 12
+    assert [timing.index for timing in timings[streams[0].index]] == list(range(12))
+    assert all(
+        current.pts_sec > previous.pts_sec
+        for previous, current in zip(
+            timings[streams[0].index][:-1],
+            timings[streams[0].index][1:],
+            strict=True,
+        )
+    )
 
 
 def test_extract_paired_frames_roundtrip(tmp_path: Path):

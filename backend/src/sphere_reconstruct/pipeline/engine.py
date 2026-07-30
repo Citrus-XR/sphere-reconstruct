@@ -28,7 +28,7 @@ from typing import Any
 
 from ..domain.artifacts import StageManifest, manifest_path
 from ..domain.pipeline_state import STAGE_ORDER, StageName, downstream_of
-from ..domain.source import MediaKind, Projection, SourceAdapter, SourceRole
+from ..domain.source import MediaKind, Projection, SourceRole
 from ..infrastructure.filesystem import atomic_replace_dir
 from .invalidation import (
     assert_export_is_managed,
@@ -96,7 +96,7 @@ class Engine:
                 id=row["id"],
                 label=row["label"],
                 role=SourceRole(row["role"]),
-                adapter=SourceAdapter(row["adapter"]),
+                adapter=str(row["adapter"]),
                 media_kind=MediaKind(row["media_kind"]),
                 projection=Projection(row["projection"]),
                 path=Path(row["path"]),

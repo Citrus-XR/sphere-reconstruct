@@ -12,6 +12,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
+
 from ..domain.artifacts import FileRef, StageManifest
 from ..domain.pipeline_state import StageName
 from ..domain.source import MediaKind, Projection, SourceAdapter
@@ -58,7 +60,7 @@ class _CandidateFrameCache:
 @register
 class ExtractFrames(Stage):
     name = StageName.EXTRACT_FRAMES
-    impl_version = "2.3"
+    impl_version = "3.0"
 
     def collect_inputs(self, ctx: StageContext) -> list[FileRef]:
         return collect_source_inputs(
@@ -180,14 +182,28 @@ class ExtractFrames(Stage):
                 f"source {source.label}: expected 2 matching video streams, got {len(probe.video_streams)}"
             )
         lens0, lens1 = pair
+        timings_by_stream = ffprobe.frame_timings(
+            source.path,
+            stream_indices=(lens0.index, lens1.index),
+            ffprobe_bin=ffprobe_bin,
+        )
+        timings0 = timings_by_stream[lens0.index]
+        timings1 = timings_by_stream[lens1.index]
+        lens0.validate_timing_count(timings0)
+        lens1.validate_timing_count(timings1)
+        maximum_pts_skew = ffprobe.validate_synchronized_timings(
+            timings0,
+            timings1,
+            maximum_skew_sec=0.0005,
+        )
+        first_pts = timings0[0].pts_sec
+        frame_times = [timing.pts_sec - first_pts for timing in timings0]
         duration = probe.duration or (lens0.nb_frames or 0) / lens0.fps
         recording = insv_imu.read_imu_recording(source.path)
-        frame_count = lens0.nb_frames or int(round(duration * lens0.fps))
         rolling_shutter_motion = (
-            insv_imu.rolling_shutter_motion_by_frame(
+            insv_imu.rolling_shutter_motion_at_times(
                 recording,
-                list(range(frame_count)),
-                lens0.fps,
+                dict(enumerate(frame_times)),
             )
             if recording is not None
             else {}
@@ -209,6 +225,8 @@ class ExtractFrames(Stage):
             ffmpeg_bin=ffmpeg_bin,
             hwaccel=decoder.method,
             paired_candidates=True,
+            paired_stream_ordinals=(lens0.video_ordinal, lens1.video_ordinal),
+            frame_times_sec=frame_times,
             rolling_shutter_motion=rolling_shutter_motion,
             progress_span=progress_span.child(0.02, selection_end),
         )
@@ -236,6 +254,7 @@ class ExtractFrames(Stage):
                     frame_indices=indices,
                     out_dir_lens0=output_root / "lens0",
                     out_dir_lens1=output_root / "lens1",
+                    stream_ordinals=(lens0.video_ordinal, lens1.video_ordinal),
                     ffmpeg_bin=ffmpeg_bin,
                     hwaccel=decoder.method,
                     progress=paired_progress,
@@ -249,7 +268,7 @@ class ExtractFrames(Stage):
                 "source_id": source.id,
                 "source_index": local_index,
                 "source_frame": source_frame,
-                "timestamp_sec": source_frame / lens0.fps,
+                "timestamp_sec": frame_times[source_frame],
                 "lens0": _final_relpath(paths0[local_index], ctx),
                 "lens1": _final_relpath(paths1[local_index], ctx),
                 **(
@@ -274,6 +293,10 @@ class ExtractFrames(Stage):
             for local_index, source_frame in enumerate(indices)
         ]
         outputs = [_file_ref(path, ctx, "image/jpeg") for path in [*paths0, *paths1]]
+        selection["pairing"] = {
+            "method": "pts",
+            "maximum_skew_sec": maximum_pts_skew,
+        }
         return (
             _source_manifest(
                 source,
@@ -301,6 +324,14 @@ class ExtractFrames(Stage):
         if not probe.video_streams:
             raise RuntimeError(f"source {source.label}: video stream not found")
         stream = probe.video_streams[0]
+        timings = ffprobe.frame_timings(
+            source.path,
+            stream_indices=(stream.index,),
+            ffprobe_bin=ffprobe_bin,
+        )[stream.index]
+        stream.validate_timing_count(timings)
+        first_pts = timings[0].pts_sec
+        frame_times = [timing.pts_sec - first_pts for timing in timings]
         duration = probe.duration or (stream.nb_frames or 0) / stream.fps
         decoder = self._resolve_decoder(ctx, source, ffmpeg_bin)
         progress_span.tick(
@@ -319,6 +350,8 @@ class ExtractFrames(Stage):
             ffmpeg_bin=ffmpeg_bin,
             hwaccel=decoder.method,
             paired_candidates=False,
+            paired_stream_ordinals=None,
+            frame_times_sec=frame_times,
             progress_span=progress_span.child(0.02, selection_end),
         )
         output_span = progress_span.child(selection_end, 1.0)
@@ -343,7 +376,7 @@ class ExtractFrames(Stage):
                 "source_id": source.id,
                 "source_index": local_index,
                 "source_frame": source_frame,
-                "timestamp_sec": source_frame / stream.fps,
+                "timestamp_sec": frame_times[source_frame],
                 "image": _final_relpath(paths[local_index], ctx),
                 **({"score": scores[source_frame]} if source_frame in scores else {}),
             }
@@ -404,6 +437,8 @@ class ExtractFrames(Stage):
         ffmpeg_bin: str | None,
         hwaccel: str | None,
         paired_candidates: bool,
+        paired_stream_ordinals: tuple[int, int] | None,
+        frame_times_sec: list[float],
         rolling_shutter_motion: dict[int, float] | None = None,
         progress_span: ProgressSpan,
     ) -> tuple[list[int], dict, dict[int, dict], _CandidateFrameCache | None]:
@@ -412,8 +447,17 @@ class ExtractFrames(Stage):
         interval = ctx.params["interval_sec"]
         if interval <= 0:
             raise ValueError("interval_sec must be > 0")
-        count = int(duration / interval)
-        indices = [int(index * interval * fps) for index in range(count)]
+        if not frame_times_sec:
+            raise RuntimeError(f"source {source.label}: frame PTS がありません")
+        frame_times = np.asarray(frame_times_sec, dtype=np.float64)
+        if np.any(np.diff(frame_times) <= 0.0):
+            raise ValueError(f"source {source.label}: frame PTS が単調増加ではありません")
+        targets = np.arange(0.0, duration, interval, dtype=np.float64)
+        right = np.searchsorted(frame_times, targets, side="left")
+        right = np.clip(right, 0, len(frame_times) - 1)
+        left = np.maximum(0, right - 1)
+        choose_left = np.abs(targets - frame_times[left]) <= np.abs(frame_times[right] - targets)
+        indices = sorted(set(int(value) for value in np.where(choose_left, left, right)))
         if ctx.params["max_frames"] > 0:
             indices = indices[: ctx.params["max_frames"]]
         if not indices:
@@ -451,6 +495,8 @@ class ExtractFrames(Stage):
                 ffmpeg_bin=ffmpeg_bin,
                 hwaccel=hwaccel,
                 paired_candidates=paired_candidates,
+                paired_stream_ordinals=paired_stream_ordinals,
+                frame_times_sec=frame_times_sec,
                 rolling_shutter_motion=rolling_shutter_motion,
                 fallback_count=len(indices),
                 progress_span=progress_span,
@@ -467,6 +513,8 @@ class ExtractFrames(Stage):
                 nb_frames=nb_frames,
                 ffmpeg_bin=ffmpeg_bin,
                 hwaccel=hwaccel,
+                paired_candidates=paired_candidates,
+                paired_stream_ordinals=paired_stream_ordinals,
                 rolling_shutter_motion=rolling_shutter_motion,
                 progress_span=progress_span,
             )
@@ -492,6 +540,8 @@ class ExtractFrames(Stage):
         nb_frames: int | None,
         ffmpeg_bin: str | None,
         hwaccel: str | None,
+        paired_candidates: bool,
+        paired_stream_ordinals: tuple[int, int] | None,
         rolling_shutter_motion: dict[int, float],
         progress_span: ProgressSpan,
     ) -> tuple[list[int], dict[int, dict]]:
@@ -508,29 +558,59 @@ class ExtractFrames(Stage):
         )
         try:
             decode_span = progress_span.child(0.0, 0.75)
-            paths = ffmpeg.extract_frames_sequential(
-                source.path,
-                stream_index=0,
-                frame_indices=candidates,
-                out_dir=scratch,
-                out_prefix="candidate",
-                ffmpeg_bin=ffmpeg_bin,
-                hwaccel=hwaccel,
-                progress=lambda current, total: decode_span.tick(
+            def decoded_progress(current: int, total: int) -> None:
+                decode_span.tick(
                     current / max(1, total),
                     message=f"{source.label}: candidate frame {current}/{total}",
                     key="log.extract_candidates_progress",
                     args={"source": source.label, "cur": current, "tot": total},
-                ),
-            )
-            path_by_index = dict(zip(candidates, paths, strict=True))
+                )
+
+            if paired_candidates:
+                if paired_stream_ordinals is None:
+                    raise ValueError("paired extraction に stream ordinal がありません")
+                primary_paths, secondary_paths = ffmpeg.extract_paired_frames(
+                    source.path,
+                    frame_indices=candidates,
+                    out_dir_lens0=scratch / "lens0",
+                    out_dir_lens1=scratch / "lens1",
+                    stream_ordinals=paired_stream_ordinals,
+                    ffmpeg_bin=ffmpeg_bin,
+                    hwaccel=hwaccel,
+                    progress=decoded_progress,
+                )
+                paths_by_index = dict(
+                    zip(
+                        candidates,
+                        zip(primary_paths, secondary_paths, strict=True),
+                        strict=True,
+                    )
+                )
+            else:
+                primary_paths = ffmpeg.extract_frames_sequential(
+                    source.path,
+                    stream_index=0,
+                    frame_indices=candidates,
+                    out_dir=scratch,
+                    out_prefix="candidate",
+                    ffmpeg_bin=ffmpeg_bin,
+                    hwaccel=hwaccel,
+                    progress=decoded_progress,
+                )
+                paths_by_index = {
+                    index: (path,) for index, path in zip(candidates, primary_paths, strict=True)
+                }
             score_span = progress_span.child(0.75, 0.98)
             sharpness_by_index = {}
+
+            def score_paths(paths: tuple[Path, ...]) -> float:
+                return min(sampling.sharpness_of_file(path) for path in paths)
+
             with _single_threaded_opencv_workers(), ThreadPoolExecutor(
                 max_workers=_candidate_score_workers(ctx.params["score_workers"])
             ) as executor:
                 futures = {
-                    executor.submit(sampling.sharpness_of_file, path_by_index[index]): index
+                    executor.submit(score_paths, paths_by_index[index]): index
                     for index in candidates
                 }
                 for candidate_number, future in enumerate(as_completed(futures), 1):
@@ -588,6 +668,8 @@ class ExtractFrames(Stage):
         ffmpeg_bin: str | None,
         hwaccel: str | None,
         paired_candidates: bool,
+        paired_stream_ordinals: tuple[int, int] | None,
+        frame_times_sec: list[float],
         fallback_count: int,
         progress_span: ProgressSpan,
         rolling_shutter_motion: dict[int, float] | None = None,
@@ -601,8 +683,11 @@ class ExtractFrames(Stage):
         if candidate_fps <= 0:
             raise ValueError("candidate_fps must be > 0")
         bound = nb_frames - 1 if nb_frames else None
-        candidate_count = max(2, int(duration * candidate_fps))
-        candidate_indices = sorted({int(index / candidate_fps * fps) for index in range(candidate_count)})
+        frame_times = np.asarray(frame_times_sec, dtype=np.float64)
+        targets = np.arange(0.0, duration, 1.0 / candidate_fps, dtype=np.float64)
+        timing_indices = np.searchsorted(frame_times, targets, side="left")
+        timing_indices = np.clip(timing_indices, 0, len(frame_times) - 1)
+        candidate_indices = sorted(set(int(index) for index in timing_indices))
         if bound is not None:
             candidate_indices = sorted({min(bound, index) for index in candidate_indices})
         scratch = Path(tempfile.mkdtemp(prefix=f".extract-frames-spatial-{source.id}-", dir=ctx.project_dir))
@@ -619,11 +704,14 @@ class ExtractFrames(Stage):
                 )
             candidate_cache = None
             if paired_candidates:
+                if paired_stream_ordinals is None:
+                    raise ValueError("paired extraction に stream ordinal がありません")
                 paths, paired_paths = ffmpeg.extract_paired_frames(
                     source.path,
                     frame_indices=candidate_indices,
                     out_dir_lens0=scratch / "lens0",
                     out_dir_lens1=scratch / "lens1",
+                    stream_ordinals=paired_stream_ordinals,
                     ffmpeg_bin=ffmpeg_bin,
                     hwaccel=hwaccel,
                     progress=candidate_progress,
@@ -645,40 +733,66 @@ class ExtractFrames(Stage):
                     hwaccel=hwaccel,
                     progress=candidate_progress,
                 )
+                paired_paths = []
             grays = {}
             candidates = []
             score_span = progress_span.child(0.65, 0.85)
 
-            def score_candidate(item: tuple[int, Path]):
-                index, path = item
-                gray = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
-                if gray is None:
-                    return None
-                height, width = gray.shape[:2]
-                small = cv2.resize(
-                    gray,
-                    (max(1, width // 4), max(1, height // 4)),
-                    interpolation=cv2.INTER_AREA,
+            sensor_paths = (
+                list(zip(paths, paired_paths, strict=True))
+                if paired_candidates
+                else [(path,) for path in paths]
+            )
+
+            def score_candidate(item: tuple[int, tuple[Path, ...]]):
+                index, paths_for_capture = item
+                small_images = []
+                for path in paths_for_capture:
+                    gray = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
+                    if gray is None:
+                        return None
+                    height, width = gray.shape[:2]
+                    small_images.append(
+                        cv2.resize(
+                            gray,
+                            (max(1, width // 4), max(1, height // 4)),
+                            interpolation=cv2.INTER_AREA,
+                        )
+                    )
+                exposure_ok = all(
+                    quality.exposure_stats(image).is_ok(ctx.params["max_clip"])
+                    for image in small_images
                 )
-                exposure_ok = quality.exposure_stats(small).is_ok(ctx.params["max_clip"])
                 candidate = sampling.Candidate(
                     index=index,
-                    timestamp_us=int(index / fps * 1_000_000),
-                    sharpness=sampling.laplacian_sharpness(small),
+                    timestamp_us=int(frame_times_sec[index] * 1_000_000),
+                    sharpness=min(
+                        sampling.laplacian_sharpness(image) for image in small_images
+                    ),
                     exposure_ok=exposure_ok,
-                    feature_count=quality.sift_feature_count(small, downscale=1) if exposure_ok else 0,
+                    feature_count=(
+                        min(
+                            quality.sift_feature_count(image, downscale=1)
+                            for image in small_images
+                        )
+                        if exposure_ok
+                        else 0
+                    ),
                     rolling_shutter_motion_deg=rolling_shutter_motion.get(index, 0.0),
                 )
-                return index, small, candidate
+                return index, tuple(small_images), candidate
 
             with _single_threaded_opencv_workers(), ThreadPoolExecutor(
                 max_workers=_candidate_score_workers(ctx.params["score_workers"])
             ) as executor:
-                scored = executor.map(score_candidate, zip(candidate_indices, paths, strict=True))
+                scored = executor.map(
+                    score_candidate,
+                    zip(candidate_indices, sensor_paths, strict=True),
+                )
                 for candidate_number, result in enumerate(scored, 1):
                     if result is not None:
-                        index, small, candidate = result
-                        grays[index] = small
+                        index, small_images, candidate = result
+                        grays[index] = small_images
                         candidates.append(candidate)
                     score_span.tick(
                         candidate_number / max(1, len(paths)),
@@ -688,7 +802,10 @@ class ExtractFrames(Stage):
                     )
 
             def motion(first: int, second: int) -> float:
-                return quality.optical_flow_median(grays[first], grays[second], downscale=1)
+                return max(
+                    quality.optical_flow_median(left, right, downscale=1)
+                    for left, right in zip(grays[first], grays[second], strict=True)
+                )
 
             motion_span = progress_span.child(0.85, 1.0)
             result = sampling.select_spatial(
@@ -794,7 +911,7 @@ def _source_manifest(
         "id": source.id,
         "label": source.label,
         "role": source.role.value,
-        "adapter": source.adapter.value,
+        "adapter": source.adapter,
         "media_kind": source.media_kind.value,
         "projection": source.projection.value,
         "kind": kind,

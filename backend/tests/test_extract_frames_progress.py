@@ -64,7 +64,8 @@ def _fake_paired(*_args, frame_indices, out_dir_lens0, out_dir_lens1, progress, 
         paths = []
         for number, _frame_index in enumerate(frame_indices, 1):
             path = directory / f"lens{lens}_{number - 1:06d}.jpg"
-            image = np.full((64, 64, 3), number * 20 + lens, dtype=np.uint8)
+            value = number * 20 if lens == 0 else number * 5
+            image = np.full((64, 64, 3), value, dtype=np.uint8)
             assert cv2.imwrite(str(path), image)
             paths.append(path)
         outputs.append(paths)
@@ -109,6 +110,8 @@ def test_spatial_selection_reports_decode_scoring_and_motion(tmp_path, monkeypat
         ffmpeg_bin=None,
         hwaccel=None,
         paired_candidates=False,
+        paired_stream_ordinals=None,
+        frame_times_sec=[index / 10 for index in range(20)],
         fallback_count=2,
         progress_span=ProgressSpan(reporter, 0.0, 1.0),
     )
@@ -159,7 +162,7 @@ def test_spatial_insv_candidates_are_reused_as_final_pairs(tmp_path, monkeypatch
     monkeypatch.setattr(quality, "sift_feature_count", lambda *_args, **_kwargs: 100)
     monkeypatch.setattr(sampling, "laplacian_sharpness", lambda image: float(image.mean()))
 
-    selected, _statistics, _scores, cache = stage._select_spatial_indices(
+    selected, _statistics, scores, cache = stage._select_spatial_indices(
         context,
         source,
         fps=10,
@@ -168,11 +171,14 @@ def test_spatial_insv_candidates_are_reused_as_final_pairs(tmp_path, monkeypatch
         ffmpeg_bin=None,
         hwaccel="cuda",
         paired_candidates=True,
+        paired_stream_ordinals=(0, 1),
+        frame_times_sec=[index / 10 for index in range(20)],
         fallback_count=2,
         progress_span=ProgressSpan(reporter, 0.0, 1.0),
     )
 
     assert cache is not None
+    assert max(score["sharpness"] for score in scores.values()) <= 20.0
     output0, output1 = cache.materialize(selected, context.stage_out_dir / "source", lambda *_: None)
     assert len(output0) == len(output1) == len(selected)
     assert all(path.is_file() for path in [*output0, *output1])
@@ -218,7 +224,7 @@ def test_mixed_sources_extract_only_video_and_collect_still_images(tmp_path, mon
             "id": source.id,
             "label": source.label,
             "role": source.role.value,
-            "adapter": source.adapter.value,
+            "adapter": source.adapter,
             "media_kind": source.media_kind.value,
             "projection": source.projection.value,
             "kind": "perspective_video",

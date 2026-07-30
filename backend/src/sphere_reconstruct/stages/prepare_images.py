@@ -8,16 +8,17 @@ import os
 import shutil
 from pathlib import Path
 
+import numpy as np
 from PIL import Image, ImageOps
 
-from ..colmap import dual_fisheye_rig
+from ..colmap import calibrated_rig
 from ..colmap import rig as colmap_rig
 from ..domain.artifacts import FileRef, StageManifest
+from ..domain.camera_system import CalibratedCameraSystem, SensorExtrinsic
 from ..domain.pipeline_state import StageName
 from ..domain.source import Projection, SourceRole
 from ..imaging import fisheye_region, projection, rendering
 from ..infrastructure.filesystem import sha256_file
-from ..insta360 import calibration as calib
 from ..pipeline.manifest import register
 from ..pipeline.stage import ProgressSpan, Stage, StageContext, new_manifest
 
@@ -30,7 +31,7 @@ FULL_FRAME_DIAGONAL_MM = math.hypot(36.0, 24.0)
 @register
 class PrepareImages(Stage):
     name = StageName.PREPARE_IMAGES
-    impl_version = "2.0"
+    impl_version = "3.1"
 
     def collect_inputs(self, ctx: StageContext) -> list[FileRef]:
         candidates = [
@@ -39,6 +40,7 @@ class PrepareImages(Stage):
             ctx.project_dir / "inspect_source" / "sources.json",
             ctx.project_dir / "extract_frames" / "manifest_frames.json",
             fisheye_region.region_path(ctx.project_dir),
+            *sorted((ctx.project_dir / "inspect_source" / "sources").glob("*/camera_system.json")),
         ]
         return [
             FileRef(
@@ -66,9 +68,12 @@ class PrepareImages(Stage):
         if not frames_path.is_file() or not inspections_path.is_file():
             raise RuntimeError("inspect_source and extract_frames must run before prepare_images")
         frames_document = json.loads(frames_path.read_text(encoding="utf-8"))
+        inspection_document = json.loads(inspections_path.read_text(encoding="utf-8"))
+        if int(inspection_document["version"]) != 3:
+            raise RuntimeError("source inspection artifact を現在の adapter contract で再生成してください")
         inspections = {
             source["id"]: source
-            for source in json.loads(inspections_path.read_text(encoding="utf-8"))["sources"]
+            for source in inspection_document["sources"]
         }
 
         manifest = new_manifest(self.name, self.impl_version)
@@ -130,7 +135,7 @@ class PrepareImages(Stage):
             outputs.append(_file_ref(rig_file, ctx, "application/json"))
             rig_path = "rig_config.json"
         catalog = {
-            "version": 1,
+            "version": 2,
             "reconstruction_mode": ctx.params["reconstruction_mode"],
             "primary_source_id": primary["id"],
             "sources": [
@@ -175,34 +180,22 @@ class PrepareImages(Stage):
         progress_span: ProgressSpan,
     ) -> dict:
         width, height = int(source["width"]), int(source["height"])
-        calibration = inspection.get("offset_v3") or {}
-        if not calibration.get("valid") or len(calibration.get("lenses", [])) < 2:
-            raise RuntimeError(f"source {source['label']}: valid dual-fisheye calibration is required")
-        lenses = [calib.MeiLensCalibration(**lens) for lens in calibration["lenses"][:2]]
-        if (
-            lenses[0].ref_image_width != lenses[1].ref_image_width
-            or lenses[0].ref_image_height != lenses[1].ref_image_height
-            or lenses[0].ref_image_width <= 0
-        ):
-            raise RuntimeError(f"source {source['label']}: inconsistent dual-lens reference sizes")
-        native_width = lenses[0].ref_image_width // 2
-        intrinsics = [
-            projection.lens_to_intrinsics(
-                lens,
-                lens_index=index,
-                single_lens_native_width=native_width,
-                target_width=width,
-                target_height=height,
+        system = _load_camera_system(ctx.project_dir, inspection)
+        if len(system.sensors) != 2:
+            raise RuntimeError(
+                f"source {source['label']}: dual-fisheye には 2 sensor が必要です"
             )
-            for index, lens in enumerate(lenses)
-        ]
+        intrinsics = [sensor.intrinsics.scaled(width, height) for sensor in system.sensors]
         approximations = [projection.approximate_thin_prism_fisheye(intr) for intr in intrinsics]
+        compatible_approximations = [
+            projection.approximate_opencv_fisheye(intr) for intr in intrinsics
+        ]
         if any(approximation.maximum_error_px > 1.0 for approximation in approximations):
             raise RuntimeError(
-                f"source {source['label']}: MEI to THIN_PRISM_FISHEYE fit exceeds 1 px; "
-                "use pinhole_rig instead"
+                f"source {source['label']}: MEI → THIN_PRISM_FISHEYE の近似誤差が 1 px を超えました。"
+                "この校正を native mode の default にできません"
             )
-        sensors = ("lens0", "lens1")
+        sensors = tuple(sensor.id for sensor in system.sensors)
         params_by_sensor = {
             sensor: list(approximations[index].params) for index, sensor in enumerate(sensors)
         }
@@ -221,7 +214,7 @@ class PrepareImages(Stage):
                         source,
                         frame,
                         name=name,
-                        path=frame[f"lens{lens}"],
+                        path=frame[system.sensors[lens].image_key],
                         width=width,
                         height=height,
                         camera_group_id=group_ids[sensor],
@@ -232,11 +225,13 @@ class PrepareImages(Stage):
                             "camera_model": approximations[lens].camera_model,
                             "params": list(approximations[lens].params),
                             "max_theta_rad": maximum_theta_rad,
-                            "physical_circle": region[f"lens{lens}"],
+                            "physical_circle": region[sensor],
                         },
                     )
                 )
-        sensor_extrinsics = dual_fisheye_rig.offset_v3_sensor_extrinsics(lenses)
+        sensor_extrinsics = {
+            sensor.id: sensor.cam_from_rig for sensor in system.sensors
+        }
         progress_span.tick(
             1.0,
             message=f"{source['label']}: {len(images)} native fisheye images catalogued",
@@ -255,10 +250,19 @@ class PrepareImages(Stage):
                     single_camera=True,
                     single_camera_per_folder=False,
                     refine_intrinsics=False,
+                    consumer_compatibility={
+                        "lichtfeld_stock": {
+                            "camera_model": compatible_approximations[index].camera_model,
+                            "camera_params": list(compatible_approximations[index].params),
+                            "rms_error_px": compatible_approximations[index].rms_error_px,
+                            "maximum_error_px": compatible_approximations[index].maximum_error_px,
+                            "reason": "thin_prism_inverse_inconsistent",
+                        }
+                    },
                 )
                 for index, sensor in enumerate(sensors)
             ],
-            "rigs": dual_fisheye_rig.build_rig_config(
+            "rigs": calibrated_rig.build_rig_config(
                 approximations[0].camera_model,
                 params_by_sensor,
                 sensor_extrinsics,
@@ -266,11 +270,10 @@ class PrepareImages(Stage):
             ),
             "outputs": [],
             "calibration": {
-                "method": "offset_v3_mei_to_thin_prism_fisheye",
+                "method": f"{system.calibration_source}_mei_to_thin_prism_fisheye",
                 "forward_hemisphere_only": True,
-                "rolling_shutter_time_ms": float(
-                    (inspection.get("rolling_shutter") or {}).get("readout_time_ms", 0.0)
-                ),
+                "rolling_shutter_time_ms": system.maximum_rolling_shutter_readout_ms,
+                "rolling_shutter_correction": "risk_filtered",
                 "sensor_extrinsics": {
                     sensor: {
                         "rotation_wxyz": list(extrinsic.rotation_wxyz),
@@ -281,6 +284,9 @@ class PrepareImages(Stage):
                 "lenses": [
                     {
                         "sensor": sensor,
+                        "calibration_image_transform": system.sensors[
+                            index
+                        ].calibration_image_transform.to_dict(),
                         "rms_error_px": approximations[index].rms_error_px,
                         "maximum_error_px": approximations[index].maximum_error_px,
                         "colmap_rms_error_px": approximations[index].colmap_rms_error_px,
@@ -291,7 +297,12 @@ class PrepareImages(Stage):
                         ].lichtfeld_maximum_error_px,
                         "forward_radius_px": approximations[index].forward_radius_px,
                         "forward_theta_limit_deg": math.degrees(maximum_theta_rad),
-                        "physical_valid_radius_ratio": float(region[f"lens{index}"]["r"]),
+                        "physical_valid_radius_ratio": float(region[sensor]["r"]),
+                        "lichtfeld_stock_compatible": {
+                            "camera_model": compatible_approximations[index].camera_model,
+                            "rms_error_px": compatible_approximations[index].rms_error_px,
+                            "maximum_error_px": compatible_approximations[index].maximum_error_px,
+                        },
                     }
                     for index, sensor in enumerate(sensors)
                 ],
@@ -305,31 +316,22 @@ class PrepareImages(Stage):
         inspection: dict,
         progress_span: ProgressSpan,
     ) -> dict:
-        calibration = inspection.get("offset_v3") or {}
-        if not calibration.get("valid") or not calibration.get("lenses"):
-            raise RuntimeError(f"source {source['label']}: valid dual-fisheye calibration is required")
-        lenses = [calib.MeiLensCalibration(**lens) for lens in calibration["lenses"]]
-        native_width = lenses[0].ref_image_width // 2
+        system = _load_camera_system(ctx.project_dir, inspection)
         intrinsics = [
-            projection.lens_to_intrinsics(
-                lens,
-                lens_index=index,
-                single_lens_native_width=native_width,
-                target_width=int(source["width"]),
-                target_height=int(source["height"]),
-            )
-            for index, lens in enumerate(lenses)
+            sensor.intrinsics.scaled(int(source["width"]), int(source["height"]))
+            for sensor in system.sensors
         ]
-        rotations = [rendering.lens_local_rotation(lens) for lens in lenses]
+        rotations = [_quaternion_to_rotation(sensor.cam_from_rig) for sensor in system.sensors]
+        centers = [_camera_center(sensor.cam_from_rig) for sensor in system.sensors]
         return self._render_pinhole_views(
             ctx,
             source,
             lenses=[
-                {"index": index, "tx": lens.tx, "ty": lens.ty, "tz": lens.tz}
-                for index, lens in enumerate(lenses)
+                {"index": index, "tx": center[0], "ty": center[1], "tz": center[2]}
+                for index, center in enumerate(centers)
             ],
             render=lambda frame, view, lens: rendering.render_pinhole(
-                ctx.project_dir / frame[f"lens{lens}"],
+                ctx.project_dir / frame[system.sensors[lens].image_key],
                 view,
                 intrinsics[lens],
                 extra_rotation=rotations[lens],
@@ -570,6 +572,39 @@ def _frame_image_path(project_dir: Path, frame: dict) -> Path:
     raise KeyError("frame has no image path")
 
 
+def _load_camera_system(project_dir: Path, inspection: dict) -> CalibratedCameraSystem:
+    relative = inspection.get("camera_system_path")
+    if not relative:
+        raise RuntimeError(
+            f"source {inspection['label']}: camera adapter が校正済み camera system を出力していません"
+        )
+    path = project_dir / "inspect_source" / relative
+    return CalibratedCameraSystem.from_dict(json.loads(path.read_text(encoding="utf-8")))
+
+
+def _quaternion_to_rotation(extrinsic: SensorExtrinsic) -> np.ndarray:
+    w, x, y, z = extrinsic.rotation_wxyz
+    norm = math.sqrt(w * w + x * x + y * y + z * z)
+    if norm <= 1e-12:
+        raise ValueError("cam_from_rig quaternion の norm が 0 です")
+    w, x, y, z = (value / norm for value in (w, x, y, z))
+    return np.asarray(
+        (
+            (1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - z * w), 2.0 * (x * z + y * w)),
+            (2.0 * (x * y + z * w), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - x * w)),
+            (2.0 * (x * z - y * w), 2.0 * (y * z + x * w), 1.0 - 2.0 * (x * x + y * y)),
+        ),
+        dtype=np.float64,
+    )
+
+
+def _camera_center(extrinsic: SensorExtrinsic) -> tuple[float, float, float]:
+    rotation = _quaternion_to_rotation(extrinsic)
+    translation = np.asarray(extrinsic.translation_xyz, dtype=np.float64)
+    center = -rotation.T @ translation
+    return tuple(float(value) for value in center)
+
+
 def _write_prepared_jpeg(source: Path, destination: Path, *, normalize_exif: bool) -> tuple[int, int, dict]:
     destination.parent.mkdir(parents=True, exist_ok=True)
     with Image.open(source) as image:
@@ -631,8 +666,9 @@ def _camera_group(
     single_camera: bool,
     single_camera_per_folder: bool,
     refine_intrinsics: bool,
+    consumer_compatibility: dict | None = None,
 ) -> dict:
-    return {
+    group = {
         "id": group_id,
         "source_id": source_id,
         "camera_model": model,
@@ -642,6 +678,9 @@ def _camera_group(
         "refine_intrinsics": refine_intrinsics,
         "image_names": image_names,
     }
+    if consumer_compatibility is not None:
+        group["consumer_compatibility"] = consumer_compatibility
+    return group
 
 
 def _final_relpath(path: Path, ctx: StageContext) -> str:

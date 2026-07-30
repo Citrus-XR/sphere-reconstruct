@@ -169,9 +169,20 @@ def rolling_shutter_motion_by_frame(
     frame_indices: list[int],
     fps: float,
 ) -> dict[int, float]:
-    """Estimate top-to-bottom angular motion for each video frame."""
+    """CFR の frame index を時刻へ変換する互換 helper。"""
     if fps <= 0.0:
         raise ValueError(f"invalid fps: {fps}")
+    return rolling_shutter_motion_at_times(
+        recording,
+        {index: index / fps for index in frame_indices},
+    )
+
+
+def rolling_shutter_motion_at_times(
+    recording: ImuRecording,
+    frame_times_sec: dict[int, float],
+) -> dict[int, float]:
+    """実 PTS に最も近い gyro から readout 中の角運動を見積もる。"""
     if recording.rolling_shutter_time_ms <= 0.0 or not recording.samples:
         return {}
     if recording.is_raw:
@@ -186,8 +197,8 @@ def rolling_shutter_motion_by_frame(
         axis=1,
     ) * scale
     readout_seconds = recording.rolling_shutter_time_ms / 1000.0
-    frame_array = np.asarray(frame_indices, dtype=np.int64)
-    frame_times = frame_array.astype(np.float64) / fps
+    frame_array = np.asarray(list(frame_times_sec), dtype=np.int64)
+    frame_times = np.asarray(list(frame_times_sec.values()), dtype=np.float64)
     right = np.searchsorted(timestamps, frame_times, side="left")
     right = np.clip(right, 0, len(timestamps) - 1)
     left = np.maximum(0, right - 1)

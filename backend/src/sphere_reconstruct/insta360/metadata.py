@@ -52,6 +52,20 @@ class FooterNotFoundError(Exception):
 
 
 @dataclass(frozen=True)
+class WindowCropInfo:
+    source_width: int
+    source_height: int
+    cropped_width: int
+    cropped_height: int
+
+    def __post_init__(self) -> None:
+        if min(self.source_width, self.source_height, self.cropped_width, self.cropped_height) <= 0:
+            raise ValueError("window crop の size は正数でなければなりません")
+        if self.cropped_width > self.source_width or self.cropped_height > self.source_height:
+            raise ValueError("window crop の出力は入力 size を超えられません")
+
+
+@dataclass(frozen=True)
 class ExtraMetadata:
     camera_type: str
     first_frame_timestamp: int
@@ -61,6 +75,7 @@ class ExtraMetadata:
     is_raw_gyro: bool
     acc_range: int | None
     gyro_range: int | None
+    window_crop: WindowCropInfo | None
 
 
 @dataclass
@@ -267,6 +282,19 @@ def parse_extra_metadata(data: bytes) -> ExtraMetadata:
         config_fields = {field: value for field, _wire, value in _iter_protobuf_fields(gyro_config)}
         acc_range = int(config_fields[1]) if 1 in config_fields else None
         gyro_range = int(config_fields[2]) if 2 in config_fields else None
+    window_crop = fields.get(27)
+    parsed_window_crop = None
+    if isinstance(window_crop, bytes):
+        crop_fields = {field: value for field, _wire, value in _iter_protobuf_fields(window_crop)}
+        missing = sorted({1, 2, 3, 4} - crop_fields.keys())
+        if missing:
+            raise ValueError(f"window crop metadata の field が不足しています: {missing}")
+        parsed_window_crop = WindowCropInfo(
+            source_width=int(crop_fields[1]),
+            source_height=int(crop_fields[2]),
+            cropped_width=int(crop_fields[3]),
+            cropped_height=int(crop_fields[4]),
+        )
     return ExtraMetadata(
         camera_type=camera_type,
         first_frame_timestamp=int(fields.get(24, 0)),
@@ -276,6 +304,7 @@ def parse_extra_metadata(data: bytes) -> ExtraMetadata:
         is_raw_gyro=bool(fields.get(62, 0)),
         acc_range=acc_range,
         gyro_range=gyro_range,
+        window_crop=parsed_window_crop,
     )
 
 

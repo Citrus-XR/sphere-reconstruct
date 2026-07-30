@@ -77,6 +77,7 @@ export interface StageParams {
   size: number
   emitTrainConfigs: boolean
   optimizeFisheyeTrainingImages: boolean
+  lfstudioStockThinPrismWorkaround: boolean
 }
 
 export const QUALITY_PRESETS: Record<Exclude<QualityPreset, 'custom'>, Partial<StageParams>> = {
@@ -183,6 +184,7 @@ export const DEFAULT_PARAMS: StageParams = {
   size: 1024,
   emitTrainConfigs: true,
   optimizeFisheyeTrainingImages: true,
+  lfstudioStockThinPrismWorkaround: true,
 }
 
 const sharpnessCandidates = (level: StageParams['sharpnessLevel']) =>
@@ -299,6 +301,7 @@ export const paramsForStage = (
       return {
         emit_train_configs: params.emitTrainConfigs,
         optimize_fisheye_training_images: params.optimizeFisheyeTrainingImages,
+        lfstudio_stock_thin_prism_workaround: params.lfstudioStockThinPrismWorkaround,
         feature_masks_enabled: params.featureMaskEnabled,
         training_masks_enabled: params.trainingMaskEnabled,
       }

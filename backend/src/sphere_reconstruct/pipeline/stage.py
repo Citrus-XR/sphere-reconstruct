@@ -23,7 +23,7 @@ from typing import Any
 
 from ..domain.artifacts import FileRef, StageManifest
 from ..domain.pipeline_state import StageName
-from ..domain.source import MediaKind, Projection, SourceAdapter, SourceRole
+from ..domain.source import MediaKind, Projection, SourceRole
 
 
 @dataclass
@@ -158,7 +158,7 @@ class SourceContext:
     id: str
     label: str
     role: SourceRole
-    adapter: SourceAdapter
+    adapter: str
     media_kind: MediaKind
     projection: Projection
     path: Path

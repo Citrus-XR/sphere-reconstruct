@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
@@ -17,7 +18,9 @@ class SourceRole(StrEnum):
     SUPPLEMENTAL = "supplemental"
 
 
-class SourceAdapter(StrEnum):
+class SourceAdapter:
+    """永続化 ID の定数。型を閉じた Enum にせず adapter registry を拡張可能にする。"""
+
     INSTA360_INSV = "insta360_insv"
     GENERIC_VIDEO = "generic_video"
     GENERIC_IMAGES = "generic_images"
@@ -34,12 +37,48 @@ class Projection(StrEnum):
     PERSPECTIVE = "perspective"
 
 
+@dataclass(frozen=True)
+class SourceAdapterDefinition:
+    id: str
+    media_kind: MediaKind
+    projections: frozenset[Projection]
+
+
+SOURCE_ADAPTERS = {
+    definition.id: definition
+    for definition in (
+        SourceAdapterDefinition(
+            id=SourceAdapter.INSTA360_INSV,
+            media_kind=MediaKind.VIDEO,
+            projections=frozenset({Projection.DUAL_FISHEYE}),
+        ),
+        SourceAdapterDefinition(
+            id=SourceAdapter.GENERIC_VIDEO,
+            media_kind=MediaKind.VIDEO,
+            projections=frozenset({Projection.EQUIRECTANGULAR, Projection.PERSPECTIVE}),
+        ),
+        SourceAdapterDefinition(
+            id=SourceAdapter.GENERIC_IMAGES,
+            media_kind=MediaKind.IMAGES,
+            projections=frozenset({Projection.EQUIRECTANGULAR, Projection.PERSPECTIVE}),
+        ),
+    )
+}
+
+
+def require_adapter(adapter_id: str) -> SourceAdapterDefinition:
+    try:
+        return SOURCE_ADAPTERS[adapter_id]
+    except KeyError as error:
+        raise ValueError(f"未登録の source adapter です: {adapter_id}") from error
+
+
 class ProjectSource(BaseModel):
     id: str
     project_id: str
     label: str
     role: SourceRole
-    adapter: SourceAdapter
+    adapter: str
     media_kind: MediaKind
     projection: Projection
     path: str
@@ -52,15 +91,16 @@ class ProjectSource(BaseModel):
 
     @model_validator(mode="after")
     def validate_combination(self) -> ProjectSource:
-        if self.adapter == SourceAdapter.INSTA360_INSV:
-            if self.media_kind != MediaKind.VIDEO or self.projection != Projection.DUAL_FISHEYE:
-                raise ValueError("Insta360 INSV は dual-fisheye video として指定してください")
-        elif self.adapter == SourceAdapter.GENERIC_VIDEO and self.media_kind != MediaKind.VIDEO:
-            raise ValueError("generic_video の media_kind は video でなければなりません")
-        elif self.adapter == SourceAdapter.GENERIC_IMAGES and self.media_kind != MediaKind.IMAGES:
-            raise ValueError("generic_images の media_kind は images でなければなりません")
-        if self.adapter != SourceAdapter.INSTA360_INSV and self.projection == Projection.DUAL_FISHEYE:
-            raise ValueError("raw dual-fisheye は Insta360 INSV adapter だけに対応しています")
+        definition = require_adapter(self.adapter)
+        if self.media_kind != definition.media_kind:
+            raise ValueError(
+                f"{self.adapter} の media_kind は {definition.media_kind.value} でなければなりません"
+            )
+        if self.projection not in definition.projections:
+            supported = ", ".join(sorted(projection.value for projection in definition.projections))
+            raise ValueError(
+                f"{self.adapter} は projection {self.projection.value} に対応していません: {supported}"
+            )
         return self
 
 
@@ -74,7 +114,7 @@ def source_from_row(row) -> ProjectSource:
         project_id=row["project_id"],
         label=row["label"],
         role=SourceRole(row["role"]),
-        adapter=SourceAdapter(row["adapter"]),
+        adapter=str(row["adapter"]),
         media_kind=MediaKind(row["media_kind"]),
         projection=Projection(row["projection"]),
         path=row["path"],
@@ -97,7 +137,7 @@ async def add_source(
     *,
     label: str,
     role: SourceRole,
-    adapter: SourceAdapter,
+    adapter: str,
     media_kind: MediaKind,
     projection: Projection,
     path: str,
@@ -132,7 +172,7 @@ async def add_source(
                 source.project_id,
                 source.label,
                 source.role.value,
-                source.adapter.value,
+                source.adapter,
                 source.media_kind.value,
                 source.projection.value,
                 source.path,

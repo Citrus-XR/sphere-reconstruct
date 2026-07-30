@@ -9,7 +9,7 @@ COLMAP に「1 スナップショット (frame) 内の 12 カメラは固定相�
   - rig→cam 回転 R = R_view(V) = yaw_pitch_rotation(V.yaw, V.pitch)
     (cubemap の向きのみで決まり, レンズには依らない. レンダリングで
      rays_rig = rays @ R_view -> d_cam = R_view @ d_rig)
-  - カメラ中心 C = lens L の光学中心 = (tx, ty, tz)  (offset_v3, view には依らない)
+  - カメラ中心 C = camera system が正規化した sensor L の光学中心
   - cam_from_rig: 回転 q = quat(R_view), 並進 t = -R_view @ C
 
 reference sensor は front_lens0 (R_view=I, C=t_lens0=0 -> cam_from_rig=identity).

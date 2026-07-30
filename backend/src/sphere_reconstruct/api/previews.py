@@ -9,11 +9,12 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Literal
 
 from fastapi import APIRouter, HTTPException
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from ..domain import project as project_domain
 from ..domain.mask_artifact import (
@@ -198,14 +199,28 @@ async def export_info(project_id: str) -> dict:
     }
 
 
+class RegionOperationBody(BaseModel):
+    mode: Literal["add", "subtract"]
+    x: float = Field(ge=0.0, le=1.0)
+    y: float = Field(ge=0.0, le=1.0)
+    r: float = Field(ge=0.002, le=0.5)
+
+
+class LensRegionBody(BaseModel):
+    cx: float = 0.5
+    cy: float = 0.5
+    r: float = Field(ge=0.01, le=0.75)
+    operations: list[RegionOperationBody] = Field(default_factory=list, max_length=2048)
+
+
 class FisheyeRegion(BaseModel):
-    lens0: dict
-    lens1: dict
+    lens0: LensRegionBody
+    lens1: LensRegionBody
 
 
 @router.get("/api/projects/{project_id}/fisheye-region")
 async def get_fisheye_region(project_id: str, source_id: str) -> dict:
-    """魚眼有効領域 (円) の保存値を返す. 未保存なら既定 (中心, r=0.485).
+    """魚眼有効領域の保存値を返す。基準円中心は固定し、sensor ごとの brush 操作も含む。
 
     saved: UI から source ごとに保存済みか (fisheye_regions.json に key が存在するか).
     有効領域の設定を必須にするため, フロントはこのフラグでゲートする.

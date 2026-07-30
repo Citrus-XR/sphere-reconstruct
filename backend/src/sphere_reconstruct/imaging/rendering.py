@@ -14,8 +14,8 @@ from pathlib import Path
 
 import numpy as np
 
+from ..domain.camera_system import MeiIntrinsics
 from .projection import (
-    LensIntrinsics,
     PinholeView,
     pinhole_backproject,
     project_mei,
@@ -39,14 +39,14 @@ class RenderStats:
 
 def build_remap(
     view: PinholeView,
-    src_intr: LensIntrinsics,
+    src_intr: MeiIntrinsics,
     *,
     extra_rotation: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Pinhole `view` の全画素について, fisheye source の (u, v) と有効フラグを返す.
 
     - `view.yaw_deg`, `view.pitch_deg` は rig 座標系での回転.
-    - `extra_rotation` はさらに lens 座標系への追加回転 (offset_v3 の angles を適用したい場合).
+    - `extra_rotation` は camera system の rig 座標から sensor 座標への回転.
     """
     # (H, W, 3) の pinhole 射線 (view カメラ座標).
     rays = pinhole_backproject(view)
@@ -72,7 +72,7 @@ def build_remap(
 def render_pinhole(
     src_image_path: Path,
     view: PinholeView,
-    src_intr: LensIntrinsics,
+    src_intr: MeiIntrinsics,
     *,
     extra_rotation: np.ndarray | None = None,
 ) -> tuple[np.ndarray, RenderStats]:
@@ -144,37 +144,3 @@ def write_jpeg(dst: np.ndarray, out_path: Path, quality: int = 92) -> None:
     ok = cv2.imwrite(str(out_path), dst, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
     if not ok:
         raise RuntimeError(f"cv2.imwrite failed for {out_path}")
-
-
-def lens_local_rotation(lens) -> np.ndarray:
-    """offset_v3 の (yaw, pitch, roll) 角度から 3x3 rotation.
-
-    観測された roll ≈ 90 deg (実際は lens 自体の物理向き) を含む. rig 座標系
-    -> lens 座標系 の回転として使う.
-    """
-    y = math.radians(lens.yaw)
-    p = math.radians(lens.pitch)
-    r = math.radians(lens.roll)
-    # ZYX 順で組む (yaw -> pitch -> roll).
-    yaw_rotation = np.array(
-        [
-            [math.cos(y), -math.sin(y), 0.0],
-            [math.sin(y), math.cos(y), 0.0],
-            [0.0, 0.0, 1.0],
-        ]
-    )
-    pitch_rotation = np.array(
-        [
-            [math.cos(p), 0.0, math.sin(p)],
-            [0.0, 1.0, 0.0],
-            [-math.sin(p), 0.0, math.cos(p)],
-        ]
-    )
-    roll_rotation = np.array(
-        [
-            [1.0, 0.0, 0.0],
-            [0.0, math.cos(r), -math.sin(r)],
-            [0.0, math.sin(r), math.cos(r)],
-        ]
-    )
-    return roll_rotation @ pitch_rotation @ yaw_rotation

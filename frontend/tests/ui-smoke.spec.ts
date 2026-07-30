@@ -237,7 +237,7 @@ const installUiMock = async (page: Page, options: MockOptions = {}) => {
       return
     }
     if (projectId && path === `/api/projects/${projectId}/fisheye-region`) {
-      await route.fulfill({ json: { lens0: { cx: 0.5, cy: 0.5, r: 0.48 }, lens1: { cx: 0.5, cy: 0.5, r: 0.48 }, saved: true, needs_review: true } })
+      await route.fulfill({ json: { lens0: { cx: 0.5, cy: 0.5, r: 0.48, operations: [] }, lens1: { cx: 0.5, cy: 0.5, r: 0.48, operations: [] }, saved: true, needs_review: true } })
       return
     }
     if (projectId && path === `/api/projects/${projectId}/export-info`) {
@@ -553,7 +553,7 @@ test('Scene View background follows the applied theme without one-step lag', asy
   expect(mock.unexpectedRequests).toEqual([])
 })
 
-test('fisheye valid-region editor can switch its preview frame', async ({ page }) => {
+test('fisheye region keeps a fixed center and paints sensor-local custom regions', async ({ page }) => {
   const mock = await installUiMock(page, { frameCount: 3 })
   await page.goto('/')
 
@@ -563,6 +563,24 @@ test('fisheye valid-region editor can switch its preview frame', async ({ page }
   await expect(previewFrame).toHaveAttribute('max', '2')
   await previewFrame.fill('2')
   await expect(page.locator('img[alt="lens0"]')).toHaveAttribute('src', /frames\/2\/image/)
+  await expect(page.getByText('The base circle is locked to the image center', { exact: false })).toBeVisible()
+  await page.getByRole('button', { name: 'Keep brush (+)', exact: true }).click()
+  const editor = page.locator('svg').filter({ has: page.locator('mask') }).first()
+  const bounds = await editor.boundingBox()
+  expect(bounds).not.toBeNull()
+  await editor.click({ position: { x: bounds!.width * 0.75, y: bounds!.height * 0.5 } })
+  await expect(page.getByText('Operations: 1', { exact: true })).toBeVisible()
+  const saveRequest = page.waitForRequest(request => (
+    request.method() === 'PUT' && request.url().includes('/fisheye-region')
+  ))
+  await page.getByRole('button', { name: 'Save', exact: true }).click()
+  const payload = (await saveRequest).postDataJSON() as {
+    lens0: { cx: number; cy: number; operations: Array<{ mode: string }> }
+  }
+  expect(payload.lens0.cx).toBe(0.5)
+  expect(payload.lens0.cy).toBe(0.5)
+  expect(payload.lens0.operations).toHaveLength(1)
+  expect(payload.lens0.operations[0].mode).toBe('add')
   expect(mock.unexpectedRequests).toEqual([])
 })
 
@@ -729,6 +747,7 @@ test('feature, matching, and mapper controls have localized names and explanatio
   await expect(page.getByText('Predicts local ground near the primary camera path with equal weight per camera sample, then moves its median height to dataset Y=0.', { exact: true })).toBeVisible()
   await page.getByText('Export', { exact: true }).click()
   await expect(page.getByText('Optimize fisheye training images', { exact: true })).toBeVisible()
+  await expect(page.getByText('Avoid stock LFStudio fisheye inverse bug', { exact: true })).toBeVisible()
   await page.getByText('Sparse reconstruction', { exact: true }).click()
 
   await page.getByTitle('Settings').click()

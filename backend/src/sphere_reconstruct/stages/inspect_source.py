@@ -18,6 +18,7 @@ from ..domain.pipeline_state import StageName
 from ..domain.source import MediaKind, SourceAdapter
 from ..infrastructure.filesystem import sha256_file
 from ..insta360 import calibration as calib
+from ..insta360 import camera_system as insv_camera_system
 from ..insta360 import imu as insv_imu
 from ..insta360 import insv
 from ..insta360 import metadata as insv_metadata
@@ -30,7 +31,7 @@ from ..pipeline.stage import ProgressSpan, Stage, StageContext, new_manifest
 @register
 class InspectSource(Stage):
     name = StageName.INSPECT_SOURCE
-    impl_version = "2.2"
+    impl_version = "3.1"
 
     def collect_inputs(self, ctx: StageContext) -> list[FileRef]:
         return collect_source_inputs(
@@ -79,7 +80,7 @@ class InspectSource(Stage):
                     "id": source.id,
                     "label": source.label,
                     "role": source.role.value,
-                    "adapter": source.adapter.value,
+                    "adapter": source.adapter,
                     "media_kind": source.media_kind.value,
                     "projection": source.projection.value,
                     **summary,
@@ -88,16 +89,26 @@ class InspectSource(Stage):
 
         summary_path = out_dir / "sources.json"
         summary_path.write_text(
-            json.dumps({"version": 2, "sources": summaries}, ensure_ascii=False, indent=2),
+            json.dumps({"version": 3, "sources": summaries}, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+        camera_system_paths = sorted(out_dir.glob("sources/*/camera_system.json"))
         manifest.outputs = [
             FileRef(
-                path=str(summary_path.relative_to(ctx.project_dir)),
+                path=str(Path(self.name.value) / summary_path.relative_to(ctx.stage_out_dir)),
                 size=summary_path.stat().st_size,
                 sha256=sha256_file(summary_path),
                 mime="application/json",
-            )
+            ),
+            *[
+                FileRef(
+                    path=str(Path(self.name.value) / path.relative_to(ctx.stage_out_dir)),
+                    size=path.stat().st_size,
+                    sha256=sha256_file(path),
+                    mime="application/json",
+                )
+                for path in camera_system_paths
+            ],
         ]
         manifest.extra = _source_statistics(summaries)
         ctx.progress.info("all sources inspected", progress=0.99, key="log.inspect_all_done")
@@ -111,6 +122,8 @@ class InspectSource(Stage):
         )
         layout = insv.layout(path)
 
+        parsed_calibration = None
+        extra_metadata = None
         summary: dict = {
             "kind": "insv",
             "path": str(path),
@@ -124,9 +137,11 @@ class InspectSource(Stage):
             "footer": None,
             "offset_v3": None,
             "rolling_shutter": None,
+            "window_crop": None,
             "gravity": None,
             "pb": None,
             "calibration_source": None,
+            "camera_system_path": None,
         }
 
         if layout.footer_offset is not None:
@@ -150,7 +165,7 @@ class InspectSource(Stage):
                     "signature_valid": view.signature_valid,
                 }
 
-                # inst box を丸ごと読んで offset_v3 ASCII 校准串を拾う.
+                # inst box を丸ごと読んで offset_v3 ASCII 校正文字列を拾う。
                 ctx.progress.info(
                     "parsing offset_v3 (ascii)",
                     progress=progress_span.value(0.55),
@@ -172,6 +187,7 @@ class InspectSource(Stage):
                         "text": chosen.text,
                     }
                     if parsed.is_valid():
+                        parsed_calibration = parsed
                         summary["calibration_source"] = "offset_v3"
                 else:
                     summary["offset_v3"] = {"found": False}
@@ -181,6 +197,14 @@ class InspectSource(Stage):
                     summary["rolling_shutter"] = {
                         "readout_time_ms": extra_metadata.rolling_shutter_time_ms,
                         "correction_applied": False,
+                    }
+                if extra_metadata is not None and extra_metadata.window_crop is not None:
+                    crop = extra_metadata.window_crop
+                    summary["window_crop"] = {
+                        "source_width": crop.source_width,
+                        "source_height": crop.source_height,
+                        "cropped_width": crop.cropped_width,
+                        "cropped_height": crop.cropped_height,
                     }
 
                 # IMU（Gyro record）から重力方向（IMU 座標）を抽出し、再構成の重力整列に使う。
@@ -225,12 +249,27 @@ class InspectSource(Stage):
         pb_path = pb.find_pb_for(path)
         if pb_path is not None:
             probe = pb.probe(pb_path)
-            summary["pb"] = {"path": str(pb_path), "size": probe.size}
-            # PB は最優先ソース. offset_v3 で埋めた calibration_source を上書きする.
-            summary["calibration_source"] = "pb"
-        elif summary.get("calibration_source") is None and layout.footer_offset is not None:
-            # offset_v3 では埋まらなかったが footer は存在する -> 内蔵 profile への降級待ち.
-            summary["calibration_source"] = "builtin_profile"
+            summary["pb"] = {
+                "path": str(pb_path),
+                "size": probe.size,
+                "parsed": False,
+            }
+
+        if parsed_calibration is not None:
+            readout = float(
+                (summary.get("rolling_shutter") or {}).get("readout_time_ms", 0.0)
+            )
+            system = insv_camera_system.from_offset_v3(
+                parsed_calibration,
+                window_crop=extra_metadata.window_crop if extra_metadata is not None else None,
+                rolling_shutter_readout_ms=readout if readout > 0.0 else None,
+            )
+            system_path = out_dir / "camera_system.json"
+            system_path.write_text(
+                json.dumps(system.to_dict(), ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            summary["camera_system_path"] = f"sources/{out_dir.name}/camera_system.json"
 
         ctx.progress.info(
             "inspect done", progress=progress_span.high, key="log.inspect_done"
@@ -303,7 +342,7 @@ def _source_statistics(summaries: list[dict]) -> dict:
             ),
             default=0.0,
         ),
-        "calibrated_dual_fisheye_sources": sum(
-            bool((source.get("offset_v3") or {}).get("valid")) for source in summaries
+        "calibrated_camera_system_sources": sum(
+            bool(source.get("camera_system_path")) for source in summaries
         ),
     }

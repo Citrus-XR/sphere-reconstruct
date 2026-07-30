@@ -409,7 +409,7 @@ def mapper(
             "0",
         ]
     if not refine_rig:
-        # rig 外参 (sensor_from_rig) を固定する. offset_v3 の校正を厳密に信頼する場合や,
+        # rig 外参 (sensor_from_rig) を固定する。adapter の物理校正を厳密に信頼する場合や、
         # 前後半球で共有点が無く相対姿勢を実測値で強制したい native fisheye で使う.
         args += ["--Mapper.ba_refine_sensor_from_rig", "0"]
     if not multiple_models:

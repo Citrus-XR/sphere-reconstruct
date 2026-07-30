@@ -1,4 +1,4 @@
-"""MEI (Mei-Rives) 拡張畜れみモデルの投影 / 逆投影.
+"""MEI (Mei-Rives) 拡張歪みモデルの投影 / 逆投影。
 
 参考: PIPELINE.md (insv-stitch) の MEI 説明を独立に実装 + サンプル観測.
 
@@ -12,10 +12,8 @@
 このモジュールは numpy 依存. cv2 は使わず, 画像 remap は
 `imaging/rendering.py` に分離する. 数値核だけをここに置く.
 
-座標系:
-- 世界座標: rig の原点 (レンズ A の光心) 起点, 右手系, +Z 前方 / +Y 下向き / +X 右向き
-  (offset_v3 の座標系を採用. lens A tx=ty=tz=0 を基準に取ると
-  lens B tz=-0.032273 が観測されるので, lens B が背面側なら「+Z 前方」に一致).
+入力校正は adapter が sensor-local 画像座標へ正規化済みでなければならない。container
+内の合成画布、crop、sensor 順序などの規約をこの数値核へ持ち込まない。
 """
 
 from __future__ import annotations
@@ -25,33 +23,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from ..insta360.calibration import MeiLensCalibration
-
-
-@dataclass
-class LensIntrinsics:
-    """レンズ内部パラメータをネイティブ解像度に変換したもの.
-
-    offset_v3 の cx, cy は「合成 10752x5376 座標」で表現されている. lens B は
-    cx が 5376 だけシフトされているため, 実際の 5376x5376 単眼画像に使うときは
-    lens_native_cx = raw_cx - lens_offset_x, lens_native_cy = raw_cy を使う.
-
-    さらに ffmpeg で抜いた実画像 (例: 3840x3840) に使うときは (native ref -> 実画像)
-    のスケールを fx, fy, cx, cy に掛ける.
-    """
-
-    xi: float
-    fx: float
-    fy: float
-    cx: float
-    cy: float
-    k1: float
-    k2: float
-    k3: float
-    p1: float
-    p2: float
-    width: int  # 実画像の幅
-    height: int  # 実画像の高さ
+from ..domain.camera_system import MeiIntrinsics
 
 
 @dataclass(frozen=True)
@@ -67,55 +39,72 @@ class ColmapFisheyeApproximation:
     forward_radius_px: float
 
 
-def lens_to_intrinsics(
-    lens: MeiLensCalibration,
+def approximate_opencv_fisheye(
+    intr: MeiIntrinsics,
     *,
-    lens_index: int,
-    single_lens_native_width: int,
-    target_width: int,
-    target_height: int,
-) -> LensIntrinsics:
-    """offset_v3 の生キャリブから, 単眼 target_width x target_height 用の内部パラメータへ.
-
-    - lens_index=0 のレンズは cx をそのまま使う.
-    - lens_index=1 以降は raw cx から lens_offset_x = lens_index * single_lens_native_width を引く.
-      (X5 では 「lens0:5376, lens1:8064 - 5376 = 2688」と合成画像上で並んでいると観測)
-    - 最後に (target_width / single_lens_native_width) スケールで fx,fy,cx,cy を縮小する.
-    """
-    if lens.xi <= 0:
-        raise ValueError(f"lens.xi must be > 0 (got {lens.xi})")
-    if (
-        single_lens_native_width <= 0
-        or lens.ref_image_height <= 0
-        or target_width <= 0
-        or target_height <= 0
-    ):
-        raise ValueError("native/target dimensions must be > 0")
-
-    offset_x = lens_index * single_lens_native_width
-    native_cx = lens.cx - offset_x
-    native_cy = lens.cy
-
-    scale_x = target_width / single_lens_native_width
-    scale_y = target_height / lens.ref_image_height
-    return LensIntrinsics(
-        xi=lens.xi,
-        fx=lens.fx * scale_x,
-        fy=lens.fy * scale_y,
-        cx=native_cx * scale_x,
-        cy=native_cy * scale_y,
-        k1=lens.k1,
-        k2=lens.k2,
-        k3=lens.k3,
-        p1=lens.p1,
-        p2=lens.p2,
-        width=target_width,
-        height=target_height,
+    maximum_theta_rad: float = math.pi / 2,
+    theta_samples: int = 120,
+    azimuth_samples: int = 96,
+) -> ColmapFisheyeApproximation:
+    """MEI を non-radial 項のない互換性重視の OPENCV_FISHEYE へ近似する。"""
+    if not 0 < maximum_theta_rad <= math.pi / 2:
+        raise ValueError("fisheye approximation は forward hemisphere 内でなければなりません")
+    theta_values = np.linspace(1e-4, maximum_theta_rad, theta_samples)
+    azimuth_values = np.linspace(0.0, 2.0 * math.pi, azimuth_samples, endpoint=False)
+    theta, azimuth = np.meshgrid(theta_values, azimuth_values, indexing="ij")
+    rays = np.stack(
+        (
+            np.sin(theta) * np.cos(azimuth),
+            np.sin(theta) * np.sin(azimuth),
+            np.cos(theta),
+        ),
+        axis=-1,
+    )
+    projected, _valid = project_mei(rays.reshape(-1, 3), intr)
+    if not np.all(np.isfinite(projected)):
+        raise ValueError("MEI calibration が non-finite な forward ray を生成しました")
+    u = projected[:, 0].reshape(theta.shape)
+    v = projected[:, 1].reshape(theta.shape)
+    powers = np.stack([theta**power for power in (1, 3, 5, 7, 9)], axis=-1)
+    horizontal_design = (np.cos(azimuth)[..., np.newaxis] * powers).reshape(-1, 5)
+    vertical_design = (np.sin(azimuth)[..., np.newaxis] * powers).reshape(-1, 5)
+    horizontal = np.linalg.lstsq(horizontal_design, (u - intr.cx).reshape(-1), rcond=None)[0]
+    vertical = np.linalg.lstsq(vertical_design, (v - intr.cy).reshape(-1), rcond=None)[0]
+    fx, fy = float(horizontal[0]), float(vertical[0])
+    distortion = tuple(
+        float((horizontal[index] / fx + vertical[index] / fy) * 0.5)
+        for index in range(1, 5)
+    )
+    radial = 1.0 + sum(
+        distortion[index] * theta ** (2 * (index + 1)) for index in range(4)
+    )
+    predicted_u = intr.cx + fx * np.cos(azimuth) * theta * radial
+    predicted_v = intr.cy + fy * np.sin(azimuth) * theta * radial
+    error = np.hypot(predicted_u - u, predicted_v - v)
+    edge_radial = maximum_theta_rad * (
+        1.0
+        + sum(
+            distortion[index] * maximum_theta_rad ** (2 * (index + 1))
+            for index in range(4)
+        )
+    )
+    rms = float(np.sqrt(np.mean(error**2)))
+    maximum = float(np.max(error))
+    return ColmapFisheyeApproximation(
+        camera_model="OPENCV_FISHEYE",
+        params=(fx, fy, intr.cx, intr.cy, *distortion),
+        rms_error_px=rms,
+        maximum_error_px=maximum,
+        colmap_rms_error_px=rms,
+        colmap_maximum_error_px=maximum,
+        lichtfeld_rms_error_px=rms,
+        lichtfeld_maximum_error_px=maximum,
+        forward_radius_px=min(fx, fy) * edge_radial,
     )
 
 
 def approximate_thin_prism_fisheye(
-    intr: LensIntrinsics,
+    intr: MeiIntrinsics,
     *,
     maximum_theta_rad: float = math.pi / 2,
     theta_samples: int = 120,
@@ -327,7 +316,7 @@ def _lichtfeld_thin_prism_prediction(
 # -----------------------------------------------------------------------------
 
 
-def project_mei(rays: np.ndarray, intr: LensIntrinsics) -> tuple[np.ndarray, np.ndarray]:
+def project_mei(rays: np.ndarray, intr: MeiIntrinsics) -> tuple[np.ndarray, np.ndarray]:
     """3D 射線 (N,3) -> 画素座標 (N,2). 有効フラグ (N,) も返す.
 
     有効フラグ = 「MEI 前方射影 (Z + xi > 0)」and 「画素座標が画像内」.
@@ -348,7 +337,7 @@ def project_mei(rays: np.ndarray, intr: LensIntrinsics) -> tuple[np.ndarray, np.
     x = normalized[:, 0] / denom_safe
     y = normalized[:, 1] / denom_safe
 
-    # 拡張畜れみ (radial + tangential).
+    # 拡張歪み (radial + tangential).
     xd, yd = _apply_distortion(x, y, intr)
 
     u = intr.fx * xd + intr.cx
@@ -361,7 +350,7 @@ def project_mei(rays: np.ndarray, intr: LensIntrinsics) -> tuple[np.ndarray, np.
     return uv, valid
 
 
-def _apply_distortion(x: np.ndarray, y: np.ndarray, intr: LensIntrinsics) -> tuple[np.ndarray, np.ndarray]:
+def _apply_distortion(x: np.ndarray, y: np.ndarray, intr: MeiIntrinsics) -> tuple[np.ndarray, np.ndarray]:
     r2 = x * x + y * y
     r4 = r2 * r2
     r6 = r4 * r2

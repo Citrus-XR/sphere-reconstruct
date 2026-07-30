@@ -33,7 +33,7 @@ class SourceRead(BaseModel):
     id: str
     label: str
     role: source_domain.SourceRole
-    adapter: source_domain.SourceAdapter
+    adapter: str
     media_kind: source_domain.MediaKind
     projection: source_domain.Projection
     path: str
@@ -54,7 +54,7 @@ class ProjectRead(BaseModel):
 class SourceCreateBody(BaseModel):
     label: str = ""
     role: source_domain.SourceRole = source_domain.SourceRole.SUPPLEMENTAL
-    adapter: source_domain.SourceAdapter
+    adapter: str
     media_kind: source_domain.MediaKind
     projection: source_domain.Projection
     path: str

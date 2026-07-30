@@ -70,6 +70,15 @@ def _mask_blocks(region: dict, width: int, height: int) -> Iterator[tuple[int, n
                 circle_y_squared[start:end, np.newaxis] + circle_x_squared[np.newaxis, :]
                 <= circle_radius_squared
             )
+            block = _apply_operations(
+                block,
+                region.get("operations", []),
+                pixel_x,
+                start,
+                end,
+                width,
+                height,
+            )
             yield start, block.astype(np.uint8)
         return
 
@@ -96,10 +105,20 @@ def _mask_blocks(region: dict, width: int, height: int) -> Iterator[tuple[int, n
         block = (theta < maximum_theta).reshape((end - start, width))
         if circle_terms is not None:
             circle_x_squared, circle_y_squared, circle_radius_squared = circle_terms
-            block &= (
+            physical = (
                 circle_y_squared[start:end, np.newaxis] + circle_x_squared[np.newaxis, :]
                 <= circle_radius_squared
             )
+            physical = _apply_operations(
+                physical,
+                physical_circle.get("operations", []),
+                pixel_x,
+                start,
+                end,
+                width,
+                height,
+            )
+            block &= physical
         yield start, block.astype(np.uint8)
 
 
@@ -127,6 +146,38 @@ def _maximum_theta(region: dict) -> float:
     if not 0 < maximum_theta < math.pi / 2:
         raise ValueError(f"maximum fisheye theta must be within (0, pi/2): {maximum_theta}")
     return maximum_theta
+
+
+def _apply_operations(
+    block: np.ndarray,
+    operations: list,
+    pixel_x: np.ndarray,
+    start: int,
+    end: int,
+    width: int,
+    height: int,
+) -> np.ndarray:
+    result = block.copy()
+    pixel_y = np.arange(start, end, dtype=np.float64)
+    for index, operation in enumerate(operations):
+        mode = operation.get("mode")
+        if mode not in {"add", "subtract"}:
+            raise ValueError(f"valid-region operation {index} の mode が不正です: {mode}")
+        radius = float(operation["r"]) * width
+        if radius <= 0.0:
+            raise ValueError(f"valid-region operation {index} の radius が不正です: {radius}")
+        inside = (
+            (pixel_x + 0.5 - float(operation["x"]) * width) ** 2
+        )[np.newaxis, :] + (
+            (pixel_y + 0.5 - float(operation["y"]) * height) ** 2
+        )[:, np.newaxis] <= radius * radius
+        if mode == "add":
+            result |= inside
+        else:
+            result &= ~inside
+    return result
+
+
 def _validate_dimensions(width: int, height: int) -> None:
     if width <= 0 or height <= 0:
         raise ValueError(f"image dimensions must be positive: {width}x{height}")
