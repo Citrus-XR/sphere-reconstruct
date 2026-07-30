@@ -60,6 +60,22 @@ class _ExactMatcher:
         return self.matches
 
 
+class _TrajectoryMatcher:
+    def __init__(self):
+        self.calls = 0
+
+    def match(self, image_a, image_b, *, count):
+        del count
+        self.calls += 1
+        first = int(image_a.stem.rsplit("_", 1)[1])
+        second = int(image_b.stem.rsplit("_", 1)[1])
+        point_x = 2.0
+        point_z = 8.0
+        pixels_a = np.asarray([[100.0 * (point_x - first) / point_z + 50.0, 50.0]])
+        pixels_b = np.asarray([[100.0 * (point_x - second) / point_z + 50.0, 50.0]])
+        return DenseMatches(pixels_a, pixels_b, np.ones(1))
+
+
 def test_dense_pipeline_appends_filtered_points(tmp_path):
     camera = Camera(1, "PINHOLE", 100, 100, [100.0, 100.0, 50.0, 50.0], 1)
     first = ColmapImage(1, (1.0, 0.0, 0.0, 0.0), (0.0, 0.0, 0.0), 1, "front/frame_000000.jpg")
@@ -115,3 +131,64 @@ def test_dense_pipeline_appends_filtered_points(tmp_path):
     assert len(second.points2D) == 2
     for point in list(reconstruction.points3D.values())[-2:]:
         assert len(point.track) == 2
+
+
+def test_dense_candidate_limit_keeps_full_trajectory_coverage(tmp_path):
+    camera = Camera(1, "PINHOLE", 100, 100, [100.0, 100.0, 50.0, 50.0], 1)
+    images = {
+        index + 1: ColmapImage(
+            index + 1,
+            (1.0, 0.0, 0.0, 0.0),
+            (-float(index), 0.0, 0.0),
+            1,
+            f"front/frame_{index:06d}.jpg",
+        )
+        for index in range(5)
+    }
+    reconstruction = Reconstruction(
+        {1: camera},
+        images,
+        {
+            1: Point3D(1, (-1.0, 0.0, 8.0), (128, 128, 128), 0.5),
+            2: Point3D(2, (2.0, 0.0, 8.0), (128, 128, 128), 0.5),
+            3: Point3D(3, (5.0, 0.0, 8.0), (128, 128, 128), 0.5),
+        },
+    )
+    image_root = tmp_path / "images"
+    catalog_images = []
+    for index, image in enumerate(images.values()):
+        path = image_root / image.name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        Image.new("RGB", (100, 100), (40, 80, 120)).save(path)
+        catalog_images.append(
+            {
+                "name": image.name,
+                "source_id": "s1",
+                "sensor_id": "front",
+                "capture_index": index,
+            }
+        )
+    matcher = _TrajectoryMatcher()
+
+    result = densify_reconstruction(
+        reconstruction,
+        {"images": catalog_images},
+        image_root,
+        None,
+        matcher,
+        DenseInitializationConfig(
+            reference_fraction=1.0,
+            neighbors_per_reference=1,
+            matches_per_pair=1,
+            maximum_ray_gap_ratio=0.01,
+            voxel_size_ratio=0.00001,
+            maximum_new_points=1,
+            use_feature_masks=False,
+        ),
+    )
+
+    assert result.pairs_considered > 2
+    assert result.pairs_processed == result.pairs_considered
+    assert matcher.calls == result.pairs_considered
+    assert result.raw_points == result.pairs_considered
+    assert result.kept_points == 1

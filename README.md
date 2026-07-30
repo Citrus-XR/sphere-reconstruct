@@ -358,6 +358,8 @@ Dense point は camera-view fidelity を改善できる一方、Gaussian cap が
 683,732 Gaussian となり、両方とも最終的に 1M cap へ到達した。従って Step は既定で無効のままにし、疎点が
 不足する scene でのみ A/B を行う。`images.bin` の元の順序は保持する。LFStudio は file order へ
 `test_every` を適用するため、Step 前後で ID sort すると validation set 自体が変わり、比較不能になる。
+追加点 hard cap の 2 倍を candidate memory budget とし、全 image pair へ均等に配分する。上限到達時に
+trajectory 前半だけで停止せず、各 pair の低 reprojection-error candidate を残して scene 全体を覆う。
 
 ## LFStudio export
 

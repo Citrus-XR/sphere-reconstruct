@@ -316,6 +316,8 @@ RoMaV2 native-ray initialization の 38.17 s X5 A/B は、1M / 2048 / 30k で tr
 わずかに鮮明だった。Runtime も 23分01秒から25分38秒へ増えたため、Dense Step は一般 default にしない。
 両 run が同じ camera subset を使うよう `images.bin` の input order を保持する。LFStudio の `test_every` は
 image ID ではなく file order へ適用される。
+Dense candidate memory は全 image pair へ均等配分し、小さい追加点 cap でも trajectory 前半だけで matching を
+打ち切らない。
 
 疎点群は連続 surface ではない。Export statistics の sparse-point radius median / P95 / P99 / maximum で裾を
 確認し、P99 / median が 5 を超える場合は遠景・小視差点が広いことを示す warning として扱う。真の遠景まで

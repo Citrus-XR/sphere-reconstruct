@@ -83,7 +83,12 @@ def densify_reconstruction(
     rejected_masks = 0
     rejected_geometry = 0
     processed = 0
+    raw_points = 0
     rng = np.random.default_rng(config.seed)
+    candidate_budget = max(config.maximum_new_points * 2, len(pairs))
+    quota_base, quota_remainder = (
+        divmod(candidate_budget, len(pairs)) if pairs else (0, 0)
+    )
 
     for pair_number, (first, second) in enumerate(pairs, 1):
         matches = matcher.match(first.image_path, second.image_path, count=config.matches_per_pair)
@@ -134,16 +139,19 @@ def densify_reconstruction(
         )
         rejected_geometry += int(np.count_nonzero(~geometry_valid))
         if np.any(geometry_valid):
-            colors = _sample_rgb(first.image_path, pixels_a[geometry_valid])
+            valid_indices = np.flatnonzero(geometry_valid)
+            raw_points += len(valid_indices)
+            colors = _sample_rgb(first.image_path, pixels_a[valid_indices])
+            pair_candidates = []
             for point, color, error, pixel_a, pixel_b in zip(
-                points[geometry_valid],
+                points[valid_indices],
                 colors,
-                errors[geometry_valid],
-                pixels_a[geometry_valid],
-                pixels_b[geometry_valid],
+                errors[valid_indices],
+                pixels_a[valid_indices],
+                pixels_b[valid_indices],
                 strict=True,
             ):
-                candidates.append(
+                pair_candidates.append(
                     (
                         point,
                         color,
@@ -154,9 +162,10 @@ def densify_reconstruction(
                         ],
                     )
                 )
+            pair_quota = quota_base + (pair_number <= quota_remainder)
+            pair_candidates.sort(key=lambda candidate: candidate[2])
+            candidates.extend(pair_candidates[:pair_quota])
         processed += 1
-        if len(candidates) >= config.maximum_new_points * 2:
-            break
         if progress is not None:
             progress(pair_number, len(pairs))
 
@@ -169,7 +178,7 @@ def densify_reconstruction(
     return DenseInitializationResult(
         pairs_considered=len(pairs),
         pairs_processed=processed,
-        raw_points=len(candidates),
+        raw_points=raw_points,
         kept_points=len(selected),
         rejected_confidence=rejected_confidence,
         rejected_masks=rejected_masks,
