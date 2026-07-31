@@ -28,7 +28,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from PIL import Image as PilImage
 
-from ..colmap import gravity_align, lfstudio_compat, lichtfeld_config, train_profile, training_crop
+from ..colmap import gravity_align, lichtfeld_config, train_profile, training_crop
 from ..colmap import model as colmap_model
 from ..colmap.input_workspace import InputSpec
 from ..domain.artifacts import FileRef, StageManifest
@@ -41,8 +41,9 @@ from ..domain.mask_artifact import (
     stage_for,
 )
 from ..domain.pipeline_state import StageName
-from ..imaging import valid_region
+from ..imaging import catalog_validity
 from ..infrastructure.filesystem import sha256_file
+from ..pipeline import prepared_images
 from ..pipeline.manifest import register
 from ..pipeline.stage import ProgressSpan, Stage, StageContext, new_manifest
 from ..settings import get_settings
@@ -59,7 +60,8 @@ class ExportDataset(Stage):
             ctx.project_dir / "restore_metric_scale" / "scale_restoration.json",
             ctx.project_dir / "manifests" / "extract_features.json",
             ctx.project_dir / "extract_features" / "input_spec.json",
-            ctx.project_dir / "prepare_images" / "image_catalog.json",
+            ctx.project_dir / "manifests" / "rectify_fisheye.json",
+            prepared_images.catalog_path(ctx.project_dir),
             ctx.project_dir / "position_ground" / "ground_position.json",
             ctx.project_dir / "dense_initialization" / "sparse" / "0" / "rigs.bin",
             ctx.project_dir / "dense_initialization" / "sparse" / "0" / "cameras.bin",
@@ -97,9 +99,6 @@ class ExportDataset(Stage):
             "optimize_fisheye_training_images": bool(
                 raw.get("optimize_fisheye_training_images", True)
             ),
-            "lfstudio_stock_thin_prism_workaround": bool(
-                raw.get("lfstudio_stock_thin_prism_workaround", False)
-            ),
             "feature_masks_enabled": bool(raw.get("feature_masks_enabled", True)),
             "training_masks_enabled": bool(raw.get("training_masks_enabled", True)),
         }
@@ -126,12 +125,7 @@ class ExportDataset(Stage):
                 encoding="utf-8"
             )
         )
-        catalog_path = ctx.project_dir / "prepare_images" / "image_catalog.json"
-        catalog = (
-            json.loads(catalog_path.read_text(encoding="utf-8"))
-            if catalog_path.is_file()
-            else None
-        )
+        catalog = prepared_images.load_catalog(ctx.project_dir)
         export_recon = recon
         crop_plan: training_crop.CropPlan | None = None
         crop_info: dict = {"enabled": False, "requested": ctx.params["optimize_fisheye_training_images"]}
@@ -144,7 +138,11 @@ class ExportDataset(Stage):
                     key="log.export_crop_unavailable",
                 )
             elif catalog is not None:
-                candidate = training_crop.build_plan(recon, catalog)
+                candidate = training_crop.build_plan(
+                    recon,
+                    catalog,
+                    project_dir=ctx.project_dir,
+                )
                 if candidate.changed:
                     crop_plan = candidate
                     export_recon = training_crop.crop_reconstruction(recon, crop_plan)
@@ -167,21 +165,6 @@ class ExportDataset(Stage):
                     crop_info["skipped_reason"] = "no_circular_padding"
             else:
                 crop_info["skipped_reason"] = "image_catalog_unavailable"
-        compatibility_info = {
-            "requested": ctx.params["lfstudio_stock_thin_prism_workaround"],
-            "applied": False,
-            "consumer": "lichtfeld_stock",
-            "camera_reports": [],
-        }
-        if ctx.params["lfstudio_stock_thin_prism_workaround"]:
-            if catalog is None:
-                raise RuntimeError("LFStudio camera compatibility には image catalog が必要です")
-            export_recon, compatibility_info = lfstudio_compat.apply_stock_camera_workarounds(
-                export_recon,
-                catalog,
-                crop_plan,
-            )
-            compatibility_info["requested"] = True
         out = ctx.stage_out_dir
         outputs: list[FileRef] = []
         train_profile_data = train_profile.compute_profile(recon)
@@ -225,7 +208,7 @@ class ExportDataset(Stage):
             for source in model_dir.iterdir():
                 if source.is_file() and source.suffix.lower() in {".bin", ".txt", ".ini"}:
                     shutil.copy2(source, ds_sparse / source.name)
-            if crop_plan is not None or compatibility_info["applied"]:
+            if crop_plan is not None:
                 colmap_model.write_cameras_bin(ds_sparse / "cameras.bin", export_recon.cameras)
             if crop_plan is not None:
                 model_crop_span = ProgressSpan(ctx.progress, 0.22, 0.25)
@@ -320,7 +303,7 @@ class ExportDataset(Stage):
                 "mask_source": resolved_mask_source,
                 "image_source": "lossless_fisheye_crop" if crop_plan is not None else "original",
                 "training_crop": crop_info,
-                "lfstudio_camera_compatibility": compatibility_info,
+                "fisheye_rectification": catalog.get("rectification"),
                 "metric_scale": metric_scale_info,
                 "ground_position": ground_position_info,
                 "validation": validation,
@@ -372,11 +355,7 @@ class ExportDataset(Stage):
                     "max_width": cfg_info["recommended_max_width"],
                 },
             }
-            cfg_info["camera_compatibility"] = compatibility_info
-            if compatibility_info["applied"]:
-                cfg_info["gui_integration"]["warnings"].append(
-                    "stock_lfstudio_thin_prism_inverse_workaround_applied"
-                )
+            cfg_info["fisheye_rectification"] = catalog.get("rectification")
             tc_dir = out / "train_configs"
             tc_dir.mkdir(parents=True, exist_ok=True)
             for cname, cfg in configs.items():
@@ -426,7 +405,7 @@ class ExportDataset(Stage):
             "lfstudio_training_metrics": "external",
             "source_registration": _source_registration(recon, spec),
             "training_crop": crop_info,
-            "lfstudio_camera_compatibility": compatibility_info,
+            "fisheye_rectification": catalog.get("rectification"),
             "metric_scale": metric_scale_info,
             "ground_position": ground_position_info,
         }
@@ -454,9 +433,7 @@ def _copy_masks(
 ) -> int:
     sorted_names = sorted(image_names)
     if purpose is None:
-        catalog = json.loads(
-            (project_dir / "prepare_images" / "image_catalog.json").read_text(encoding="utf-8")
-        )
+        catalog = prepared_images.load_catalog(project_dir)
         records = {record["name"]: record for record in catalog["images"]}
         missing = [name for name in sorted_names if name not in records]
         if missing:
@@ -465,15 +442,15 @@ def _copy_masks(
         for image_number, image_name in enumerate(sorted_names, 1):
             record = records[image_name]
             rect = crop_plan.images[image_name] if crop_plan is not None else None
-            key = valid_region.cache_key(
-                record.get("valid_region", {"kind": "full"}),
+            key = catalog_validity.cache_key(
+                record,
                 int(record["width"]),
                 int(record["height"]),
             ) + (f":crop={rect.as_list()}" if rect is not None else ":uncropped")
             destination = destination_dir / f"{image_name}.png"
             template = templates.get(key)
             if template is None:
-                _write_physical_mask(record, destination, rect)
+                _write_physical_mask(project_dir, record, destination, rect)
                 templates[key] = destination
             else:
                 _link_or_copy(template, destination)
@@ -521,12 +498,14 @@ def _copy_masks(
 
 
 def _write_physical_mask(
+    project_dir: Path,
     record: dict,
     destination: Path,
     rect: training_crop.CropRect | None,
 ) -> None:
-    mask = valid_region.render_mask(
-        record.get("valid_region", {"kind": "full"}),
+    mask = catalog_validity.render_mask(
+        project_dir,
+        record,
         int(record["width"]),
         int(record["height"]),
     )

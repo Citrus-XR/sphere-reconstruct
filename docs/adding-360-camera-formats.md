@@ -198,6 +198,31 @@ non-radial 項が大きい sensor で円を非対称に変形する。Camera met
 roundtrip test が通るまで `undistort=true` へ逃げない。この経路にも prism packing bug がある。Repository の
 source patch は [`scripts/patches/lichtfeld-thin-prism-inverse.patch`](../scripts/patches/lichtfeld-thin-prism-inverse.patch)。
 
+### 3.1 Raw fisheye の mandatory consumer rectification
+
+Raw fisheye adapter は `prepare_images` の直後に mandatory `rectify_fisheye` Step を通す。UI や adapter option で
+無効化できない。Perspective / ERP source は同じ Step を artifact passthrough として通過する。
+
+```text
+target OPENCV pixel
+  -> target OPENCV_FISHEYE ray
+  -> source native MEI pixel
+  -> one Lanczos sample from decoded RGB
+```
+
+要求事項:
+
+- target は source と同じ width / height、forward-ray domain とする。
+- RGB は一回だけ backward resample し、PNG へ保存する。
+- Physical circle と ordered add/subtract custom region は同じ map で nearest resample し、bitmap validity にする。
+- Camera group と rig config は target OPENCV parameters へ同時更新する。
+- SAM、feature extraction、matching、SfM、BA、dense seed、export は rectified catalog だけを読む。
+- Pose、`cam_from_rig`、timestamp、camera center は変更しない。
+- Consumer camera だけを交換し、source RGB をそのまま残す実装は禁止する。
+
+この位置で変換すれば feature / 2D observation は最初から target pixel coordinate で生成されるため、後段で
+observation を移し替える必要がない。Export 時の補修より単純で、COLMAP と trainer が同じ ray contract を共有する。
+
 ### 4. Rig extrinsics
 
 各 transform の向き、quaternion order、translation の意味を source code permalink と real fixture で確認する。
@@ -271,7 +296,7 @@ Held-out frame で fixed lens basis と rolling-shutter basis のどちらが re
 - Rig: known baseline / direction、quaternion norm / rotation determinant、real overlap epipolar residual
 - Shutter: all four scan directions、timestamp reference、offset / drift、identity / no-motion
 - Selection: sensor 1 だけ blurred / clipped の fixture を reject
-- Pipeline: inspect → extract → prepare → both masks → feature → match → reconstruct → export
+- Pipeline: inspect → extract → prepare → mandatory rectify → both masks → feature → match → reconstruct → export
 - UI: 全 sensor preview、valid-region edit、source group、localized error / statistics
 - Trainer: LFStudio load、camera center / ray roundtrip、短い training smoke
 - Safety: cancel は temporary artifact だけを消し、original resource を保持
@@ -294,13 +319,16 @@ selfie / reversed mapping、synthetic VFR rig を含める。
   SfM residual を悪化させた。Metadata extrinsics を保持する。
 - Official app stitch は optical-flow / rolling-shutter warp を含むため、raw lens と ERP の単純な global rotation
   difference を subpixel external calibration として使わない。
+- Current mandatory rectification は 192×3840² image を 74秒で PNG 化し、285 MB→1.89 GB。二回補間を含む
+  roundtrip でも lens0 / lens1 は 42.02 / 40.47 dB、MAE 0.445 / 0.390。Same-capture COLMAP は points
+  28,060→29,974、mean reprojection 1.105→1.080 px、全192 image registered を維持した。
 
 ## Definition of done
 
 新 adapter は sample が読み込めるだけでは完了しない。Adapter 固有 code が probe / metadata / extraction mapping
 へ隔離され、core にメーカー名分岐が増えていないこと、全 PTS / sensor / projection / rig / shutter test が通ること、
 real UI path から export と LFStudio loader smoke が通ること、held-out geometry report が既存 adapter を退行させない
-ことを満たして初めて default-enabled とする。
+こと、raw fisheye の rectification を bypass できないことを満たして初めて default-enabled とする。
 
 [Insta360 Desktop Media SDK](https://github.com/Insta360Develop/Desktop-MediaSDK-Cpp) のような proprietary
 SDK は、公式 stitch との A/B や optional derived ERP generator に使う余地はあるが、この application の

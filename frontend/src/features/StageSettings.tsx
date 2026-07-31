@@ -566,6 +566,10 @@ export const StageSettings = ({
           value={params.size} onChange={value => setParams({ size: Math.round(value) })} fmt={value => `${value}px`} />
       )}
 
+      {stage === 'rectify_fisheye' && (
+        <div className="hint" style={{ marginBottom: 10 }}>{t('hint_rectifyFisheye')}</div>
+      )}
+
       {stage === 'inspect_source' && (
         <>
           <div className="ctl">
@@ -658,15 +662,6 @@ export const StageSettings = ({
                 })} /> {t('lbl_optimizeFisheyeTrainingImages')}
             </label>
             <div className="hint">{t('hint_optimizeFisheyeTrainingImages')}</div>
-          </div>
-          <div className="ctl">
-            <label style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
-              <input type="checkbox" checked={params.lfstudioStockThinPrismWorkaround}
-                onChange={() => setParams({
-                  lfstudioStockThinPrismWorkaround: !params.lfstudioStockThinPrismWorkaround,
-                })} /> {t('lbl_lfstudioStockThinPrismWorkaround')}
-            </label>
-            <div className="hint">{t('hint_lfstudioStockThinPrismWorkaround')}</div>
           </div>
           {exportInfo
             ? <div className="ctl">

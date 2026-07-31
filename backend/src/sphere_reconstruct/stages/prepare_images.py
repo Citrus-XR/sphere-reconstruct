@@ -31,7 +31,7 @@ FULL_FRAME_DIAGONAL_MM = math.hypot(36.0, 24.0)
 @register
 class PrepareImages(Stage):
     name = StageName.PREPARE_IMAGES
-    impl_version = "3.1"
+    impl_version = "3.2"
 
     def collect_inputs(self, ctx: StageContext) -> list[FileRef]:
         candidates = [
@@ -250,14 +250,17 @@ class PrepareImages(Stage):
                     single_camera=True,
                     single_camera_per_folder=False,
                     refine_intrinsics=False,
-                    consumer_compatibility={
-                        "lichtfeld_stock": {
-                            "camera_model": compatible_approximations[index].camera_model,
-                            "camera_params": list(compatible_approximations[index].params),
-                            "rms_error_px": compatible_approximations[index].rms_error_px,
-                            "maximum_error_px": compatible_approximations[index].maximum_error_px,
-                            "reason": "thin_prism_inverse_inconsistent",
-                        }
+                    rectification={
+                        "required": True,
+                        "source_projection": intrinsics[index].to_dict(),
+                        "target_camera_model": compatible_approximations[index].camera_model,
+                        "target_camera_params": list(compatible_approximations[index].params),
+                        "rms_error_px_before_resampling": compatible_approximations[
+                            index
+                        ].rms_error_px,
+                        "maximum_error_px_before_resampling": compatible_approximations[
+                            index
+                        ].maximum_error_px,
                     },
                 )
                 for index, sensor in enumerate(sensors)
@@ -298,7 +301,7 @@ class PrepareImages(Stage):
                         "forward_radius_px": approximations[index].forward_radius_px,
                         "forward_theta_limit_deg": math.degrees(maximum_theta_rad),
                         "physical_valid_radius_ratio": float(region[sensor]["r"]),
-                        "lichtfeld_stock_compatible": {
+                        "rectification_target": {
                             "camera_model": compatible_approximations[index].camera_model,
                             "rms_error_px": compatible_approximations[index].rms_error_px,
                             "maximum_error_px": compatible_approximations[index].maximum_error_px,
@@ -666,7 +669,7 @@ def _camera_group(
     single_camera: bool,
     single_camera_per_folder: bool,
     refine_intrinsics: bool,
-    consumer_compatibility: dict | None = None,
+    rectification: dict | None = None,
 ) -> dict:
     group = {
         "id": group_id,
@@ -678,8 +681,8 @@ def _camera_group(
         "refine_intrinsics": refine_intrinsics,
         "image_names": image_names,
     }
-    if consumer_compatibility is not None:
-        group["consumer_compatibility"] = consumer_compatibility
+    if rectification is not None:
+        group["rectification"] = rectification
     return group
 
 

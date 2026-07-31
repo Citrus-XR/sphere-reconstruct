@@ -12,7 +12,8 @@ from pathlib import Path
 from PIL import Image as PilImage
 
 from ..domain.mask_artifact import MaskPurpose, load_mask_manifest, mask_manifest_path, records_by_name
-from ..imaging import valid_region
+from ..imaging import catalog_validity
+from ..pipeline import prepared_images
 
 
 @dataclass(frozen=True)
@@ -64,10 +65,7 @@ def build(
     use_feature_masks: bool,
     progress: Callable[[int, int], None] | None = None,
 ) -> InputSpec:
-    catalog_path = project_dir / "prepare_images" / "image_catalog.json"
-    if not catalog_path.is_file():
-        raise RuntimeError("prepare_images must run before feature extraction")
-    catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
+    catalog = prepared_images.load_catalog(project_dir)
     generated_masks: dict[str, Path] = {}
     if use_feature_masks:
         path = mask_manifest_path(project_dir, MaskPurpose.FEATURE)
@@ -82,7 +80,9 @@ def build(
     masks_dir = output_dir / "masks"
     physical_mask_templates: dict[str, Path] = {}
     materialize_masks = use_feature_masks or any(
-        image["valid_region"]["kind"] != "full" for image in catalog["images"]
+        image.get("valid_mask_path") is not None
+        or image["valid_region"]["kind"] != "full"
+        for image in catalog["images"]
     )
     for image_number, image in enumerate(catalog["images"], 1):
         source = project_dir / image["path"]
@@ -116,10 +116,10 @@ def build(
             elif use_feature_masks:
                 raise RuntimeError(f"feature mask missing for prepared image: {image['name']}")
             else:
-                key = valid_region.cache_key(image["valid_region"], *expected_size)
+                key = catalog_validity.cache_key(image, *expected_size)
                 template = physical_mask_templates.get(key)
                 if template is None:
-                    _write_valid_region_mask(image, destination)
+                    _write_valid_region_mask(project_dir, image, destination)
                     physical_mask_templates[key] = destination
                 else:
                     _link_or_copy(template, destination)
@@ -148,7 +148,7 @@ def build(
 
     rig_config_path = None
     if catalog.get("rig_config_path"):
-        source = project_dir / "prepare_images" / catalog["rig_config_path"]
+        source = project_dir / prepared_images.DIRECTORY / catalog["rig_config_path"]
         destination = output_dir / "rig_config.json"
         shutil.copy2(source, destination)
         rig_config_path = "rig_config.json"
@@ -188,11 +188,11 @@ def build(
     return spec
 
 
-def _write_valid_region_mask(image: dict, destination: Path) -> None:
+def _write_valid_region_mask(project_dir: Path, image: dict, destination: Path) -> None:
     import cv2  # noqa: PLC0415
 
     width, height = int(image["width"]), int(image["height"])
-    mask = valid_region.render_mask(image["valid_region"], width, height) * 255
+    mask = catalog_validity.render_mask(project_dir, image, width, height) * 255
     destination.parent.mkdir(parents=True, exist_ok=True)
     if not cv2.imwrite(str(destination), mask):
         raise RuntimeError(f"failed to write mask: {destination}")

@@ -112,6 +112,28 @@ def test_project_mei_optical_axis_lands_at_principal_point():
     assert abs(uv[0, 1] - intr.cy) < 1e-6
 
 
+def test_mei_pixel_ray_roundtrip_is_subpixel_exact():
+    intr = _camera_system().sensors[0].intrinsics.scaled(3840, 3840)
+    theta = np.linspace(0.0, math.radians(85.0), 30)
+    azimuth = np.linspace(0.0, 2.0 * math.pi, 40, endpoint=False)
+    theta_grid, azimuth_grid = np.meshgrid(theta, azimuth, indexing="ij")
+    rays = np.column_stack(
+        (
+            (np.sin(theta_grid) * np.cos(azimuth_grid)).ravel(),
+            (np.sin(theta_grid) * np.sin(azimuth_grid)).ravel(),
+            np.cos(theta_grid).ravel(),
+        )
+    )
+
+    pixels, projected = proj.project_mei(rays, intr)
+    recovered, unprojected = proj.unproject_mei(pixels, intr)
+
+    valid = projected & unprojected
+    angular_error = np.arccos(np.clip(np.sum(rays[valid] * recovered[valid], axis=1), -1.0, 1.0))
+    assert valid.sum() > 1000
+    assert np.max(angular_error) < 2e-7
+
+
 def test_project_mei_back_hemisphere_rejected():
     intr = _camera_system().sensors[0].intrinsics
     # xi=2 なので Z=-1 でも denom = -1+2 = 1 > 0, まだ valid.
@@ -145,7 +167,7 @@ def test_mei_calibration_fits_forward_thin_prism_fisheye():
     assert results[0].params != results[1].params
 
 
-def test_stock_lfstudio_compatible_model_is_invertible_and_bounded():
+def test_rectification_target_model_is_invertible_and_bounded():
     theta = np.linspace(0.01, math.radians(89.0), 40)
     azimuth = np.linspace(0.0, 2.0 * math.pi, 64, endpoint=False)
     theta_grid, azimuth_grid = np.meshgrid(theta, azimuth, indexing="ij")

@@ -265,6 +265,7 @@ export const App = () => {
     'extract_frames',
     ...(isFisheye ? ['fisheye_region'] : []),
     'prepare_images',
+    'rectify_fisheye',
     ...(params.featureMaskEnabled ? ['generate_feature_masks'] : []),
     ...(params.trainingMaskEnabled ? ['generate_training_masks'] : []),
     'extract_features',

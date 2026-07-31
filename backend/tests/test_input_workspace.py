@@ -33,7 +33,7 @@ def _write_feature_masks(project, names):
 
 def test_mixed_workspace_materializes_batches_masks_and_rig(tmp_path):
     project = tmp_path / "project"
-    prepared = project / "prepare_images"
+    prepared = project / "rectify_fisheye"
     fisheye = prepared / "fisheye.jpg"
     phone = prepared / "phone.jpg"
     prepared.mkdir(parents=True)
@@ -131,7 +131,7 @@ def test_mixed_workspace_materializes_batches_masks_and_rig(tmp_path):
 
 def test_workspace_without_feature_masks_keeps_only_physical_valid_regions(tmp_path):
     project = tmp_path / "project"
-    prepared = project / "prepare_images"
+    prepared = project / "rectify_fisheye"
     prepared.mkdir(parents=True)
     source = prepared / "image.jpg"
     PilImage.new("RGB", (100, 100), (10, 20, 30)).save(source, format="JPEG")
@@ -181,7 +181,7 @@ def test_workspace_without_feature_masks_keeps_only_physical_valid_regions(tmp_p
 
 def test_workspace_with_full_regions_and_feature_masks_disabled_has_no_mask_path(tmp_path):
     project = tmp_path / "project"
-    prepared = project / "prepare_images"
+    prepared = project / "rectify_fisheye"
     prepared.mkdir(parents=True)
     source = prepared / "image.jpg"
     PilImage.new("RGB", (100, 100), (10, 20, 30)).save(source, format="JPEG")
@@ -220,7 +220,7 @@ def test_workspace_with_full_regions_and_feature_masks_disabled_has_no_mask_path
 
 def test_workspace_rejects_image_dimensions_changed_after_prepare(tmp_path):
     project = tmp_path / "project"
-    prepared = project / "prepare_images"
+    prepared = project / "rectify_fisheye"
     prepared.mkdir(parents=True)
     source = prepared / "image.jpg"
     PilImage.new("RGB", (50, 50), (10, 20, 30)).save(source, format="JPEG")

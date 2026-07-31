@@ -18,5 +18,6 @@ from . import (
     position_ground,  # noqa: F401
     prepare_images,  # noqa: F401
     reconstruct,  # noqa: F401
+    rectify_fisheye,  # noqa: F401
     restore_metric_scale,  # noqa: F401
 )

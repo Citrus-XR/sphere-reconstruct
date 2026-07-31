@@ -122,11 +122,12 @@ const installUiMock = async (page: Page, options: MockOptions = {}) => {
     const projectMatch = path.match(/^\/api\/projects\/(p1|p2)/)
     const projectId = projectMatch?.[1]
     if (projectId && path === `/api/projects/${projectId}/stages`) {
-      const names = ['inspect_source', 'extract_frames', 'prepare_images', 'generate_feature_masks', 'generate_training_masks', 'extract_features', 'match_features', 'reconstruct', 'align_reconstruction', 'restore_metric_scale', 'position_ground', 'dense_initialization', 'export_dataset']
+      const names = ['inspect_source', 'extract_frames', 'prepare_images', 'rectify_fisheye', 'generate_feature_masks', 'generate_training_masks', 'extract_features', 'match_features', 'reconstruct', 'align_reconstruction', 'restore_metric_scale', 'position_ground', 'dense_initialization', 'export_dataset']
       const extras: Record<string, Record<string, unknown>> = {
         inspect_source: { kind: 'insv', file_size: 1024, gravity_samples: 42 },
         extract_frames: { frames: 1, selection_mode: 'interval', selected: 1 },
         prepare_images: { images: 2, sources: 1, camera_groups: 1 },
+        rectify_fisheye: { rectified_images: 2, rectified_groups: 1, image_format: 'png' },
         generate_feature_masks: { purpose: 'feature', images: 2, average_dynamic_coverage: 0.2, coverage_warnings: 0 },
         generate_training_masks: { purpose: 'training', images: 2, average_dynamic_coverage: 0.1, coverage_warnings: 0 },
         extract_features: { images: 2, minimum_keypoints: 100, average_keypoints: 200, maximum_keypoints: 300, descriptor_images: 2 },
@@ -747,7 +748,6 @@ test('feature, matching, and mapper controls have localized names and explanatio
   await expect(page.getByText('Predicts local ground near the primary camera path with equal weight per camera sample, then moves its median height to dataset Y=0.', { exact: true })).toBeVisible()
   await page.getByText('Export', { exact: true }).click()
   await expect(page.getByText('Optimize fisheye training images', { exact: true })).toBeVisible()
-  await expect(page.getByText('Experimental: LFStudio radial approximation', { exact: true })).toBeVisible()
   await page.getByText('Sparse reconstruction', { exact: true }).click()
 
   await page.getByTitle('Settings').click()

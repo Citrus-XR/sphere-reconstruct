@@ -169,7 +169,7 @@ def _execute(project: Path, raw_params: dict | None = None) -> Path:
     input_spec = project / "extract_features" / "input_spec.json"
     input_spec.parent.mkdir(parents=True, exist_ok=True)
     spec.write(input_spec)
-    catalog_path = project / "prepare_images" / "image_catalog.json"
+    catalog_path = project / "rectify_fisheye" / "image_catalog.json"
     if not catalog_path.is_file():
         catalog_path.parent.mkdir(parents=True, exist_ok=True)
         catalog_path.write_text(
@@ -261,7 +261,7 @@ def test_export_losslessly_crops_fisheye_training_dataset(tmp_path: Path):
             }
         ]
     }
-    catalog_path = project / "prepare_images" / "image_catalog.json"
+    catalog_path = project / "rectify_fisheye" / "image_catalog.json"
     catalog_path.parent.mkdir(parents=True)
     catalog_path.write_text(json.dumps(catalog), encoding="utf-8")
 
@@ -409,7 +409,7 @@ def test_export_keeps_physical_fisheye_mask_when_both_sam_steps_are_disabled(tmp
             }
         ]
     }
-    catalog_path = project / "prepare_images" / "image_catalog.json"
+    catalog_path = project / "rectify_fisheye" / "image_catalog.json"
     catalog_path.parent.mkdir(parents=True)
     catalog_path.write_text(json.dumps(catalog), encoding="utf-8")
 

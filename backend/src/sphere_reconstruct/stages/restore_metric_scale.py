@@ -9,6 +9,7 @@ from ..colmap import metric_scale
 from ..colmap import model as colmap_model
 from ..domain.artifacts import FileRef, StageManifest
 from ..domain.pipeline_state import StageName
+from ..pipeline import prepared_images
 from ..pipeline.manifest import register
 from ..pipeline.stage import Stage, StageContext, new_manifest
 from . import similarity_transform
@@ -32,8 +33,8 @@ class RestoreMetricScale(Stage):
         candidates = [
             ctx.project_dir / "manifests" / "align_reconstruction.json",
             ctx.project_dir / "align_reconstruction" / "alignment.json",
-            ctx.project_dir / "prepare_images" / "image_catalog.json",
-            ctx.project_dir / "prepare_images" / "rig_config.json",
+            prepared_images.catalog_path(ctx.project_dir),
+            prepared_images.rig_config_path(ctx.project_dir),
             *(ctx.project_dir / "align_reconstruction" / "sparse" / "0").glob("*"),
         ]
         return similarity_transform.input_refs(ctx, candidates)
@@ -57,14 +58,8 @@ class RestoreMetricScale(Stage):
                 "scale_factor": 1.0,
             }
         else:
-            catalog = json.loads(
-                (ctx.project_dir / "prepare_images" / "image_catalog.json").read_text(
-                    encoding="utf-8"
-                )
-            )
-            rig_config = _load_rig_config(
-                ctx.project_dir / "prepare_images" / "rig_config.json"
-            )
+            catalog = prepared_images.load_catalog(ctx.project_dir)
+            rig_config = _load_rig_config(prepared_images.rig_config_path(ctx.project_dir))
             result = metric_scale.estimate_metric_scale(reconstruction, catalog, rig_config)
             if not result.get("metric") and ctx.params["method"] == "rig":
                 raise RuntimeError(f"metric scale restoration failed: {result}")

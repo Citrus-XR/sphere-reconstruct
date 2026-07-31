@@ -120,7 +120,7 @@ def _apply_radial(theta: np.ndarray, radial) -> np.ndarray:
 
 def _invert_radial(theta_distorted: np.ndarray, radial) -> np.ndarray:
     k1, k2, k3, k4 = radial
-    theta = theta_distorted.copy()
+    theta = np.clip(theta_distorted, 0.0, np.pi / 2).copy()
     for _ in range(15):
         theta2 = theta * theta
         radial_scale = 1.0 + theta2 * (
@@ -136,6 +136,7 @@ def _invert_radial(theta_distorted: np.ndarray, radial) -> np.ndarray:
             out=np.zeros_like(theta),
             where=np.abs(derivative) > 1e-12,
         )
+        np.clip(theta, 0.0, np.pi / 2, out=theta)
     return theta
 
 
@@ -164,7 +165,20 @@ def _apply_thin_prism_distortion(points: np.ndarray, radial, tangential) -> np.n
 
 def _remove_thin_prism_distortion(points: np.ndarray, radial, tangential) -> np.ndarray:
     undistorted = points.copy()
+    _clip_equidistant_radius(undistorted)
     for _ in range(20):
         applied = _apply_thin_prism_distortion(undistorted, radial, tangential)
         undistorted += points - applied
+        _clip_equidistant_radius(undistorted)
     return undistorted
+
+
+def _clip_equidistant_radius(points: np.ndarray) -> None:
+    radius = np.linalg.norm(points, axis=1)
+    scale = np.divide(
+        np.minimum(radius, np.pi / 2),
+        radius,
+        out=np.ones_like(radius),
+        where=radius > 1e-12,
+    )
+    points *= scale[:, None]

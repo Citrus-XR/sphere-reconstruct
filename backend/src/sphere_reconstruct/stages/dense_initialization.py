@@ -9,6 +9,7 @@ from ..colmap import model as colmap_model
 from ..dense_init import DenseInitializationConfig, densify_reconstruction
 from ..domain.artifacts import FileRef, StageManifest
 from ..domain.pipeline_state import StageName
+from ..pipeline import prepared_images
 from ..pipeline.manifest import register
 from ..pipeline.stage import Stage, StageContext, new_manifest
 from . import similarity_transform
@@ -43,7 +44,7 @@ class DenseInitialization(Stage):
         candidates = [
             ctx.project_dir / "manifests" / "position_ground.json",
             ctx.project_dir / "manifests" / "extract_features.json",
-            ctx.project_dir / "prepare_images" / "image_catalog.json",
+            prepared_images.catalog_path(ctx.project_dir),
             *(ctx.project_dir / "position_ground" / "sparse" / "0").glob("*"),
         ]
         return similarity_transform.input_refs(ctx, candidates)
@@ -75,11 +76,7 @@ class DenseInitialization(Stage):
             )
             reconstruction = colmap_model.read_model(input_model)
             base_points = len(reconstruction.points3D)
-            catalog = json.loads(
-                (ctx.project_dir / "prepare_images" / "image_catalog.json").read_text(
-                    encoding="utf-8"
-                )
-            )
+            catalog = prepared_images.load_catalog(ctx.project_dir)
             from ..dense_init.matcher import RomaV2Matcher  # noqa: PLC0415
 
             matcher = RomaV2Matcher(setting=ctx.params["quality"], seed=ctx.params["seed"])

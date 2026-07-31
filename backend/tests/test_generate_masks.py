@@ -58,7 +58,7 @@ def test_mask_steps_have_distinct_runtime_default_prompts():
 
 
 def _make_catalog(project_dir, *, circle: bool) -> list[str]:
-    prepared = project_dir / "prepare_images"
+    prepared = project_dir / "rectify_fisheye"
     names = ["sources/source-a/main/frame_000000.jpg", "sources/source-a/main/frame_000001.jpg"]
     images = []
     for index, name in enumerate(names):
@@ -169,7 +169,7 @@ def test_generate_masks_rejects_image_dimensions_changed_after_prepare(tmp_path,
     project = tmp_path / "project"
     project.mkdir()
     names = _make_catalog(project, circle=False)
-    image_path = project / "prepare_images" / names[0]
+    image_path = project / "rectify_fisheye" / names[0]
     assert cv2.imwrite(str(image_path), np.zeros((128, 128, 3), dtype=np.uint8))
     monkeypatch.setattr(sam3_engine, "Sam3Engine", _FakeEngine)
     stage = GenerateTrainingMasks()

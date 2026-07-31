@@ -28,6 +28,7 @@ from ..domain.pipeline_state import StageName
 from ..imaging import fisheye_region
 from ..infrastructure.database import get_db
 from ..infrastructure.filesystem import PathNotAllowedError, ensure_within
+from ..pipeline import prepared_images
 from ..pipeline.invalidation import derive_pipeline_state, invalidate_from
 
 router = APIRouter(tags=["previews"])
@@ -110,7 +111,7 @@ async def frame_image(project_id: str, index: int, lens: int = 0):
     path = _safe(project_dir, frame[key])
     if not path.exists():
         raise HTTPException(status_code=404, detail="image file missing")
-    return FileResponse(path, media_type="image/jpeg")
+    return FileResponse(path, media_type="image/png" if path.suffix.lower() == ".png" else "image/jpeg")
 
 
 @router.get("/api/projects/{project_id}/prepared-image", response_class=FileResponse, response_model=None)
@@ -120,7 +121,7 @@ async def prepared_image(project_id: str, name: str):
     path = _safe(project_dir, record["path"])
     if not path.is_file():
         raise HTTPException(status_code=404, detail="prepared image not found")
-    return FileResponse(path, media_type="image/jpeg")
+    return FileResponse(path, media_type="image/png" if path.suffix.lower() == ".png" else "image/jpeg")
 
 
 @router.get("/api/projects/{project_id}/prepared-mask", response_class=FileResponse, response_model=None)
@@ -352,9 +353,9 @@ def _latest_transform_preview(project_dir: Path, filename: str) -> Path:
 
 
 def _catalog_image(project_dir: Path, name: str) -> dict:
-    catalog = project_dir / "prepare_images" / "image_catalog.json"
+    catalog = prepared_images.catalog_path(project_dir)
     if not catalog.is_file():
-        raise HTTPException(status_code=404, detail="prepare_images not run yet")
+        raise HTTPException(status_code=404, detail="rectify_fisheye not run yet")
     record = next(
         (item for item in json.loads(catalog.read_text(encoding="utf-8"))["images"] if item["name"] == name),
         None,

@@ -5,6 +5,7 @@ export type PipelineState =
   | 'inspected'
   | 'extracted'
   | 'prepared'
+  | 'rectified'
   | 'masked'
   | 'features_extracted'
   | 'matched'

@@ -350,6 +350,61 @@ def project_mei(rays: np.ndarray, intr: MeiIntrinsics) -> tuple[np.ndarray, np.n
     return uv, valid
 
 
+def unproject_mei(pixels: np.ndarray, intr: MeiIntrinsics) -> tuple[np.ndarray, np.ndarray]:
+    """Sensor-local pixel を MEI camera ray へ戻す。"""
+    pixels = np.asarray(pixels, dtype=np.float64).reshape((-1, 2))
+    distorted = np.column_stack(
+        ((pixels[:, 0] - intr.cx) / intr.fx, (pixels[:, 1] - intr.cy) / intr.fy)
+    )
+    normalized = distorted.copy()
+    maximum_radius = 1.0 / intr.xi
+    _clip_planar_radius(normalized, maximum_radius)
+    for _ in range(20):
+        applied_x, applied_y = _apply_distortion(
+            normalized[:, 0],
+            normalized[:, 1],
+            intr,
+        )
+        normalized += distorted - np.column_stack((applied_x, applied_y))
+        _clip_planar_radius(normalized, maximum_radius)
+    applied_x, applied_y = _apply_distortion(normalized[:, 0], normalized[:, 1], intr)
+    inversion_error = np.linalg.norm(
+        np.column_stack((applied_x, applied_y)) - distorted,
+        axis=1,
+    )
+    radius2 = np.sum(normalized * normalized, axis=1)
+    discriminant = 1.0 + (1.0 - intr.xi * intr.xi) * radius2
+    safe_discriminant = np.maximum(discriminant, 0.0)
+    scale = (intr.xi + np.sqrt(safe_discriminant)) / (1.0 + radius2)
+    rays = np.column_stack(
+        (
+            scale * normalized[:, 0],
+            scale * normalized[:, 1],
+            scale - intr.xi,
+        )
+    )
+    norms = np.linalg.norm(rays, axis=1)
+    rays = np.divide(
+        rays,
+        norms[:, None],
+        out=np.zeros_like(rays),
+        where=norms[:, None] > 1e-12,
+    )
+    in_frame = (
+        (pixels[:, 0] >= 0.0)
+        & (pixels[:, 0] <= intr.width - 1)
+        & (pixels[:, 1] >= 0.0)
+        & (pixels[:, 1] <= intr.height - 1)
+    )
+    valid = (
+        (discriminant >= 0.0)
+        & (rays[:, 2] >= -1e-9)
+        & (inversion_error < 1e-6)
+        & in_frame
+    )
+    return rays, valid
+
+
 def _apply_distortion(x: np.ndarray, y: np.ndarray, intr: MeiIntrinsics) -> tuple[np.ndarray, np.ndarray]:
     r2 = x * x + y * y
     r4 = r2 * r2
@@ -361,6 +416,17 @@ def _apply_distortion(x: np.ndarray, y: np.ndarray, intr: MeiIntrinsics) -> tupl
     dx = 2.0 * intr.p1 * x * y + intr.p2 * (r2 + 2.0 * x * x)
     dy = intr.p1 * (r2 + 2.0 * y * y) + 2.0 * intr.p2 * x * y
     return x * radial + dx, y * radial + dy
+
+
+def _clip_planar_radius(points: np.ndarray, maximum_radius: float) -> None:
+    radius = np.linalg.norm(points, axis=1)
+    scale = np.divide(
+        np.minimum(radius, maximum_radius),
+        radius,
+        out=np.ones_like(radius),
+        where=radius > 1e-12,
+    )
+    points *= scale[:, None]
 
 
 # -----------------------------------------------------------------------------

@@ -19,6 +19,7 @@ class PipelineState(StrEnum):
     INSPECTED = "inspected"
     EXTRACTED = "extracted"
     PREPARED = "prepared"
+    RECTIFIED = "rectified"
     MASKED = "masked"
     FEATURES_EXTRACTED = "features_extracted"
     MATCHED = "matched"
@@ -41,15 +42,16 @@ _ORDER: dict[PipelineState, int] = {
     PipelineState.INSPECTED: 1,
     PipelineState.EXTRACTED: 2,
     PipelineState.PREPARED: 3,
-    PipelineState.MASKED: 4,
-    PipelineState.FEATURES_EXTRACTED: 5,
-    PipelineState.MATCHED: 6,
-    PipelineState.RECONSTRUCTED: 7,
-    PipelineState.ALIGNED: 8,
-    PipelineState.SCALE_RESTORED: 9,
-    PipelineState.GROUNDED: 10,
-    PipelineState.DENSIFIED: 11,
-    PipelineState.EXPORTED: 12,
+    PipelineState.RECTIFIED: 4,
+    PipelineState.MASKED: 5,
+    PipelineState.FEATURES_EXTRACTED: 6,
+    PipelineState.MATCHED: 7,
+    PipelineState.RECONSTRUCTED: 8,
+    PipelineState.ALIGNED: 9,
+    PipelineState.SCALE_RESTORED: 10,
+    PipelineState.GROUNDED: 11,
+    PipelineState.DENSIFIED: 12,
+    PipelineState.EXPORTED: 13,
 }
 
 
@@ -59,6 +61,7 @@ class StageName(StrEnum):
     INSPECT_SOURCE = "inspect_source"
     EXTRACT_FRAMES = "extract_frames"
     PREPARE_IMAGES = "prepare_images"
+    RECTIFY_FISHEYE = "rectify_fisheye"
     GENERATE_FEATURE_MASKS = "generate_feature_masks"
     GENERATE_TRAINING_MASKS = "generate_training_masks"
     EXTRACT_FEATURES = "extract_features"
@@ -75,6 +78,7 @@ STAGE_TO_STATE: dict[StageName, PipelineState] = {
     StageName.INSPECT_SOURCE: PipelineState.INSPECTED,
     StageName.EXTRACT_FRAMES: PipelineState.EXTRACTED,
     StageName.PREPARE_IMAGES: PipelineState.PREPARED,
+    StageName.RECTIFY_FISHEYE: PipelineState.RECTIFIED,
     StageName.GENERATE_FEATURE_MASKS: PipelineState.MASKED,
     StageName.GENERATE_TRAINING_MASKS: PipelineState.MASKED,
     StageName.EXTRACT_FEATURES: PipelineState.FEATURES_EXTRACTED,
@@ -92,6 +96,7 @@ STAGE_ORDER: tuple[StageName, ...] = (
     StageName.INSPECT_SOURCE,
     StageName.EXTRACT_FRAMES,
     StageName.PREPARE_IMAGES,
+    StageName.RECTIFY_FISHEYE,
     StageName.GENERATE_FEATURE_MASKS,
     StageName.GENERATE_TRAINING_MASKS,
     StageName.EXTRACT_FEATURES,
@@ -108,7 +113,8 @@ STAGE_ORDER: tuple[StageName, ...] = (
 _STAGE_CONSUMERS: dict[StageName, tuple[StageName, ...]] = {
     StageName.INSPECT_SOURCE: (StageName.EXTRACT_FRAMES,),
     StageName.EXTRACT_FRAMES: (StageName.PREPARE_IMAGES,),
-    StageName.PREPARE_IMAGES: (
+    StageName.PREPARE_IMAGES: (StageName.RECTIFY_FISHEYE,),
+    StageName.RECTIFY_FISHEYE: (
         StageName.GENERATE_FEATURE_MASKS,
         StageName.GENERATE_TRAINING_MASKS,
         StageName.EXTRACT_FEATURES,

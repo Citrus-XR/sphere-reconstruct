@@ -18,9 +18,10 @@ from ..domain.mask_artifact import (
     remove_partial_mask_manifest,
 )
 from ..domain.pipeline_state import StageName
+from ..imaging import catalog_validity, valid_region
 from ..imaging import masks as mask_utils
-from ..imaging import valid_region
 from ..infrastructure.filesystem import sha256_file
+from ..pipeline import prepared_images
 from ..pipeline.manifest import register
 from ..pipeline.stage import ProgressSpan, Stage, StageContext, new_manifest
 from ..settings import get_settings
@@ -47,8 +48,8 @@ class _GenerateMasks(Stage):
 
     def collect_inputs(self, ctx: StageContext) -> list[FileRef]:
         candidates = [
-            ctx.project_dir / "manifests" / "prepare_images.json",
-            ctx.project_dir / "prepare_images" / "image_catalog.json",
+            ctx.project_dir / "manifests" / "rectify_fisheye.json",
+            prepared_images.catalog_path(ctx.project_dir),
         ]
         return [
             FileRef(
@@ -63,10 +64,7 @@ class _GenerateMasks(Stage):
     def execute(self, ctx: StageContext) -> StageManifest:
         import cv2  # noqa: PLC0415
 
-        catalog_path = ctx.project_dir / "prepare_images" / "image_catalog.json"
-        if not catalog_path.is_file():
-            raise RuntimeError(f"prepare_images must run before {self.name.value}")
-        catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
+        catalog = prepared_images.load_catalog(ctx.project_dir)
         images = catalog["images"]
         if ctx.params["max_images"] > 0:
             images = images[: ctx.params["max_images"]]
@@ -130,11 +128,11 @@ class _GenerateMasks(Stage):
                         f"prepared image dimensions changed for {image_record['name']}: "
                         f"{width}x{height} != {expected_size[0]}x{expected_size[1]}"
                     )
-                region_key = valid_region.cache_key(image_record["valid_region"], width, height)
+                region_key = catalog_validity.cache_key(image_record, width, height)
                 camera_valid = valid_region_cache.get(region_key)
                 if camera_valid is None:
-                    camera_valid = valid_region.render_mask(
-                        image_record["valid_region"], width, height
+                    camera_valid = catalog_validity.render_mask(
+                        ctx.project_dir, image_record, width, height
                     )
                     valid_region_cache[region_key] = camera_valid
                     if len(valid_region_cache) > 4:

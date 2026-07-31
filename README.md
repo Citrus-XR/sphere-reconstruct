@@ -51,7 +51,7 @@ ONNX CUDA、SAM3 を別 capability として調べる。Platform / build 詳細�
 
 | Input | Media | Prepared camera | Role |
 |---|---|---|---|
-| Insta360 `.insv` | Video | 2× `THIN_PRISM_FISHEYE` + calibrated physical rig | Primary / supplemental |
+| Insta360 `.insv` | Video | Mandatory rectified 2× `OPENCV_FISHEYE` + calibrated physical rig | Primary / supplemental |
 | Stitch 済み 360° video | Video | `EQUIRECTANGULAR` | Primary / supplemental |
 | Stitch 済み 360° image folder | Images | `EQUIRECTANGULAR` | Primary / supplemental |
 | 通常 / phone video | Video | `SIMPLE_RADIAL` | Primary / supplemental |
@@ -69,6 +69,7 @@ Sources
   -> extract_frames                     # video: PTS-based decode / still: collect
   -> fisheye valid-region editor
   -> prepare_images                     # canonical images / cameras / rigs
+  -> rectify_fisheye                    # mandatory raw fisheye -> consistent OPENCV PNG
        ├─ generate_feature_masks -> extract_features -> match_features -> reconstruct
        └─ generate_training_masks ---------------------------------------------┐
   -> align_reconstruction               # rotation only                         │
@@ -83,6 +84,7 @@ Sources
 | Inspect | source identity、camera system、IMU / shutter metadata | Source branch 全体 |
 | Extract | selected captures、real PTS、pairing statistics | Prepare 以降 |
 | Prepare | canonical image catalog、camera groups、rig config | Masks / SfM 以降 |
+| Rectify fisheye | same-resolution OPENCV_FISHEYE PNG、bitmap validity、updated rig | Masks / SfM 以降 |
 | Feature masks | SfM keep mask | Feature / match / SfM / export |
 | Training masks | final training keep mask | Export |
 | Feature | COLMAP DB、descriptor、input workspace | Match 以降 |
@@ -102,7 +104,7 @@ SAM3 mask は PNG の atomic write 後すぐ preview できる。
 
 | Category | Default | Reason |
 |---|---|---|
-| Reconstruction | Native fisheye | Derived pinhole を作らず source pixel を保持 |
+| Reconstruction | Mandatory fisheye rectification | Pinhole 化せず、同解像度 OPENCV_FISHEYE へ一回だけ正確に再投影 |
 | Feature | SIFT | 実測で ALIKED より速く reprojection も低い |
 | Matcher | Brute-force | SIFT の安定経路 |
 | Pairing | Auto | Single=Sequential、small mixed=Exhaustive、large mixed=Vocab-tree |
@@ -177,7 +179,10 @@ Adapter は各辺 32 px を引いてから 5312→decoded size を scale する�
 1.204819% 過小評価していた。Crop 修正後の 3840 px focal は lens0 3092.747、lens1 3106.128。Principal point
 差は約 0.06 px しかないため center check では発見できず、外参で seam が改善しても円や直線を曲げていた。
 
-MEI は COLMAP / LFStudio の model semantics を同時に評価した `THIN_PRISM_FISHEYE` へ近似する。
+Prepare は native MEI と full rig を保持し、diagnostic 用に `THIN_PRISM_FISHEYE` 近似も評価する。その直後の
+mandatory `rectify_fisheye` Step は、target pixel → OPENCV ray → source MEI pixel の backward map で RGB を
+同解像度 PNG へ一回だけ再投影する。Custom add/subtract validity も同じ map で nearest resample する。以後 SAM、
+SIFT、BA、COLMAP、LFStudio は画像と完全に一致する `OPENCV_FISHEYE` camera / rig だけを読む。
 
 | Sensor | COLMAP RMS | LFStudio RMS | Combined maximum |
 |---|---:|---:|---:|
@@ -294,16 +299,15 @@ export_dataset/
 └── export_manifest.json
 ```
 
-Fisheye JPEG は valid region を含む MCU boundary で lossless crop し、principal point、2D observation、mask を
+Rectified fisheye PNG は valid bitmap bounds で lossless pixel crop し、principal point、2D observation、mask を
 同じ offset で更新する。Export は registered image だけを含み、camera center `C=-R^Tt`、rig/frame、mask count
 を loader smoke で検証する。LFStudio は `rigs.bin` で pose を修正しないため、`images.bin` の pose が正本。
 
 Stock LFStudio v0.5.3 / current master の `THIN_PRISM_FISHEYE` inverse は、各 iteration で元の distorted UV から
 解く代わりに前回 UV から non-radial delta を繰り返し減算する。Lens1 では 2048 training scale でも maximum
-約 11.4 px の forward/inverse 不一致となり、円を非対称に変形する。Camera だけを `OPENCV_FISHEYE`
-approximation へ変換する実験は、単一 sensor を鮮明にした一方、lens0 / lens1 の異なる近似誤差
-(3840 scale maximum 1.58 / 4.52 px) により cross-sensor ray をずらし、二眼 ghost を悪化させた。従って既定は
-無効。正しい修正は LFStudio source patch、または RGB / mask / observation を同じ mapping で再投影すること。
+約 11.4 px の forward/inverse 不一致となる。Camera metadata だけを OPENCV へ交換した実験も二眼 ghost を
+悪化させた。Mandatory rectification は feature extraction より前に RGB と validity 自体を target camera grid へ
+変換するため、この二つの不整合を避け、LFStudio patch を必須にしない。
 Source build 用の修正は [scripts/patches/lichtfeld-thin-prism-inverse.patch](scripts/patches/lichtfeld-thin-prism-inverse.patch)。
 `undistort=true` にも prism packing bug があるため workaround にしない。
 
@@ -317,7 +321,7 @@ LichtFeld-Studio --config <dataset>/train_configs/train_config.mrnf.json \
 - MRNF UI defaults、GUT、segment mask
 - `undistort=false`
 - PPISP / novel-view controller off
-- Experimental camera-only radial approximation off
+- Mandatory fisheye rectification already applied before SfM
 - max width 2048、general cap 2M、30,000 iterations
 
 PPISP は exposure / vignetting / response の appearance model で denoiser ではない。旧 eval preset は means LR
@@ -375,6 +379,7 @@ Detail hallucination / temporal inconsistency risk もあるため denoise Step�
 | Calibrated raw sparse | 190 | 33:49 | 20.492 | 0.7430 | Seam は改善、円形変形と遠方 ghost 残存 |
 | Calibrated raw + low-RS frame filter | 190 | 33:32 | — | — | 目視改善は小さい |
 | Crop-correct + camera-only radial approximation | 192 | 36:02 | 20.262 | 0.7334 | 単眼は鮮明、二眼 alignment / ghost は退行 |
+| **Mandatory exact OPENCV rectification** | 192 | training 中 | — | — | RGB/mask/camera を同じ ray map で変換 |
 | **Official stitched ERP reference** | 80 | **30:21** | **21.770** | **0.8611** | 円形は良好、公式 seam に大きい局所 offset |
 
 PSNR / SSIM は各 dataset 自身の training cameras に対する値で、camera / target が異なる行を直接 ranking しない。
@@ -396,6 +401,19 @@ SO(3) RANSAC inlier が 50.9%→88.3%、angular median が 0.342°→0.108°へ�
 Crop-correct radial run は 96 captures / 192 cameras で、旧 95 / 190 と validation set が異なる。目視では
 単一 sensor が鮮明になる一方、二 sensor を同時に見ると alignment と ghost が退行した。Camera model だけを
 交換する方法は正しい coordinate transform ではないため、default / recommendation から除外した。
+
+Mandatory exact rectification は 192 枚の 3840² JPEG を同解像度 PNG へ 74 秒で変換した。PNG は 285 MB から
+1.89 GB へ増えるが、二回補間を含む source→target→source 診断でも lens0 / lens1 は 42.02 / 40.47 dB、
+8-bit MAE 0.445 / 0.390。実 pipeline は一回だけ補間する。Same 96 captures の COLMAP A/B:
+
+| Geometry | Crop-correct THIN | Exact rectified OPENCV |
+|---|---:|---:|
+| Registered images | 192 / 192 | 192 / 192 |
+| Points3D | 28,060 | **29,974** |
+| Observations | 169,246 | **181,549** |
+| Mean reprojection | 1.105 px | **1.080 px** |
+| P95 reprojection | 1.987 px | **1.947 px** |
+| Trajectory max / P95 | 1.238× | **1.237×** |
 
 ## Frontend
 

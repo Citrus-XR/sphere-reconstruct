@@ -17,7 +17,7 @@ from pathlib import Path
 
 from PIL import Image as PilImage
 
-from ..imaging import valid_region
+from ..imaging import catalog_validity, valid_region
 from .model import Camera, Image, ImagePoint2D, Reconstruction
 
 _PRINCIPAL_POINT_INDICES = {
@@ -89,6 +89,7 @@ def build_plan(
     catalog: dict,
     *,
     alignment_px: int = 16,
+    project_dir: Path | None = None,
 ) -> CropPlan:
     if alignment_px <= 0:
         raise ValueError("alignment_px must be positive")
@@ -117,7 +118,7 @@ def build_plan(
             raise ValueError(f"camera {image.camera_id} has inconsistent valid regions")
         rect = camera_rects.get(image.camera_id)
         if rect is None:
-            rect = _record_rect(record, alignment_px)
+            rect = _record_rect(record, alignment_px, project_dir)
             camera_rects[image.camera_id] = rect
         image_rects[image.name] = rect
         source_sizes[image.name] = (width, height)
@@ -211,14 +212,24 @@ def crop_masks(
     return len(names)
 
 
-def _record_rect(record: dict, alignment: int) -> CropRect:
+def _record_rect(record: dict, alignment: int, project_dir: Path | None) -> CropRect:
     width, height = int(record["width"]), int(record["height"])
     region = record.get("valid_region", {"kind": "full"})
     if region.get("kind") == "full":
         return CropRect(0, 0, width, height)
-    valid_left, valid_top, valid_right, valid_bottom = valid_region.bounding_box(
-        region, width, height
-    )
+    if record.get("valid_mask_path") is not None:
+        if project_dir is None:
+            raise ValueError("bitmap valid region の crop には project_dir が必要です")
+        valid_left, valid_top, valid_right, valid_bottom = catalog_validity.bounding_box(
+            project_dir,
+            record,
+            width,
+            height,
+        )
+    else:
+        valid_left, valid_top, valid_right, valid_bottom = valid_region.bounding_box(
+            region, width, height
+        )
     left = max(0, math.floor(valid_left / alignment) * alignment)
     top = max(0, math.floor(valid_top / alignment) * alignment)
     right = min(width, math.ceil(valid_right / alignment) * alignment)

@@ -14,6 +14,7 @@ from ..domain.pipeline_state import StageName
 from ..domain.source import SourceAdapter
 from ..infrastructure.filesystem import sha256_file
 from ..insta360 import imu
+from ..pipeline import prepared_images
 from ..pipeline.manifest import register
 from ..pipeline.stage import ProgressSpan, Stage, StageContext, new_manifest
 from ..settings import get_settings
@@ -39,7 +40,7 @@ class AlignReconstruction(Stage):
             ctx.project_dir / "manifests" / "reconstruct.json",
             ctx.project_dir / "manifests" / "extract_frames.json",
             ctx.project_dir / "inspect_source" / "sources.json",
-            ctx.project_dir / "prepare_images" / "image_catalog.json",
+            prepared_images.catalog_path(ctx.project_dir),
         ]
         candidates += list((ctx.project_dir / "reconstruct" / "sparse" / "0").glob("*"))
         return [

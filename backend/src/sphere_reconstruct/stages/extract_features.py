@@ -11,6 +11,7 @@ from ..colmap import runner as colmap_runner
 from ..domain.artifacts import FileRef, StageManifest
 from ..domain.pipeline_state import StageName
 from ..infrastructure.filesystem import sha256_file
+from ..pipeline import prepared_images
 from ..pipeline.manifest import register
 from ..pipeline.stage import ProgressSpan, Stage, StageContext, new_manifest
 from ..settings import get_settings
@@ -42,8 +43,8 @@ class ExtractFeatures(Stage):
 
     def collect_inputs(self, ctx: StageContext) -> list[FileRef]:
         candidates = [
-            ctx.project_dir / "manifests" / "prepare_images.json",
-            ctx.project_dir / "prepare_images" / "image_catalog.json",
+            ctx.project_dir / "manifests" / "rectify_fisheye.json",
+            prepared_images.catalog_path(ctx.project_dir),
         ]
         if ctx.params["use_feature_masks"]:
             candidates.extend(

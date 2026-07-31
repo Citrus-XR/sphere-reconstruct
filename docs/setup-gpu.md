@@ -192,6 +192,12 @@ Raw camera metadata は adapter が `camera_system.json` へ正規化する。Co
 `offset_v3`、メーカー名、合成 calibration canvas を知らない。Current Insta360 adapter は per-sensor MEI と
 full 6DoF relative extrinsic を出力し、MEI を `THIN_PRISM_FISHEYE` へ近似する。
 
+Raw fisheye は mask / feature より前の mandatory `rectify_fisheye` Step で、同解像度 OPENCV_FISHEYE PNG へ
+一回だけ backward resample する。Target pixel → OPENCV ray → source MEI pixel を使い、validity bitmap も同じ
+map で変換する。COLMAP と LFStudio は rectified image / camera / rig の一つの contract だけを読む。
+192×3840² の実測は 74秒、PNG 1.89 GB。二回補間 roundtrip は 40.47–42.02 dB PSNR、MAE
+0.39–0.45 / 255。実 pipeline は一回だけ補間する。PNG encode が主な CPU / disk cost になる。
+
 X5 metadata field 27 の window crop は 5376²→5312² centered crop。各辺 32 px を引いてから decoded size へ
 scale する。これを省くと focal が 1.204819% 小さくなり、principal point はほぼ同じまま single-lens shape が
 曲がる。Crop と rig extrinsics は独立で、crop は `cam_from_rig` を変更しない。
@@ -266,8 +272,8 @@ Windows jpegtran installer:
 backend\.venv\Scripts\python.exe scripts\install_jpegtran.py
 ```
 
-Export は fisheye valid circle を含む JPEG MCU boundary で lossless crop し、principal point、2D observation、mask
-を同じ offset で更新する。jpegtran が無ければ original JPEG を保持し、warning を出す。
+Rectified fisheye PNG は validity bitmap bounds で lossless pixel crop し、principal point、2D observation、mask
+を同じ offset で更新する。Perspective JPEG の MCU crop には jpegtran を使う。
 
 ## LichtFeld Studio
 
@@ -282,7 +288,7 @@ LichtFeld-Studio --config <dataset>/train_configs/train_config.mrnf.json \
 - GUT on、`undistort=false`
 - resolved segment mask
 - PPISP / controller off
-- Experimental camera-only radial approximation off
+- Mandatory OPENCV_FISHEYE rectification completed before SfM
 - max width 2048
 - general cap 2M、30,000 iterations
 
@@ -290,9 +296,9 @@ LichtFeld-Studio --config <dataset>/train_configs/train_config.mrnf.json \
 ない。Actual size は `Image info` log を見る。
 
 Stock LFStudio の THIN_PRISM inverse は non-radial delta を前回 UV から五回減算し、forward と inverse が
-一致しない。Lens1 は 2048 scale で maximum 約 11.4 px。Training `cameras.bin` だけを OPENCV_FISHEYE へ
-変える実験は、sensor ごとの近似誤差で二眼 ghost を悪化させたため default off。LFStudio source patch、または
-RGB / mask / observation を同じ mapping で再投影する。`undistort=true` は別の prism packing bug がある。
+一致しない。Lens1 は 2048 scale で maximum 約 11.4 px。Mandatory rectification が RGB / validity / camera を
+feature extraction 前に一緒に OPENCV grid へ変換するため、stock LFStudio でもこの inverse を通らない。
+Legacy THIN dataset を直接使う場合だけ source patch が必要。`undistort=true` は別の prism packing bug がある。
 
 12 GB RTX 4070 Ti の Parktest は 2.4M / 2304 で OOM、2M / 2048 で完走。旧 eval preset は UI default より
 means LR 6.4 倍、scaling LR 約 2.86 倍で巨大な sky splat を生成した。PPISP off でも再現したため、config は
