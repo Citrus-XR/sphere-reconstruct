@@ -102,9 +102,17 @@ select.input { appearance: none; cursor: pointer; padding-right: 30px;
   background-size: 5px 5px, 5px 5px; background-repeat: no-repeat; }
 select.input option { color: var(--fg); background: var(--bg-elev); }
 input[type="checkbox"] { appearance: none; width: 16px; height: 16px; margin: 0;
-  border: 1px solid var(--glass-border); border-radius: 5px; background: var(--glass); cursor: pointer; }
-input[type="checkbox"]:checked { background: var(--accent); border-color: var(--accent);
-  box-shadow: inset 0 0 0 3px color-mix(in srgb, var(--accent) 28%, white); }
+  border: 1px solid color-mix(in srgb, var(--fg-mute) 72%, var(--border)); border-radius: 5px;
+  background-color: color-mix(in srgb, var(--bg-elev) 86%, var(--glass)); background-position: center;
+  background-repeat: no-repeat; background-size: 12px 12px; cursor: pointer;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--bg-elev) 65%, transparent); }
+input[type="checkbox"]:hover:not(:disabled) { border-color: var(--accent); }
+input[type="checkbox"]:checked { border-color: var(--accent); background-color: var(--accent);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M3.2 8.3 6.4 11.2 12.8 4.7' fill='none' stroke='white' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  box-shadow: none; }
+input[type="checkbox"]:focus-visible { outline: 2px solid color-mix(in srgb, var(--accent) 70%, white);
+  outline-offset: 2px; }
+input[type="checkbox"]:disabled { cursor: not-allowed; opacity: .55; }
 input[type="range"] { accent-color: var(--accent); }
 input[type="color"] { width: 28px; height: 20px; padding: 1px; border: 1px solid var(--glass-border);
   border-radius: 7px; background: var(--glass); }
@@ -136,7 +144,7 @@ input[type="color"] { width: 28px; height: 20px; padding: 1px; border: 1px solid
   position: fixed; inset: 0;
   display: grid;
   grid-template-columns: 1fr;
-  grid-template-rows: 56px 1fr 30px;
+  grid-template-rows: minmax(56px, auto) minmax(0, 1fr) 30px;
   grid-template-areas:
     "top"
     "center"
@@ -145,10 +153,11 @@ input[type="color"] { width: 28px; height: 20px; padding: 1px; border: 1px solid
   font-size: 13px;
 }
 .ide-top { grid-area: top; display: flex; align-items: center; gap: 12px; z-index: 20;
+  flex-wrap: wrap;
   padding: 7px 10px; border-bottom: 1px solid var(--glass-border);
   background: color-mix(in srgb, var(--glass) 82%, transparent);
   backdrop-filter: blur(22px) saturate(135%); }
-.ide-top h1 { font-size: 15px; margin: 0 8px 0 0; letter-spacing: .02em; }
+.ide-top h1 { font-size: 15px; margin: 0 8px 0 0; letter-spacing: 0; min-width: 0; overflow-wrap: anywhere; }
 .ide-center { grid-area: center; overflow: hidden; position: relative; background: transparent; }
 .ide-status { grid-area: status; display: flex; align-items: center; gap: 16px;
   padding: 0 12px; border-top: 1px solid var(--glass-border);
@@ -157,6 +166,16 @@ input[type="color"] { width: 28px; height: 20px; padding: 1px; border: 1px solid
   font-family: var(--mono-font); font-size: 11px; color: var(--fg-mute);
   overflow: hidden; min-width: 0; }
 .top-actions { display: flex; align-items: center; gap: 6px; }
+@media (max-width: 700px) {
+  .ide-top { gap: 6px; padding: 6px; }
+  .ide-top h1 { flex: 1; }
+  .ide-source-path { order: 3; flex-basis: 100%; max-width: 100%; }
+  .top-actions { margin-left: auto; gap: 4px; }
+  .top-actions .icon-label { font-size: 0; gap: 0; padding: 9px; }
+  .scene-toolbar-glass { max-width: calc(100% - 112px); }
+  .scene-toolbar { flex-wrap: wrap; gap: 6px 10px; }
+  .scene-info { max-width: calc(100% - 16px); flex-wrap: wrap; }
+}
 
 /* hierarchy (左) */
 .hier-item { display: flex; align-items: center; gap: 8px; margin: 2px 5px; padding: 7px 10px;
@@ -174,8 +193,12 @@ input[type="color"] { width: 28px; height: 20px; padding: 1px; border: 1px solid
 
 /* 環形ゲージ (下部バー): CPU / RAM / GPU util / VRAM を省スペースで. GPU 名はホバー時のみ. */
 .ring-gauge { display: inline-flex; align-items: center; gap: 5px; }
-.progress-ring-indeterminate { transform-origin: center; animation: progress-ring-spin 1s linear infinite; }
-@keyframes progress-ring-spin { to { transform: rotate(270deg); } }
+.progress-ring-indeterminate { transform-box: view-box; transform-origin: 50% 50%;
+  animation: progress-ring-spin .9s linear infinite; }
+@keyframes progress-ring-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+.hier-step-content { flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: flex-start; }
+.hier-step-detail { width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--fg-mute); font-family: var(--mono-font); font-size: 9px; line-height: 1.35; text-align: left; }
 .ring-gauge svg { flex: none; display: block; }
 .ring-text { display: inline-flex; flex-direction: column; line-height: 1.15; white-space: nowrap; }
 .ring-text b { font-size: 9px; letter-spacing: .04em; color: var(--fg-mute); font-weight: 600; }
@@ -208,6 +231,34 @@ input[type="color"] { width: 28px; height: 20px; padding: 1px; border: 1px solid
   color: inherit; font: inherit; text-align: left; cursor: pointer; }
 .fs-row:hover { background: rgba(128,128,128,.1); }
 
+.clear-outputs-modal { width: min(680px, calc(100vw - 32px)); height: min(720px, calc(100vh - 48px)); }
+.clear-output-shortcuts { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; padding: 12px;
+  border-bottom: 1px solid var(--glass-border); }
+.clear-output-shortcut { display: flex; align-items: center; gap: 10px; min-width: 0; padding: 12px;
+  border: 1px solid var(--glass-border); border-radius: 14px; color: var(--fg); text-align: left;
+  background: color-mix(in srgb, var(--glass) 76%, transparent); cursor: pointer; }
+.clear-output-shortcut:hover { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, var(--glass)); }
+.clear-output-shortcut > svg { flex: none; color: var(--accent); }
+.clear-output-shortcut span { display: flex; flex-direction: column; min-width: 0; gap: 3px; }
+.clear-output-shortcut b { font-size: 12px; }
+.clear-output-shortcut small, .clear-output-row small { color: var(--fg-mute); font-size: 10px; }
+.clear-output-section-title { padding: 10px 14px 0; }
+.clear-output-hint { padding: 4px 14px 8px; }
+.clear-output-list { flex: 1; min-height: 0; display: grid; grid-template-columns: 1fr 1fr;
+  align-content: start; gap: 4px 8px; padding: 8px 12px; }
+.clear-output-row { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 8px;
+  min-width: 0; padding: 7px 9px; border-radius: 9px; cursor: pointer; }
+.clear-output-row:hover { background: rgba(128,128,128,.1); }
+.clear-output-row.implied { color: var(--fg-mute); cursor: default; }
+.clear-output-footer { display: flex; align-items: center; justify-content: flex-end; gap: 8px; padding: 10px 12px;
+  border-top: 1px solid var(--glass-border); }
+.clear-output-footer .mono { margin-right: auto; color: var(--fg-mute); font-size: 10px; }
+.clear-output-confirm { background: var(--error); color: white; }
+
+@media (max-width: 620px) {
+  .clear-output-shortcuts, .clear-output-list { grid-template-columns: 1fr; }
+}
+
 /* シーン上部ツールバー。LiquidGlass は progressive decoration、CSS が fallback。 */
 .scene-toolbar-glass { position: absolute; top: 8px; left: 8px; z-index: 6; }
 .scene-toolbar { display: flex; align-items: center; gap: 14px;
@@ -218,6 +269,7 @@ input[type="color"] { width: 28px; height: 20px; padding: 1px; border: 1px solid
 .scene-toolbar input[type=range] { width: 70px; }
 /* 視図左下の info オーバレイ */
 .scene-info { position: absolute; bottom: 8px; left: 8px; z-index: 6; color: var(--fg);
+  pointer-events: none;
   background: var(--glass); border: 1px solid var(--glass-border); backdrop-filter: blur(14px);
   display: flex; align-items: center; gap: 9px; padding: 5px 9px; border-radius: 12px; font-size: 11px;
   font-family: var(--mono-font); }
@@ -251,10 +303,10 @@ input[type="color"] { width: 28px; height: 20px; padding: 1px; border: 1px solid
   --glass-shadow: 0 3px 12px rgba(0,0,0,.28);
 }
 
-/* 下部バー: 左=最新ログ, 右=使用率 */
 /* 下部バー: 左=最新ログ, 右=使用率. ログが長くても使用率を押し出さないよう分離. */
 .ide-status .laststatus { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis;
   white-space: nowrap; color: var(--fg-mute); }
+.ide-status .backend-offline { display: inline-flex; align-items: center; gap: 5px; color: var(--error); }
 .ide-status .stats-right { display: flex; align-items: center; gap: 12px; flex: 0 0 auto; }
 
 /* 設定ポップオーバー */
@@ -269,6 +321,16 @@ input[type="color"] { width: 28px; height: 20px; padding: 1px; border: 1px solid
 
 /* 各コントロールの説明文 */
 .hint { font-size: 10.5px; color: var(--fg-mute); margin-top: 2px; line-height: 1.4; }
+.mapper-warning { display: flex; align-items: flex-start; gap: 7px; margin: 5px 0 10px;
+  padding: 8px 9px; border: 1px solid color-mix(in srgb, var(--error) 48%, var(--border));
+  border-radius: 10px; background: color-mix(in srgb, var(--error) 8%, transparent);
+  color: color-mix(in srgb, var(--error) 78%, var(--fg)); font-size: 10.5px; line-height: 1.45; }
+.mapper-warning svg { flex: none; margin-top: 1px; }
+.editor-note { display: flex; align-items: flex-start; gap: 7px; margin: 5px 0 10px;
+  padding: 8px 9px; border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border));
+  border-radius: 10px; background: color-mix(in srgb, var(--accent) 7%, transparent);
+  color: var(--fg-mute); font-size: 10.5px; line-height: 1.45; }
+.editor-note svg { flex: none; margin-top: 1px; color: var(--accent); }
 
 /* hierarchy チェックボックス */
 .hier-item input[type=checkbox] { margin: 0; }
@@ -284,7 +346,8 @@ input[type="color"] { width: 28px; height: 20px; padding: 1px; border: 1px solid
   padding-left: 7px; border: 1px solid var(--glass-border); border-radius: 999px; background: var(--glass); }
 .con-search { flex: 1; min-width: 0; font-size: 11px; padding: 3px 7px 3px 0; border: 0;
   outline: 0; background: transparent; color: var(--fg); }
-.log-level { display: inline-flex; vertical-align: text-bottom; }
+.log-level { display: inline-flex; width: 1em; height: 1em; line-height: 1; vertical-align: -0.1em; }
+.log-level svg { width: 1em !important; height: 1em !important; }
 .log-level-warn { color: #d69a2a; }
 .log-level-error { color: var(--error); }
 
@@ -351,6 +414,9 @@ input[type="color"] { width: 28px; height: 20px; padding: 1px; border: 1px solid
 .inspector-preview-image { width: 100%; display: block; border-radius: 6px; background: #111; }
 .inspector-preview-mask { position: absolute; inset: 0; width: 100%; height: 100%; border-radius: 6px;
   mix-blend-mode: multiply; }
+.inspector-preview.circular { width: min(100%, 420px); aspect-ratio: 1; margin-inline: auto; border-radius: 50%; }
+.inspector-preview.circular .inspector-preview-image,
+.inspector-preview.circular .inspector-preview-mask { width: 100%; height: 100%; border-radius: 50%; object-fit: contain; }
 .inspector-fields { display: grid; grid-template-columns: minmax(92px, auto) minmax(0, 1fr);
   gap: 7px 10px; margin: 10px 0 12px; padding: 10px; font-size: 11px;
   border: 1px solid var(--glass-border); border-radius: 14px; background: var(--glass); }
@@ -383,6 +449,22 @@ input[type="color"] { width: 28px; height: 20px; padding: 1px; border: 1px solid
 .flexlayout__tab_button--selected .flexlayout__tab_button_content { color: var(--fg); font-weight: 600; }
 .flexlayout__tab_button--unselected .flexlayout__tab_button_content { color: var(--fg-mute); }
 .flexlayout__tab_button:hover { background: rgba(128,128,128,.12); }
+.dock-tab-ping { animation: dock-tab-ping 1.8s ease-out; }
+@keyframes dock-tab-ping {
+  0%, 28% { color: var(--accent); text-shadow: 0 0 8px color-mix(in srgb, var(--accent) 50%, transparent); }
+  100% { text-shadow: none; }
+}
+.startup-status { min-height: 100dvh; display: flex; flex-direction: column; align-items: center;
+  justify-content: center; gap: 12px; padding: 20px; overflow-wrap: anywhere; }
+.persistence-error { position: fixed; bottom: 34px; left: 12px; right: 12px; z-index: 210;
+  display: flex; align-items: center; gap: 12px; padding: 10px 14px;
+  background: var(--bg); border: 1px solid var(--error); color: var(--error); overflow-wrap: anywhere; }
+.persistence-error .btn { margin-left: auto; flex-shrink: 0; }
+.persistence-saving { position: fixed; bottom: 6px; left: 12px; z-index: 25;
+  padding: 0 6px; font-size: 11px; background: var(--bg); color: var(--fg-mute); pointer-events: none; }
+@media (prefers-reduced-motion: reduce) {
+  .dock-tab-ping { animation: none; color: var(--accent); }
+}
 .flexlayout__tab_toolbar_button { color: var(--fg-mute); opacity: .7; }
 .flexlayout__tab_toolbar_button:hover { opacity: 1; }
 

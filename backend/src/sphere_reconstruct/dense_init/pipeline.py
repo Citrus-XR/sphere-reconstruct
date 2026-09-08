@@ -13,6 +13,7 @@ from PIL import Image
 
 from ..colmap.model import Camera, ImagePoint2D, Point3D, Reconstruction
 from ..colmap.model import Image as ColmapImage
+from ..imaging import fisheye_camera
 from .geometry import image_rays_world, pixels_to_camera_rays, project_world_points, triangulate_rays
 from .matcher import DenseMatches
 
@@ -33,6 +34,8 @@ class DenseInitializationConfig:
     voxel_size_ratio: float = 0.0005
     maximum_new_points: int = 200_000
     use_feature_masks: bool = True
+    fisheye_fov_max_deg: float = 85.0
+    fisheye_confidence_drop_pct: float = 8.0
     seed: int = 0
 
 
@@ -43,10 +46,15 @@ class DenseInitializationResult:
     raw_points: int
     kept_points: int
     rejected_confidence: int
+    rejected_confidence_percentile: int
+    rejected_fisheye_fov: int
     rejected_masks: int
     rejected_geometry: int
     scene_scale: float
     voxel_size: float
+    fisheye_depth_guard_applied: bool
+    fisheye_fov_max_deg: float | None
+    fisheye_confidence_drop_pct: float | None
 
 
 @dataclass(frozen=True)
@@ -58,6 +66,14 @@ class _View:
     source_id: str
     sensor_id: str
     capture_index: int
+
+
+@dataclass
+class _PairMatches:
+    first: _View
+    second: _View
+    matches: DenseMatches
+    valid: np.ndarray
 
 
 def densify_reconstruction(
@@ -74,12 +90,19 @@ def densify_reconstruction(
         raise ValueError("dense reference_fraction must be within (0, 1]")
     if config.maximum_new_points <= 0:
         raise ValueError("dense maximum_new_points must be positive")
+    if not 0 < config.fisheye_fov_max_deg <= 90:
+        raise ValueError("dense fisheye_fov_max_deg must be within (0, 90]")
+    if not 0 <= config.fisheye_confidence_drop_pct < 100:
+        raise ValueError("dense fisheye_confidence_drop_pct must be within [0, 100)")
     views = _build_views(reconstruction, image_catalog, image_root, mask_root, config.use_feature_masks)
     pairs = _select_pairs(views, config.reference_fraction, config.neighbors_per_reference)
+    fisheye_depth_guard_applied = any(_is_fisheye(view.camera) for view in views)
     scene_scale = _scene_scale(reconstruction)
     maximum_ray_gap = scene_scale * config.maximum_ray_gap_ratio
     candidates: list[tuple[np.ndarray, np.ndarray, float, list[tuple[int, float, float]]]] = []
     rejected_confidence = 0
+    rejected_confidence_percentile = 0
+    rejected_fisheye_fov = 0
     rejected_masks = 0
     rejected_geometry = 0
     processed = 0
@@ -89,6 +112,7 @@ def densify_reconstruction(
     quota_base, quota_remainder = (
         divmod(candidate_budget, len(pairs)) if pairs else (0, 0)
     )
+    pair_matches: list[_PairMatches] = []
 
     for pair_number, (first, second) in enumerate(pairs, 1):
         matches = matcher.match(first.image_path, second.image_path, count=config.matches_per_pair)
@@ -105,9 +129,25 @@ def densify_reconstruction(
             mask_valid = _sample_mask(second.mask_path, matches.pixels_b)
             rejected_masks += int(np.count_nonzero(valid & ~mask_valid))
             valid &= mask_valid
+        if fisheye_depth_guard_applied:
+            valid, rejected = _filter_fisheye_fov(first.camera, matches.pixels_a, valid, config.fisheye_fov_max_deg)
+            rejected_fisheye_fov += rejected
+            valid, rejected = _filter_fisheye_fov(second.camera, matches.pixels_b, valid, config.fisheye_fov_max_deg)
+            rejected_fisheye_fov += rejected
+        pair_matches.append(_PairMatches(first, second, matches, valid))
+        if progress is not None:
+            progress(pair_number, max(2 * len(pairs), 1))
+
+    if fisheye_depth_guard_applied:
+        rejected_confidence_percentile = _drop_lowest_confidence(
+            pair_matches, config.fisheye_confidence_drop_pct
+        )
+
+    for pair_number, pair in enumerate(pair_matches, 1):
+        first, second, matches, valid = pair.first, pair.second, pair.matches, pair.valid
         if not np.any(valid):
             if progress is not None:
-                progress(pair_number, len(pairs))
+                progress(len(pairs) + pair_number, max(2 * len(pairs), 1))
             continue
 
         pixels_a = matches.pixels_a[valid]
@@ -167,7 +207,7 @@ def densify_reconstruction(
             candidates.extend(pair_candidates[:pair_quota])
         processed += 1
         if progress is not None:
-            progress(pair_number, len(pairs))
+            progress(len(pairs) + pair_number, max(2 * len(pairs), 1))
 
     voxel_size = max(scene_scale * config.voxel_size_ratio, 1e-9)
     selected = _voxel_select(candidates, voxel_size)
@@ -181,10 +221,17 @@ def densify_reconstruction(
         raw_points=raw_points,
         kept_points=len(selected),
         rejected_confidence=rejected_confidence,
+        rejected_confidence_percentile=rejected_confidence_percentile,
+        rejected_fisheye_fov=rejected_fisheye_fov,
         rejected_masks=rejected_masks,
         rejected_geometry=rejected_geometry,
         scene_scale=scene_scale,
         voxel_size=voxel_size,
+        fisheye_depth_guard_applied=fisheye_depth_guard_applied,
+        fisheye_fov_max_deg=config.fisheye_fov_max_deg if fisheye_depth_guard_applied else None,
+        fisheye_confidence_drop_pct=(
+            config.fisheye_confidence_drop_pct if fisheye_depth_guard_applied else None
+        ),
     )
 
 
@@ -256,6 +303,49 @@ def _inside_image(pixels: np.ndarray, camera: Camera) -> np.ndarray:
         & (pixels[:, 1] >= 0)
         & (pixels[:, 1] < camera.height)
     )
+
+
+def _is_fisheye(camera: Camera) -> bool:
+    return camera.model in fisheye_camera.SUPPORTED_MODELS
+
+
+def _filter_fisheye_fov(
+    camera: Camera,
+    pixels: np.ndarray,
+    valid: np.ndarray,
+    maximum_deg: float,
+) -> tuple[np.ndarray, int]:
+    if not _is_fisheye(camera) or not np.any(valid):
+        return valid, 0
+    candidate_indices = np.flatnonzero(valid)
+    rays = pixels_to_camera_rays(camera, pixels[candidate_indices])
+    optical_axis_angles = np.degrees(np.arccos(np.clip(rays[:, 2], -1.0, 1.0)))
+    keep = np.isfinite(rays).all(axis=1) & np.isfinite(optical_axis_angles) & (optical_axis_angles <= maximum_deg)
+    rejected = int(np.count_nonzero(~keep))
+    valid = valid.copy()
+    valid[candidate_indices[~keep]] = False
+    return valid, rejected
+
+
+def _drop_lowest_confidence(pair_matches: list[_PairMatches], drop_pct: float) -> int:
+    if drop_pct <= 0:
+        return 0
+    eligible = [np.flatnonzero(pair.valid) for pair in pair_matches]
+    total = sum(len(indices) for indices in eligible)
+    drop_count = int(np.floor(total * drop_pct / 100.0))
+    if drop_count == 0:
+        return 0
+    confidence = np.concatenate(
+        [pair.matches.confidence[indices] for pair, indices in zip(pair_matches, eligible, strict=True)]
+    )
+    lowest = np.argsort(confidence, kind="stable")[:drop_count]
+    offset = 0
+    for pair, indices in zip(pair_matches, eligible, strict=True):
+        within_pair = lowest[(lowest >= offset) & (lowest < offset + len(indices))] - offset
+        if len(within_pair):
+            pair.valid[indices[within_pair]] = False
+        offset += len(indices)
+    return drop_count
 
 
 def _sample_mask(path: Path, pixels: np.ndarray) -> np.ndarray:

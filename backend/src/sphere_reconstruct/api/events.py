@@ -52,9 +52,15 @@ async def events_ws(
                     await ws.send_text(json.dumps(payload, ensure_ascii=False))
                     last_id = r["id"]
             else:
-                # ハングを避けるため, 500ms 待って再ポーリング.
-                await asyncio.sleep(0.5)
-    except WebSocketDisconnect:
+                # receive を timeout 付きで待つことで、idle 中も client disconnect / server shutdown
+                # を検出する。sleep だけでは接続状態が更新されず Uvicorn shutdown が完了しない。
+                try:
+                    message = await asyncio.wait_for(ws.receive(), timeout=0.5)
+                    if message["type"] == "websocket.disconnect":
+                        return
+                except TimeoutError:
+                    pass
+    except (WebSocketDisconnect, asyncio.CancelledError):
         return
 
 

@@ -3,7 +3,11 @@
 from types import SimpleNamespace
 
 from sphere_reconstruct.pipeline.stage import ProgressReporter
-from sphere_reconstruct.stages.colmap_progress import global_mapper_progress, matching_progress
+from sphere_reconstruct.stages.colmap_progress import (
+    global_mapper_progress,
+    mapper_progress,
+    matching_progress,
+)
 
 
 def _context():
@@ -57,3 +61,50 @@ def test_transitive_iterations_and_batches_cover_the_full_progress_range():
     numeric = [call[1] for call in calls if call[1] is not None]
     assert numeric == sorted(numeric)
     assert numeric[-1] == 0.9
+
+
+def test_incremental_mapper_uses_rig_frame_counter_and_preserves_global_phase_detail():
+    context, calls = _context()
+    callback = mapper_progress(context, frame_count=1488, low=0.12, high=0.9)
+
+    callback("Registering image #19 (num_reg_frames=1392)")
+    callback("=> Image sees 1016 / 3749 points")
+    callback("Retriangulation and Global bundle adjustment")
+
+    numeric = [call for call in calls if call[1] is not None]
+    assert len(numeric) == 1
+    assert numeric[0][3] == "log.recon_mapper_progress"
+    assert numeric[0][4] == {"done": 1392, "total": 1488}
+    assert abs(numeric[0][1] - (0.12 + 0.78 * 1392 / 1488)) < 1e-12
+    assert calls[-2][3] == "log.recon_mapper_observations"
+    assert calls[-2][4] == {
+        "done": 1392,
+        "frames": 1488,
+        "visible": 1016,
+        "points": 3749,
+    }
+    assert calls[-1][3] == "log.recon_global_refinement"
+    assert calls[-1][4] == {"pass": 1, "done": 1393, "total": 1488}
+
+
+def test_incremental_mapper_does_not_count_failed_registration():
+    context, calls = _context()
+    callback = mapper_progress(context, frame_count=10)
+
+    callback("Registering image #9 (num_reg_frames=8)")
+    callback("=> Could not register, trying another image.")
+    callback("Retriangulation and Global bundle adjustment")
+
+    global_refinement = next(call for call in calls if call[3] == "log.recon_global_refinement")
+    assert global_refinement[4] == {"pass": 1, "done": 8, "total": 10}
+
+
+def test_solver_warning_is_visible_once_without_advancing_registration():
+    context, calls = _context()
+    callback = mapper_progress(context, frame_count=10)
+    callback("Registering image #9 (num_reg_frames=8)")
+    callback("Linear solver failure. Failed to compute a finite step.")
+    callback("Linear solver failure. Failed to compute a finite step.")
+    warnings = [call for call in calls if call[3] == "log.recon_solver_step_warning"]
+    assert len(warnings) == 1
+    assert warnings[0][0] == "warn"

@@ -29,7 +29,7 @@ from ..settings import get_settings
 
 class _GenerateMasks(Stage):
     purpose: MaskPurpose
-    impl_version = "1.3"
+    impl_version = "1.4"
 
     def normalize_params(self, raw: dict) -> dict:
         settings = get_settings().sam3
@@ -165,13 +165,9 @@ class _GenerateMasks(Stage):
                     if engine is not None
                     else []
                 )
-                union = mask_utils.union_masks([mask for detection in detections for mask in detection.masks])
-                dynamic = (
-                    np.zeros((height, width), np.uint8)
-                    if union is None
-                    else mask_utils.upscale_mask(union, width, height)
+                dynamic, coverage_by_prompt, coverage_without_sky = _semantic_exclusion(
+                    detections, width, height, ctx.params["dilate_px"], camera_valid,
                 )
-                dynamic = mask_utils.dilate_mask(dynamic, ctx.params["dilate_px"])
                 valid, coverage = _compose_valid_mask(
                     image_record["valid_region"],
                     dynamic,
@@ -181,13 +177,8 @@ class _GenerateMasks(Stage):
                 )
                 output_path = ctx.stage_out_dir / f"{image_record['name']}.png"
                 mask_utils.write_mask_png(valid, output_path, invert=False)
-                warning = coverage > ctx.params["coverage_warn"]
-                if warning:
-                    ctx.progress.warn(
-                        f"{image_record['name']}: dynamic coverage {coverage:.2f}",
-                        key="log.mask_coverage_warn_image",
-                        args={"name": image_record["name"], "cov": round(coverage, 2)},
-                    )
+                warning_coverage = coverage_without_sky if self.purpose is MaskPurpose.FEATURE else coverage
+                warning = warning_coverage > ctx.params["coverage_warn"]
                 record = {
                     "name": image_record["name"],
                     "source_id": image_record["source_id"],
@@ -197,6 +188,8 @@ class _GenerateMasks(Stage):
                     "height": height,
                     "sha256": sha256_file(output_path),
                     "coverage": coverage,
+                    "coverage_by_prompt": coverage_by_prompt,
+                    "coverage_without_sky": coverage_without_sky,
                     "coverage_warning": warning,
                     "detections": {
                         detection.prompt: len(detection.masks) for detection in detections
@@ -276,10 +269,35 @@ def _mask_statistics(manifest: dict) -> dict:
         ),
         "average_dynamic_coverage": sum(coverages) / len(coverages) if coverages else 0.0,
         "maximum_dynamic_coverage": max(coverages) if coverages else 0.0,
+        "average_coverage_by_prompt": {
+            prompt: sum(record["coverage_by_prompt"][prompt] for record in records) / len(records)
+            for prompt in manifest["prompt"]
+        } if records else {},
+        "average_coverage_without_sky": (
+            sum(record["coverage_without_sky"] for record in records) / len(records) if records else 0.0
+        ),
         "coverage_warnings": sum(record["coverage_warning"] for record in records),
         "max_inference_size": manifest["max_inference_size"],
         "dilate_px": manifest["dilate_px"],
     }
+
+
+def _semantic_exclusion(detections, width: int, height: int, dilate_px: int, camera_valid: np.ndarray):
+    def render(selected):
+        union = mask_utils.union_masks([mask for detection in selected for mask in detection.masks])
+        if union is None:
+            return np.zeros((height, width), dtype=np.uint8)
+        return mask_utils.dilate_mask(mask_utils.upscale_mask(union, width, height), dilate_px) & camera_valid
+
+    # Bilinear resize + threshold does not commute with union at touching mask boundaries.
+    excluded = render(detections)
+    without_sky = render([detection for detection in detections if detection.prompt.strip().casefold() != "sky"])
+    coverage_by_prompt = {}
+    valid_area = int(camera_valid.sum()) or 1
+    for detection in detections:
+        mask = render([detection])
+        coverage_by_prompt[detection.prompt] = float(mask.sum()) / valid_area
+    return excluded, coverage_by_prompt, float(without_sky.sum()) / valid_area
 
 
 def _final_relpath(path: Path, ctx: StageContext) -> str:

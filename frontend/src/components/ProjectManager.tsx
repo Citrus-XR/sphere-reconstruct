@@ -7,12 +7,13 @@ import { AppIcon } from './AppIcon'
 // ローカルプロジェクト管理ウィンドウ: 一覧 (更新時刻降順) / 新規作成 (名前入力) /
 // 削除 (ディスクから完全削除, ソース動画は消さない, 確認あり).
 export const ProjectManager = ({
-  projects, currentId, onSelect, onClose,
+  projects, currentId, onSelect, onClose, onBeforeMutation,
 }: {
   projects: Project[] | undefined
   currentId: string | null
   onSelect: (id: string | null) => void
   onClose: () => void
+  onBeforeMutation: () => Promise<void>
 }) => {
   const { t } = useSettings()
   const qc = useQueryClient()
@@ -32,11 +33,23 @@ export const ProjectManager = ({
   )
 
   const create = useMutation({
-    mutationFn: () => api.createProject(name.trim() || `project-${new Date().toISOString().slice(0, 16)}`),
-    onSuccess: p => { qc.invalidateQueries({ queryKey: ['projects'] }); onSelect(p.id); setName(''); onClose() },
+    mutationFn: async () => {
+      await onBeforeMutation()
+      return api.createProject(name.trim() || `project-${new Date().toISOString().slice(0, 16)}`)
+    },
+    onSuccess: project => {
+      qc.setQueryData<Project[]>(['projects'], current => [
+        project,
+        ...(current ?? []).filter(item => item.id !== project.id),
+      ])
+      onSelect(project.id)
+      setName('')
+      onClose()
+      qc.invalidateQueries({ queryKey: ['projects'] })
+    },
   })
   const del = useMutation({
-    mutationFn: (id: string) => api.deleteProject(id),
+    mutationFn: async (id: string) => { await onBeforeMutation(); return api.deleteProject(id) },
     onSuccess: (_result, deletedId) => {
       if (deletedId === currentId) {
         onSelect(sorted.find(project => project.id !== deletedId)?.id ?? null)
@@ -92,7 +105,7 @@ export const ProjectManager = ({
             </div>
           ))}
         </div>
-        {del.error && <div className="error" style={{ padding: 8 }}>{String(del.error)}</div>}
+        {(del.error || create.error) && <div className="error" style={{ padding: 8 }}>{String(del.error ?? create.error)}</div>}
       </div>
     </div>
   )

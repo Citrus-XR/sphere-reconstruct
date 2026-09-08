@@ -85,6 +85,8 @@ def test_summary(tmp_path: Path):
     assert abs(s["p95_reprojection_error"] - 0.7) < 1e-9
     assert s["mean_track_length"] == 1.0
     assert s["num_observations"] == 1
+    assert s["exact_black_points"] == 0
+    assert s["exact_black_point_ratio"] == 0.0
     assert s["unique_camera_centers"] == 1
     assert s["camera_center_span"] == [0.0, 0.0, 0.0]
 
@@ -117,9 +119,7 @@ def test_camera_center_uses_colmap_world_to_camera_convention():
 
 
 def test_points3d_writer_roundtrips_tracks(tmp_path):
-    points = {
-        7: model.Point3D(7, (1.0, 2.0, 3.0), (10, 20, 30), 0.4, [(2, 5), (3, 8)])
-    }
+    points = {7: model.Point3D(7, (1.0, 2.0, 3.0), (10, 20, 30), 0.4, [(2, 5), (3, 8)])}
 
     model.write_points3D_bin(tmp_path / "points3D.bin", points)
 

@@ -3,15 +3,19 @@
 from __future__ import annotations
 
 import json
+import math
 import shutil
 import sqlite3
+from collections import defaultdict
 from pathlib import Path
 
+from ..colmap import input_workspace, rig_visibility
 from ..colmap import runner as colmap_runner
 from ..colmap.input_workspace import InputSpec
 from ..domain.artifacts import FileRef, StageManifest
 from ..domain.pipeline_state import StageName
 from ..infrastructure.filesystem import sha256_file
+from ..pipeline import prepared_images
 from ..pipeline.manifest import register
 from ..pipeline.stage import Stage, StageContext, new_manifest
 from ..settings import get_settings
@@ -21,7 +25,7 @@ from .colmap_progress import matching_progress
 @register
 class MatchFeatures(Stage):
     name = StageName.MATCH_FEATURES
-    impl_version = "2.4"
+    impl_version = "2.10"
 
     def normalize_params(self, raw: dict) -> dict:
         feature_type = str(raw.get("feature_type", "SIFT")).upper()
@@ -40,14 +44,21 @@ class MatchFeatures(Stage):
             "matcher_type": matcher,
             "pairing": pairing,
             "overlap": overlap,
-            "loop_closure": bool(raw.get("loop_closure", True)),
-            "transitive_matching": bool(raw.get("transitive_matching", True)),
+            "loop_closure": bool(raw.get("loop_closure", False)),
+            "transitive_matching": bool(raw.get("transitive_matching", False)),
             "transitive_iterations": transitive_iterations,
             "use_gpu": bool(raw.get("use_gpu", True)),
             "max_num_matches": int(raw.get("max_num_matches", 16384)),
             "guided_matching": bool(raw.get("guided_matching", False)),
             "min_num_inliers": int(raw.get("min_num_inliers", 15)),
             "rig_verification": bool(raw.get("rig_verification", True)),
+            # Independent recordings have no stable inter-source temporal offset. This is
+            # available only for captures for which synchronization is a known guarantee.
+            "cross_source_temporal_filter": bool(raw.get("cross_source_temporal_filter", False)),
+            "cross_source_temporal_window_sec": float(raw.get("cross_source_temporal_window_sec", 3.0)),
+            # A time limit is only an explicit diagnostic override. It must not silently
+            # disable valid loop closures in an independently recorded video trajectory.
+            "same_source_max_time_gap_sec": float(raw.get("same_source_max_time_gap_sec", 0.0)),
         }
 
     def collect_inputs(self, ctx: StageContext) -> list[FileRef]:
@@ -81,7 +92,10 @@ class MatchFeatures(Stage):
         logs_dir.mkdir(parents=True, exist_ok=True)
 
         settings = get_settings()
-        spec = InputSpec.read(ctx.project_dir / "extract_features" / "input_spec.json")
+        spec = input_workspace.hydrate_timestamps(
+            ctx.project_dir,
+            InputSpec.read(ctx.project_dir / "extract_features" / "input_spec.json"),
+        )
         colmap_bin = colmap_runner.resolve_colmap_bin(settings.binaries.colmap or None)
         vocab_tree = colmap_runner.resolve_vocab_tree_path(settings.binaries.vocab_tree or None)
         matching_type = _matching_type(ctx.params["feature_type"], ctx.params["matcher_type"])
@@ -165,8 +179,59 @@ class MatchFeatures(Stage):
                 on_line=matching_progress(ctx, low=0.7, high=0.9),
             )
 
+        rig_visibility_filter = {
+            "enabled": False,
+            "examined_pairs": 0,
+            "removed_pairs": 0,
+            "camera_pairs": {},
+        }
+        rig_path = prepared_images.rig_config_path(ctx.project_dir)
+        catalog_path = prepared_images.catalog_path(ctx.project_dir)
+        if spec.rig_config_path and rig_path.is_file() and catalog_path.is_file():
+            rig_visibility_filter = rig_visibility.remove_impossible_same_capture_pairs(
+                database_path,
+                spec,
+                prepared_images.load_catalog(ctx.project_dir),
+                json.loads(rig_path.read_text(encoding="utf-8")),
+            )
+            if rig_visibility_filter["removed_pairs"]:
+                ctx.progress.info(
+                    f"removed {rig_visibility_filter['removed_pairs']} physically invisible rig pairs",
+                    progress=0.91,
+                    key="log.matching_rig_visibility",
+                    args=rig_visibility_filter,
+                )
+
+        same_source_filter = _filter_same_source_temporal_pairs(
+            database_path,
+            spec,
+            max_gap_sec=ctx.params["same_source_max_time_gap_sec"],
+        )
+        if same_source_filter["removed_pairs"]:
+            ctx.progress.info(
+                f"removed {same_source_filter['removed_pairs']} long-range same-source video pairs",
+                progress=0.91,
+                key="log.matching_same_source_filter",
+                args=same_source_filter,
+            )
+
+        temporal_filter = {"enabled": False, "removed_pairs": 0, "source_pairs": {}}
+        if ctx.params["cross_source_temporal_filter"]:
+            temporal_filter = _filter_cross_source_temporal_pairs(
+                database_path,
+                spec,
+                window_sec=ctx.params["cross_source_temporal_window_sec"],
+            )
+            if temporal_filter["removed_pairs"]:
+                ctx.progress.info(
+                    f"removed {temporal_filter['removed_pairs']} cross-source pairs outside dominant temporal offsets",
+                    progress=0.91,
+                    key="log.matching_temporal_filter",
+                    args=temporal_filter,
+                )
+
         ctx.progress.tick(0.92, message="feature matching complete", key="log.matching_compute_done")
-        summary = _matching_summary(database_path, spec)
+        summary = _matching_summary(database_path, spec, ctx.params["min_num_inliers"])
         summary.update(
             {
                 "matching_type": matching_type,
@@ -179,7 +244,10 @@ class MatchFeatures(Stage):
                 "rig_verification_scope": (
                     "pairing_graph" if use_rig_verification else "disabled"
                 ),
+                "rig_visibility_filter": rig_visibility_filter,
                 "gpu_enabled": ctx.params["use_gpu"],
+                "same_source_temporal_filter": same_source_filter,
+                "cross_source_temporal_filter": temporal_filter,
             }
         )
         summary_path = ctx.stage_out_dir / "matching_summary.json"
@@ -225,13 +293,17 @@ def _resolve_pairing(
     )
 
 
-def _matching_summary(database_path: Path, spec: InputSpec) -> dict:
+def _matching_summary(database_path: Path, spec: InputSpec, min_num_inliers: int) -> dict:
     with sqlite3.connect(database_path) as connection:
         raw_pairs = connection.execute("SELECT COUNT(*) FROM matches WHERE rows > 0").fetchone()[0]
         row = connection.execute(
             "SELECT COUNT(*), MIN(rows), AVG(rows), MAX(rows), SUM(rows) "
             "FROM two_view_geometries WHERE rows > 0"
         ).fetchone()
+        sufficient_pairs = connection.execute(
+            "SELECT COUNT(*) FROM two_view_geometries WHERE rows > 0 AND rows >= ?",
+            (min_num_inliers,),
+        ).fetchone()[0]
         image_names = dict(connection.execute("SELECT image_id, name FROM images").fetchall())
         verified_pair_ids = [
             int(value[0])
@@ -254,6 +326,9 @@ def _matching_summary(database_path: Path, spec: InputSpec) -> dict:
     return {
         "raw_pairs": int(raw_pairs),
         "verified_pairs": int(row[0]),
+        "pair_inlier_threshold": min_num_inliers,
+        "pairs_meeting_inlier_threshold": int(sufficient_pairs),
+        "pairs_below_inlier_threshold": int(row[0] - sufficient_pairs),
         "minimum_inliers": int(row[1] or 0),
         "average_inliers": float(row[2] or 0.0),
         "maximum_inliers": int(row[3] or 0),
@@ -261,6 +336,185 @@ def _matching_summary(database_path: Path, spec: InputSpec) -> dict:
         "cross_source_verified_pairs": cross_source_pairs,
         "source_pair_counts": source_edges,
     }
+
+
+def _filter_cross_source_temporal_pairs(
+    database_path: Path,
+    spec: InputSpec,
+    *,
+    window_sec: float,
+) -> dict:
+    """Remove only ambiguous long-offset video-video edges from a verified graph.
+
+    Image folders deliberately have ``timestamp_sec=None`` and therefore never enter
+    this filter. For timed sources, a dominant offset is required before any rows are
+    deleted; unrelated or weakly overlapping recordings fall back to global matching.
+    """
+    if window_sec <= 0:
+        raise ValueError("cross_source_temporal_window_sec must be > 0")
+    if spec.source_count <= 1:
+        return {"enabled": False, "removed_pairs": 0, "source_pairs": {}}
+    image_by_name = {image["name"]: image for image in spec.images}
+    observations: dict[tuple[str, str], list[tuple[int, float, int]]] = defaultdict(list)
+    with sqlite3.connect(database_path) as connection:
+        image_by_id = {
+            int(image_id): image_by_name[name]
+            for image_id, name in connection.execute("SELECT image_id, name FROM images")
+            if name in image_by_name
+        }
+        rows = connection.execute(
+            "SELECT pair_id, rows FROM two_view_geometries WHERE rows > 0"
+        ).fetchall()
+        for pair_id, inliers in rows:
+            first_id, second_id = _pair_ids(int(pair_id))
+            first = image_by_id.get(first_id)
+            second = image_by_id.get(second_id)
+            if first is None or second is None or first["source_id"] == second["source_id"]:
+                continue
+            first_time = first.get("timestamp_sec")
+            second_time = second.get("timestamp_sec")
+            if first_time is None or second_time is None:
+                continue
+            source_pair = tuple(sorted((str(first["source_id"]), str(second["source_id"]))))
+            if str(first["source_id"]) == source_pair[0]:
+                delta = float(first_time) - float(second_time)
+            else:
+                delta = float(second_time) - float(first_time)
+            observations[source_pair].append((int(pair_id), delta, int(inliers)))
+
+    to_remove: set[int] = set()
+    diagnostics: dict[str, dict] = {}
+    for source_pair, values in observations.items():
+        estimate = _dominant_temporal_offset(values)
+        if estimate is None:
+            diagnostics["|".join(source_pair)] = {"accepted": False, "observations": len(values)}
+            continue
+        center, support_weight, total_weight = estimate
+        accepted = [pair_id for pair_id, delta, _ in values if abs(delta - center) <= window_sec]
+        rejected = [pair_id for pair_id, _, _ in values if pair_id not in accepted]
+        to_remove.update(rejected)
+        diagnostics["|".join(source_pair)] = {
+            "accepted": True,
+            "observations": len(values),
+            "offset_sec": center,
+            "support_ratio": support_weight / max(1, total_weight),
+            "removed_pairs": len(rejected),
+        }
+
+    if to_remove:
+        with sqlite3.connect(database_path) as connection:
+            connection.executemany("DELETE FROM matches WHERE pair_id = ?", ((pair_id,) for pair_id in to_remove))
+            connection.executemany(
+                "DELETE FROM two_view_geometries WHERE pair_id = ?", ((pair_id,) for pair_id in to_remove)
+            )
+            connection.commit()
+    return {
+        "enabled": bool(observations),
+        "removed_pairs": len(to_remove),
+        "source_pairs": diagnostics,
+    }
+
+
+def _filter_same_source_temporal_pairs(
+    database_path: Path,
+    spec: InputSpec,
+    *,
+    max_gap_sec: float,
+) -> dict:
+    """Limit loop-closure edges within each timestamped video source.
+
+    Capture timestamps are meaningful only within their original source. In particular,
+    this leaves cross-source visual matches unconstrained, so independently recorded
+    videos and still-photo collections can establish geometry whenever they overlap.
+    """
+    if max_gap_sec < 0:
+        raise ValueError("same_source_max_time_gap_sec must be >= 0")
+    if max_gap_sec == 0:
+        return {"enabled": False, "removed_pairs": 0, "sources": {}}
+
+    image_by_name = {str(image["name"]): image for image in spec.images}
+    to_remove: set[int] = set()
+    sources: dict[str, int] = defaultdict(int)
+    with sqlite3.connect(database_path) as connection:
+        image_by_id = {
+            int(image_id): image_by_name[name]
+            for image_id, name in connection.execute("SELECT image_id, name FROM images")
+            if name in image_by_name
+        }
+        rows = connection.execute(
+            "SELECT pair_id FROM two_view_geometries WHERE rows > 0"
+        ).fetchall()
+        for (pair_id,) in rows:
+            first_id, second_id = _pair_ids(int(pair_id))
+            first = image_by_id.get(first_id)
+            second = image_by_id.get(second_id)
+            if first is None or second is None or first["source_id"] != second["source_id"]:
+                continue
+            first_time = first.get("timestamp_sec")
+            second_time = second.get("timestamp_sec")
+            if first_time is None or second_time is None:
+                continue
+            if abs(float(first_time) - float(second_time)) <= max_gap_sec:
+                continue
+            to_remove.add(int(pair_id))
+            sources[str(first["source_id"])] += 1
+
+        if to_remove:
+            connection.executemany(
+                "DELETE FROM matches WHERE pair_id = ?", ((pair_id,) for pair_id in to_remove)
+            )
+            connection.executemany(
+                "DELETE FROM two_view_geometries WHERE pair_id = ?", ((pair_id,) for pair_id in to_remove)
+            )
+            connection.commit()
+
+    return {
+        "enabled": True,
+        "max_gap_sec": max_gap_sec,
+        "removed_pairs": len(to_remove),
+        "sources": dict(sources),
+    }
+
+
+def _dominant_temporal_offset(values: list[tuple[int, float, int]]) -> tuple[float, int, int] | None:
+    """Return a robust offset only when the histogram has a clear useful mode."""
+    if len(values) < 20:
+        return None
+    bin_width = 1.0
+    weighted_bins: dict[int, int] = defaultdict(int)
+    total_weight = 0
+    for _, delta, inliers in values:
+        weight = max(1, int(inliers))
+        weighted_bins[math.floor(delta / bin_width)] += weight
+        total_weight += weight
+    if not total_weight:
+        return None
+    best_bin, _ = max(weighted_bins.items(), key=lambda item: item[1])
+    support_weight = sum(
+        weight for bucket, weight in weighted_bins.items() if abs(bucket - best_bin) <= 2
+    )
+    second_weight = max(
+        (sum(weight for bucket, weight in weighted_bins.items() if abs(bucket - bucket_id) <= 2)
+         for bucket_id in weighted_bins if abs(bucket_id - best_bin) > 2),
+        default=0,
+    )
+    if support_weight / total_weight < 0.20 or support_weight < second_weight * 1.25:
+        return None
+    in_cluster = [
+        (delta, max(1, int(inliers)))
+        for _, delta, inliers in values
+        if abs(math.floor(delta / bin_width) - best_bin) <= 2
+    ]
+    in_cluster.sort(key=lambda item: item[0])
+    midpoint = sum(weight for _, weight in in_cluster) / 2
+    running = 0
+    center = in_cluster[-1][0]
+    for delta, weight in in_cluster:
+        running += weight
+        if running >= midpoint:
+            center = delta
+            break
+    return center, support_weight, total_weight
 
 
 def _pair_ids(pair_id: int) -> tuple[int, int]:

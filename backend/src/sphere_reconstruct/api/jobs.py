@@ -14,10 +14,11 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from ..domain import project as project_domain
 from ..domain.pipeline_state import StageName
 from ..infrastructure.database import get_db
+from ..infrastructure.project_lock import ProjectBusyError, ProjectNotFoundError
 from ..job_supervisor import get_supervisor
+from .project_access import project_access_error
 
 router = APIRouter(tags=["jobs"])
 
@@ -50,17 +51,16 @@ class RunBody(BaseModel):
 
 @router.post("/api/projects/{project_id}/run", response_model=JobStarted)
 async def run_pipeline(project_id: str, body: RunBody | None = None) -> JobStarted:
-    db = get_db()
-    p = await project_domain.get_project(db, project_id)
-    if p is None:
-        raise HTTPException(status_code=404, detail="project not found")
     sup = get_supervisor()
-    job_id = await sup.enqueue_run_pipeline(
-        project_id=project_id,
-        stage=None,
-        params_by_stage=body.params_by_stage if body else None,
-        skip=body.skip if body else None,
-    )
+    try:
+        job_id = await sup.enqueue_run_pipeline(
+            project_id=project_id,
+            stage=None,
+            params_by_stage=body.params_by_stage if body else None,
+            skip=body.skip if body else None,
+        )
+    except (ProjectBusyError, ProjectNotFoundError) as error:
+        raise project_access_error(error) from error
     return JobStarted(job_id=job_id)
 
 
@@ -68,16 +68,15 @@ async def run_pipeline(project_id: str, body: RunBody | None = None) -> JobStart
 async def rerun_stage(project_id: str, stage: str, body: RunBody | None = None) -> JobStarted:
     if stage not in [s.value for s in StageName]:
         raise HTTPException(status_code=400, detail=f"unknown stage: {stage}")
-    db = get_db()
-    p = await project_domain.get_project(db, project_id)
-    if p is None:
-        raise HTTPException(status_code=404, detail="project not found")
     sup = get_supervisor()
-    job_id = await sup.enqueue_run_pipeline(
-        project_id=project_id,
-        stage=stage,
-        params_by_stage=body.params_by_stage if body else None,
-    )
+    try:
+        job_id = await sup.enqueue_run_pipeline(
+            project_id=project_id,
+            stage=stage,
+            params_by_stage=body.params_by_stage if body else None,
+        )
+    except (ProjectBusyError, ProjectNotFoundError) as error:
+        raise project_access_error(error) from error
     return JobStarted(job_id=job_id)
 
 

@@ -11,10 +11,10 @@ import numpy as np
 from PIL import Image
 
 from ..domain.artifacts import FileRef, StageManifest
-from ..domain.camera_system import MeiIntrinsics
+from ..domain.camera_system import OmniIntrinsics
 from ..domain.pipeline_state import StageName
 from ..imaging import fisheye_camera, valid_region
-from ..imaging.projection import project_mei, unproject_mei
+from ..imaging.projection import project_omni, unproject_omni
 from ..infrastructure.filesystem import sha256_file
 from ..pipeline.manifest import register
 from ..pipeline.stage import ProgressSpan, Stage, StageContext, new_manifest
@@ -23,7 +23,13 @@ from ..pipeline.stage import ProgressSpan, Stage, StageContext, new_manifest
 @register
 class RectifyFisheye(Stage):
     name = StageName.RECTIFY_FISHEYE
-    impl_version = "1.0"
+    impl_version = "2.1"
+
+    def normalize_params(self, raw: dict) -> dict:
+        projection_contract = str(raw.get("projection_contract", "radtan_pro_v2"))
+        if projection_contract != "radtan_pro_v2":
+            raise ValueError(f"unsupported projection contract: {projection_contract}")
+        return {"projection_contract": projection_contract}
 
     def collect_inputs(self, ctx: StageContext) -> list[FileRef]:
         candidates = [
@@ -82,7 +88,7 @@ class RectifyFisheye(Stage):
             width, height = int(first["width"]), int(first["height"])
             if any((int(record["width"]), int(record["height"])) != (width, height) for record in records):
                 raise ValueError(f"rectification group の image size が一致しません: {group_id}")
-            source_projection = MeiIntrinsics.from_dict(rectification["source_projection"])
+            source_projection = OmniIntrinsics.from_dict(rectification["source_projection"])
             if (source_projection.width, source_projection.height) != (width, height):
                 raise ValueError(
                     f"rectification source projection size が image と一致しません: "
@@ -185,7 +191,7 @@ class RectifyFisheye(Stage):
             group["image_names"] = [name_mapping[name] for name in image_names]
             group["rectification_result"] = {
                 "applied": True,
-                "source_model": "MEI",
+                "source_model": "OMNI",
                 "target_model": target_model,
                 "interpolation": "lanczos4",
                 "image_format": "png",
@@ -249,7 +255,7 @@ class RectifyFisheye(Stage):
 
 
 def _build_remap(
-    source: MeiIntrinsics,
+    source: OmniIntrinsics,
     target_model: str,
     target_params: list[float],
     width: int,
@@ -275,7 +281,7 @@ def _build_remap(
                 target_params,
                 target_pixels,
             )
-        source_pixels, source_valid = project_mei(rays, source)
+        source_pixels, source_valid = project_omni(rays, source)
         target_theta = np.arccos(np.clip(rays[:, 2], -1.0, 1.0))
         target_valid = target_theta < maximum_theta_rad
         block_valid = source_valid & target_valid & np.all(np.isfinite(source_pixels), axis=1)
@@ -321,7 +327,7 @@ def _rectify_image(
 def _roundtrip_quality(
     source_path: Path,
     rectified_path: Path,
-    source_projection: MeiIntrinsics,
+    source_projection: OmniIntrinsics,
     target_model: str,
     target_params: list[float],
     source_validity: np.ndarray,
@@ -337,7 +343,7 @@ def _roundtrip_quality(
     sample_y = np.arange(0, height, step, dtype=np.float64)
     grid_x, grid_y = np.meshgrid(sample_x, sample_y)
     source_pixels = np.column_stack((grid_x.ravel(), grid_y.ravel()))
-    rays, source_rays_valid = unproject_mei(source_pixels, source_projection)
+    rays, source_rays_valid = unproject_omni(source_pixels, source_projection)
     target_pixels = fisheye_camera.camera_rays_to_pixels(target_model, target_params, rays)
     target_in_frame = (
         (target_pixels[:, 0] >= 0.0)

@@ -171,7 +171,7 @@ class AlignReconstruction(Stage):
                     gravity_align.TARGET_UP, gravity_align.TARGET_UP
                 ),
             }
-        if primary is None or primary.adapter != SourceAdapter.INSTA360_INSV:
+        if primary is None or primary.adapter != SourceAdapter.INSTA360:
             if ctx.params["method"] == "imu":
                 raise RuntimeError("IMU alignment requires an INSV source")
             progress_span.tick(
@@ -242,7 +242,6 @@ class AlignReconstruction(Stage):
             "applied": True,
             "method": "imu_timed_consensus",
             "camera_type": recording.camera_type,
-            "imu_orientation": recording.orientation,
             "target_dataset_up": [0, -1, 0],
             "source_trajectory_diameter": diameter,
             "reference_image_prefix": f"sources/{primary.id}/",

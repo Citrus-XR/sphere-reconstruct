@@ -73,12 +73,14 @@ export const CapturePreview = ({
   view,
   onViewChange,
   alt,
+  circular = false,
 }: {
   originalUrl: string
   maskUrl: string | null
   view: CaptureView
   onViewChange: (view: CaptureView) => void
   alt: string
+  circular?: boolean
 }) => {
   const { t } = useSettings()
   const maskAvailable = maskUrl !== null
@@ -95,14 +97,16 @@ export const CapturePreview = ({
             onClick={() => onViewChange('overlay')}><AppIcon name="overlay" size={14} /> {t('viewOverlay')}</button>
         </div>
       )}
-      {effectiveView === 'mask'
-        ? <img className="inspector-preview-image" src={maskUrl ?? ''} alt={t('viewMask')} />
-        : <div className="inspector-preview">
-            <img className="inspector-preview-image" src={originalUrl} alt={alt} />
-            {effectiveView === 'overlay' && (
-              <img className="inspector-preview-mask" src={maskUrl ?? ''} alt={t('viewOverlay')} />
-            )}
-          </div>}
+      <div className={`inspector-preview${circular ? ' circular' : ''}`}>
+        {effectiveView === 'mask'
+          ? <img className="inspector-preview-image" src={maskUrl ?? ''} alt={t('viewMask')} />
+          : <>
+              <img className="inspector-preview-image" src={originalUrl} alt={alt} />
+              {effectiveView === 'overlay' && (
+                <img className="inspector-preview-mask" src={maskUrl ?? ''} alt={t('viewOverlay')} />
+              )}
+            </>}
+      </div>
     </>
   )
 }

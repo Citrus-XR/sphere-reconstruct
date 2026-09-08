@@ -12,7 +12,7 @@ aligned reconstruction を LFStudio が直接選択できる dataset root とし
   max_preview_points: int   プレビュー点群の上限 (default 500000)
   include_dataset: bool     標準データセットも書き出す (default True)
   emit_train_configs: bool  LFStudio 推奨設定を書き出す (default True)
-  optimize_fisheye_training_images: bool  円形領域外を lossless crop (default True)
+  optimize_fisheye_training_images: bool  有効領域外を PNG pixel / JPEG MCU crop (default True)
   feature_masks_enabled: bool   training mask 無効時の export fallback
   training_masks_enabled: bool  export で優先する SAM3 mask。両方無効なら physical mask
 """
@@ -52,22 +52,22 @@ from ..settings import get_settings
 @register
 class ExportDataset(Stage):
     name = StageName.EXPORT_DATASET
-    impl_version = "3.0"
+    impl_version = "3.2"
 
     def collect_inputs(self, ctx: StageContext) -> list[FileRef]:
+        model_dir, model_source = _select_export_model(ctx.project_dir)
         candidates = [
-            ctx.project_dir / "manifests" / "dense_initialization.json",
+            ctx.project_dir / "manifests" / f"{model_source}.json",
             ctx.project_dir / "restore_metric_scale" / "scale_restoration.json",
             ctx.project_dir / "manifests" / "extract_features.json",
             ctx.project_dir / "extract_features" / "input_spec.json",
             ctx.project_dir / "manifests" / "rectify_fisheye.json",
             prepared_images.catalog_path(ctx.project_dir),
-            ctx.project_dir / "position_ground" / "ground_position.json",
-            ctx.project_dir / "dense_initialization" / "sparse" / "0" / "rigs.bin",
-            ctx.project_dir / "dense_initialization" / "sparse" / "0" / "cameras.bin",
-            ctx.project_dir / "dense_initialization" / "sparse" / "0" / "frames.bin",
-            ctx.project_dir / "dense_initialization" / "sparse" / "0" / "images.bin",
-            ctx.project_dir / "dense_initialization" / "sparse" / "0" / "points3D.bin",
+            ctx.project_dir / "scene_alignment" / "scene_alignment.json",
+            *(
+                model_dir / name
+                for name in ("rigs.bin", "cameras.bin", "frames.bin", "images.bin", "points3D.bin")
+            ),
         ]
         purpose = export_purpose(
             feature_enabled=ctx.params["feature_masks_enabled"],
@@ -96,9 +96,7 @@ class ExportDataset(Stage):
             "max_preview_points": int(raw.get("max_preview_points", 500_000)),
             "include_dataset": bool(raw.get("include_dataset", True)),
             "emit_train_configs": bool(raw.get("emit_train_configs", True)),
-            "optimize_fisheye_training_images": bool(
-                raw.get("optimize_fisheye_training_images", True)
-            ),
+            "optimize_fisheye_training_images": bool(raw.get("optimize_fisheye_training_images", True)),
             "feature_masks_enabled": bool(raw.get("feature_masks_enabled", True)),
             "training_masks_enabled": bool(raw.get("training_masks_enabled", True)),
         }
@@ -108,59 +106,54 @@ class ExportDataset(Stage):
         manifest.inputs = ctx.inputs_for(self)
         manifest.params = ctx.params
 
-        model_dir = ctx.project_dir / "dense_initialization" / "sparse" / "0"
-        if not (model_dir / "cameras.bin").exists():
-            raise RuntimeError("dense_initialization must run first (sparse/0 missing)")
+        model_dir, model_source = _select_export_model(ctx.project_dir)
 
         ctx.progress.info("reading aligned reconstruction", progress=0.0, key="log.export_start")
         recon = colmap_model.read_model(model_dir)
         spec = InputSpec.read(ctx.project_dir / "extract_features" / "input_spec.json")
         metric_scale_info = json.loads(
-            (ctx.project_dir / "restore_metric_scale" / "scale_restoration.json").read_text(
-                encoding="utf-8"
-            )
+            (ctx.project_dir / "restore_metric_scale" / "scale_restoration.json").read_text(encoding="utf-8")
         )
-        ground_position_info = json.loads(
-            (ctx.project_dir / "position_ground" / "ground_position.json").read_text(
-                encoding="utf-8"
-            )
+        scene_alignment_info = json.loads(
+            (ctx.project_dir / "scene_alignment" / "scene_alignment.json").read_text(encoding="utf-8")
         )
         catalog = prepared_images.load_catalog(ctx.project_dir)
         export_recon = recon
         crop_plan: training_crop.CropPlan | None = None
+        jpegtran = training_crop.resolve_jpegtran(get_settings().binaries.jpegtran)
         crop_info: dict = {"enabled": False, "requested": ctx.params["optimize_fisheye_training_images"]}
         if ctx.params["optimize_fisheye_training_images"]:
-            jpegtran = training_crop.resolve_jpegtran(get_settings().binaries.jpegtran)
-            if jpegtran is None:
-                crop_info["skipped_reason"] = "jpegtran_unavailable"
-                ctx.progress.warn(
-                    "jpegtran unavailable; preserving original training images",
-                    key="log.export_crop_unavailable",
-                )
-            elif catalog is not None:
+            if catalog is not None:
                 candidate = training_crop.build_plan(
                     recon,
                     catalog,
                     project_dir=ctx.project_dir,
                 )
                 if candidate.changed:
-                    crop_plan = candidate
-                    export_recon = training_crop.crop_reconstruction(recon, crop_plan)
-                    crop_info.update(
-                        {
-                            "enabled": True,
-                            "lossless": True,
-                            "alignment_px": crop_plan.alignment_px,
-                            "source_pixels": crop_plan.source_pixels,
-                            "cropped_pixels": crop_plan.cropped_pixels,
-                            "pixel_reduction_ratio": 1.0
-                            - crop_plan.cropped_pixels / crop_plan.source_pixels,
-                            "camera_rectangles": {
-                                str(camera_id): rect.as_list()
-                                for camera_id, rect in crop_plan.cameras.items()
-                            },
-                        }
-                    )
+                    if training_crop.requires_jpegtran(candidate) and jpegtran is None:
+                        crop_info["skipped_reason"] = "jpegtran_unavailable_for_jpeg"
+                        ctx.progress.warn(
+                            "JPEG training crop requires jpegtran; preserving original images",
+                            key="log.export_crop_unavailable",
+                        )
+                    else:
+                        crop_plan = candidate
+                        export_recon = training_crop.crop_reconstruction(recon, crop_plan)
+                        crop_info.update(
+                            {
+                                "enabled": True,
+                                "lossless": True,
+                                "alignment_px": crop_plan.alignment_px,
+                                "source_pixels": crop_plan.source_pixels,
+                                "cropped_pixels": crop_plan.cropped_pixels,
+                                "pixel_reduction_ratio": 1.0
+                                - crop_plan.cropped_pixels / crop_plan.source_pixels,
+                                "camera_rectangles": {
+                                    str(camera_id): rect.as_list()
+                                    for camera_id, rect in crop_plan.cameras.items()
+                                },
+                            }
+                        )
                 else:
                     crop_info["skipped_reason"] = "no_circular_padding"
             else:
@@ -183,7 +176,7 @@ class ExportDataset(Stage):
             progress=0.12,
             key="log.export_web_preview",
         )
-        shutil.copytree(ctx.project_dir / "position_ground" / "preview", preview_dir)
+        shutil.copytree(ctx.project_dir / model_source / "preview", preview_dir)
         preview_points = min(len(recon.points3D), ctx.params["max_preview_points"])
         ctx.progress.info(
             f"preview: {preview_points}/{len(recon.points3D)} points",
@@ -225,40 +218,50 @@ class ExportDataset(Stage):
             # 画像名は images.bin の相対 path をそのまま保つ.
             recon_images = ctx.project_dir / "extract_features" / "images"
             registered_names = {image.name for image in recon.images.values()}
-            sorted_names = sorted(registered_names)
+            expected_sizes = {
+                image.name: (
+                    export_recon.cameras[image.camera_id].width,
+                    export_recon.cameras[image.camera_id].height,
+                )
+                for image in export_recon.images.values()
+            }
             image_copy_span = ProgressSpan(ctx.progress, 0.25, 0.45)
             if crop_plan is None:
-                for image_number, name in enumerate(sorted_names, 1):
-                    source = recon_images / name
-                    if not source.is_file():
-                        raise RuntimeError(f"registered training image is missing: {name}")
-                    _link_or_copy(source, ds_images / name)
-                    image_copy_span.tick(
-                        image_number / max(1, len(sorted_names)),
-                        message=f"copy training image {image_number}/{len(sorted_names)}",
-                        key="log.export_copy_images",
-                        args={"cur": image_number, "tot": len(sorted_names)},
-                    )
-            else:
-                byte_stats = training_crop.crop_images(
+                image_sizes = _copy_registered_images(
                     recon_images,
                     ds_images,
-                    crop_plan,
-                    jpegtran,
+                    expected_sizes,
                     progress=lambda current, total: image_copy_span.tick(
                         current / max(1, total),
-                        message=f"crop training image {current}/{total}",
-                        key="log.export_crop_images",
+                        message=f"copy training image {current}/{total}",
+                        key="log.export_copy_images",
                         args={"cur": current, "tot": total},
                     ),
                 )
+            else:
+                try:
+                    byte_stats, image_sizes = training_crop.crop_images(
+                        recon_images,
+                        ds_images,
+                        crop_plan,
+                        jpegtran,
+                        progress=lambda current, total: image_copy_span.tick(
+                            current / max(1, total),
+                            message=f"crop training image {current}/{total}",
+                            key="log.export_crop_images",
+                            args={"cur": current, "tot": total},
+                        ),
+                    )
+                except (OSError, RuntimeError, ValueError) as error:
+                    raise RuntimeError(f"LFStudio export image materialization failed: {error}") from error
                 crop_info.update(byte_stats)
             mask_copy_span = ProgressSpan(ctx.progress, 0.45, 0.55)
-            mask_files_copied = _copy_masks(
+            mask_files_copied, mask_sizes = _copy_masks(
                 ctx.project_dir,
                 mask_purpose,
                 ds / "masks",
                 registered_names,
+                expected_sizes,
                 crop_plan=crop_plan,
                 progress=lambda current, total: mask_copy_span.tick(
                     current / max(1, total),
@@ -267,9 +270,7 @@ class ExportDataset(Stage):
                     args={"cur": current, "tot": total},
                 ),
             )
-            resolved_mask_source = (
-                mask_purpose.value if mask_purpose is not None else "physical"
-            )
+            resolved_mask_source = mask_purpose.value if mask_purpose is not None else "physical"
             primary_prefix = f"sources/{spec.primary_source_id}/"
             if not any(name.startswith(primary_prefix) for name in registered_names):
                 primary_prefix = None
@@ -278,6 +279,8 @@ class ExportDataset(Stage):
             validation = _validate_lf_dataset(
                 ds,
                 export_recon,
+                image_sizes=image_sizes,
+                mask_sizes=mask_sizes,
                 reference_prefix=primary_prefix,
                 progress=lambda phase, current, total: (
                     image_validation_span if phase == "images" else mask_validation_span
@@ -304,8 +307,9 @@ class ExportDataset(Stage):
                 "image_source": "lossless_fisheye_crop" if crop_plan is not None else "original",
                 "training_crop": crop_info,
                 "fisheye_rectification": catalog.get("rectification"),
+                "model_source": model_source,
                 "metric_scale": metric_scale_info,
-                "ground_position": ground_position_info,
+                "scene_alignment": scene_alignment_info,
                 "validation": validation,
                 "source_registration": source_registration,
             }
@@ -406,11 +410,24 @@ class ExportDataset(Stage):
             "source_registration": _source_registration(recon, spec),
             "training_crop": crop_info,
             "fisheye_rectification": catalog.get("rectification"),
+            "model_source": model_source,
             "metric_scale": metric_scale_info,
-            "ground_position": ground_position_info,
+            "scene_alignment": scene_alignment_info,
         }
         ctx.progress.info("export_dataset done", progress=0.99, key="log.export_done")
         return manifest
+
+
+def _select_export_model(project_dir: Path) -> tuple[Path, str]:
+    for stage in (
+        StageName.DENSE_INITIALIZATION,
+        StageName.CLEANUP_SPARSE,
+        StageName.SCENE_ALIGNMENT,
+    ):
+        model_dir = project_dir / stage.value / "sparse" / "0"
+        if (model_dir / "cameras.bin").is_file():
+            return model_dir, stage.value
+    raise RuntimeError("cleanup_sparse or scene_alignment must run before export_dataset")
 
 
 def _link_or_copy(src: Path, dst: Path) -> None:
@@ -423,15 +440,69 @@ def _link_or_copy(src: Path, dst: Path) -> None:
         shutil.copy2(src, dst)
 
 
+def _copy_registered_images(
+    source_root: Path,
+    destination_root: Path,
+    expected_sizes: dict[str, tuple[int, int]],
+    *,
+    progress: Callable[[int, int], None] | None = None,
+) -> dict[str, tuple[int, int]]:
+    tasks: list[tuple[str, Path, Path, tuple[int, int]]] = []
+    for name in sorted(expected_sizes):
+        relative = _safe_relative_path(name)
+        if relative is None:
+            raise RuntimeError(f"LFStudio export image validation failed: invalid path {name}")
+        tasks.append((name, source_root / relative, destination_root / relative, expected_sizes[name]))
+
+    output_sizes: dict[str, tuple[int, int]] = {}
+    workers = max(1, min(len(tasks), os.cpu_count() or 1))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {
+            pool.submit(_validate_and_link, source, destination, expected_size, "image"): name
+            for name, source, destination, expected_size in tasks
+        }
+        for index, future in enumerate(as_completed(futures), 1):
+            output_sizes[futures[future]] = future.result()
+            if progress is not None:
+                progress(index, len(tasks))
+    return output_sizes
+
+
+def _validate_and_link(
+    source: Path,
+    destination: Path,
+    expected_size: tuple[int, int],
+    kind: str,
+) -> tuple[int, int]:
+    if not source.is_file():
+        raise RuntimeError(f"LFStudio export {kind} validation failed: missing file {source}")
+    try:
+        with PilImage.open(source) as decoded:
+            decoded.load()
+            actual_size = decoded.size
+    except (OSError, RuntimeError, ValueError) as error:
+        raise RuntimeError(f"LFStudio export {kind} validation failed: corrupt file {source}") from error
+    if actual_size != expected_size:
+        raise RuntimeError(
+            f"LFStudio export {kind} validation failed: "
+            f"{source} is {actual_size[0]}x{actual_size[1]}, "
+            f"expected {expected_size[0]}x{expected_size[1]}"
+        )
+    _link_or_copy(source, destination)
+    return actual_size
+
+
 def _copy_masks(
     project_dir: Path,
     purpose: MaskPurpose | None,
     destination_dir: Path,
     image_names: set[str],
+    expected_sizes: dict[str, tuple[int, int]],
     crop_plan: training_crop.CropPlan | None = None,
     progress: Callable[[int, int], None] | None = None,
-) -> int:
+) -> tuple[int, dict[str, tuple[int, int]]]:
     sorted_names = sorted(image_names)
+    output_sizes: dict[str, tuple[int, int]] = {}
     if purpose is None:
         catalog = prepared_images.load_catalog(project_dir)
         records = {record["name"]: record for record in catalog["images"]}
@@ -454,16 +525,21 @@ def _copy_masks(
                 templates[key] = destination
             else:
                 _link_or_copy(template, destination)
+            output_sizes[image_name] = (
+                (rect.width, rect.height)
+                if rect is not None
+                else (int(record["width"]), int(record["height"]))
+            )
             if progress is not None:
                 progress(image_number, len(sorted_names))
-        return len(sorted_names)
+        return len(sorted_names), output_sizes
 
     records = records_by_name(load_mask_manifest(project_dir, purpose))
     missing = [name for name in sorted_names if name not in records]
     if missing:
         raise RuntimeError(f"{purpose.value} masks are missing registered images: {missing[:5]}")
     copies: list[
-        tuple[Path, Path, training_crop.CropRect | None, tuple[int, int] | None]
+        tuple[str, Path, Path, training_crop.CropRect | None, tuple[int, int]]
     ] = []
     for image_name in sorted_names:
         record = records.get(image_name)
@@ -472,29 +548,51 @@ def _copy_masks(
         source = project_dir / record["path"]
         destination = destination_dir / f"{image_name}.png"
         rect = crop_plan.images[image_name] if crop_plan is not None else None
-        expected_size = crop_plan.source_sizes[image_name] if crop_plan is not None else None
-        copies.append((source, destination, rect, expected_size))
-    workers = min(16, max(1, os.cpu_count() or 1))
+        source_size = (
+            crop_plan.source_sizes[image_name]
+            if crop_plan is not None
+            else expected_sizes[image_name]
+        )
+        copies.append((image_name, source, destination, rect, source_size))
+    workers = max(1, min(len(copies), os.cpu_count() or 1))
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = []
-        for source, destination, rect, expected_size in copies:
+        futures = {}
+        for image_name, source, destination, rect, source_size in copies:
             if rect is None:
-                futures.append(pool.submit(_link_or_copy, source, destination))
-            else:
-                futures.append(
-                    pool.submit(
-                        training_crop.crop_mask_file,
-                        source,
-                        destination,
-                        rect,
-                        expected_size,
-                    )
+                future = pool.submit(
+                    _validate_and_link,
+                    source,
+                    destination,
+                    source_size,
+                    "mask",
                 )
+            else:
+                future = pool.submit(
+                    _crop_mask,
+                    source,
+                    destination,
+                    rect,
+                    source_size,
+                )
+            futures[future] = image_name
         for image_number, future in enumerate(as_completed(futures), 1):
-            future.result()
+            output_sizes[futures[future]] = future.result()
             if progress is not None:
                 progress(image_number, len(copies))
-    return len(copies)
+    return len(copies), output_sizes
+
+
+def _crop_mask(
+    source: Path,
+    destination: Path,
+    rect: training_crop.CropRect,
+    source_size: tuple[int, int],
+) -> tuple[int, int]:
+    try:
+        training_crop.crop_mask_file(source, destination, rect, source_size)
+    except (OSError, ValueError) as error:
+        raise RuntimeError(f"LFStudio export mask materialization failed: {error}") from error
+    return rect.width, rect.height
 
 
 def _write_physical_mask(
@@ -519,6 +617,8 @@ def _validate_lf_dataset(
     dataset_dir: Path,
     recon: colmap_model.Reconstruction,
     *,
+    image_sizes: dict[str, tuple[int, int]],
+    mask_sizes: dict[str, tuple[int, int]],
     reference_prefix: str | None = None,
     progress: Callable[[str, int, int], None] | None = None,
 ) -> dict:
@@ -547,11 +647,8 @@ def _validate_lf_dataset(
         if camera is None:
             missing_camera_references.append({"image": image.name, "camera_id": image.camera_id})
             continue
-        try:
-            with PilImage.open(image_path) as decoded:
-                decoded.load()
-                size = decoded.size
-        except (OSError, ValueError):
+        size = image_sizes.get(image.name)
+        if size is None:
             corrupt_images.append(image.name)
             continue
         expected = (camera.width, camera.height)
@@ -579,11 +676,8 @@ def _validate_lf_dataset(
         if mask_path is None:
             missing_masks.append(image.name)
             continue
-        try:
-            with PilImage.open(mask_path) as decoded:
-                decoded.load()
-                size = decoded.size
-        except (OSError, ValueError):
+        size = mask_sizes.get(image.name)
+        if size is None:
             corrupt_masks.append(image.name)
             continue
         if size != expected_size:
@@ -635,6 +729,9 @@ def _validate_lf_dataset(
         "corrupt_mask_count": len(corrupt_masks),
         "mask_size_mismatch_count": len(mask_size_mismatches),
         "mask_files_copied": mask_file_count,
+        "verification_mode": "materialization",
+        "verified_image_count": len(image_sizes),
+        "verified_mask_count": len(mask_sizes),
         "reference_camera_trajectory_diameter": reference_diameter,
         "reference_unique_camera_centers": reference_unique,
         "camera_trajectory_diameter": summary.get("camera_trajectory_diameter", 0.0),

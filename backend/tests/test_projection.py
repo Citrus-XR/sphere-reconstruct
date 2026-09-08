@@ -1,11 +1,11 @@
 """imaging.projection の単体テスト.
 
-MEI 前方射影のプロパティを確認する:
+Unified omnidirectional 前方射影のプロパティを確認する:
   1. 光軸方向の射線 (0,0,1) は画像中心 (cx, cy) にマップされる.
   2. 光軸から少し外れた射線は cx から離れた方向へマップされる.
   3. 後方 (Z < -xi) の射線は valid=False.
 
-adapter で正規化した MEI のスケーリング挙動も確認する.
+adapter で正規化した calibration のスケーリング挙動も確認する.
 """
 
 from __future__ import annotations
@@ -14,16 +14,20 @@ import math
 
 import numpy as np
 
+from sphere_reconstruct.domain.camera_system import OmniDistortionModel, OmniIntrinsics
 from sphere_reconstruct.imaging import projection as proj
 from sphere_reconstruct.imaging.fisheye_camera import camera_rays_to_pixels, pixels_to_camera_rays
 from sphere_reconstruct.insta360 import camera_system
-from sphere_reconstruct.insta360.calibration import CalibSource, DualLensCalibration, MeiLensCalibration
+from sphere_reconstruct.insta360.calibration import (
+    CalibSource,
+    DualLensCalibration,
+    OmniLensCalibration,
+)
 from sphere_reconstruct.insta360.metadata import WindowCropInfo
 
 
-def _make_lens_a() -> MeiLensCalibration:
-    # 実 X5 サンプルの lens A.
-    return MeiLensCalibration(
+def _make_lens_a() -> OmniLensCalibration:
+    return OmniLensCalibration(
         xi=2.0,
         fx=4278.30,
         fy=4277.33,
@@ -35,19 +39,16 @@ def _make_lens_a() -> MeiLensCalibration:
         tx=0.0,
         ty=0.0,
         tz=0.0,
-        k1=0.18366432,
-        k2=2.07332635,
-        k3=-3.27984834,
-        p1=-0.00005305,
-        p2=0.00065176,
+        distortion_model=OmniDistortionModel.RADTAN,
+        distortion_parameters=(0.18366432, 2.07332635, -3.27984834, -0.00005305, 0.00065176),
         ref_image_width=10752,
         ref_image_height=5376,
         lens_flags=113,
     )
 
 
-def _make_lens_b() -> MeiLensCalibration:
-    return MeiLensCalibration(
+def _make_lens_b() -> OmniLensCalibration:
+    return OmniLensCalibration(
         xi=2.0,
         fx=4296.81,
         fy=4298.54,
@@ -59,11 +60,8 @@ def _make_lens_b() -> MeiLensCalibration:
         tx=-0.000048,
         ty=0.000131,
         tz=-0.032273,
-        k1=0.18302010,
-        k2=2.05338216,
-        k3=-3.26668859,
-        p1=0.00187136,
-        p2=0.00038193,
+        distortion_model=OmniDistortionModel.RADTAN,
+        distortion_parameters=(0.18302010, 2.05338216, -3.26668859, 0.00187136, 0.00038193),
         ref_image_width=10752,
         ref_image_height=5376,
         lens_flags=113,
@@ -71,13 +69,42 @@ def _make_lens_b() -> MeiLensCalibration:
 
 
 def _camera_system():
-    return camera_system.from_offset_v3(
+    return camera_system.from_calibration(
         DualLensCalibration(
-            source=CalibSource.OFFSET_V3,
-            lenses=[_make_lens_a(), _make_lens_b()],
+            source=CalibSource.OFFSET,
+            version=3,
+            lenses=(_make_lens_a(), _make_lens_b()),
         ),
         window_crop=WindowCropInfo(5376, 5376, 5312, 5312),
         rolling_shutter_readout_ms=21.244001,
+    )
+
+
+def _v6_intrinsics() -> OmniIntrinsics:
+    return OmniIntrinsics(
+        width=5312,
+        height=5312,
+        xi=2.0,
+        fx=4274.220,
+        fy=4273.920,
+        cx=2693.700 - 32.0,
+        cy=2683.680 - 32.0,
+        distortion_model=OmniDistortionModel.RADTAN_PRO,
+        distortion_parameters=(
+            0.22852755,
+            1.56955242,
+            -1.15421379,
+            -3.01855540,
+            0.0,
+            0.00020713,
+            -0.00208586,
+            0.00644459,
+            0.01365752,
+            -0.00300253,
+            -0.00044836,
+            -0.00027934,
+            -0.01400746,
+        ),
     )
 
 
@@ -102,17 +129,17 @@ def test_normalized_intrinsics_scale_to_extraction_resolution():
     assert abs(intr.cx - (2694.63 - 32.0) * scale) < 1e-3
 
 
-def test_project_mei_optical_axis_lands_at_principal_point():
+def test_project_omni_optical_axis_lands_at_principal_point():
     intr = _camera_system().sensors[0].intrinsics
     rays = np.array([[0.0, 0.0, 1.0]])
-    uv, valid = proj.project_mei(rays, intr)
+    uv, valid = proj.project_omni(rays, intr)
     assert valid[0]
     # 光軸は歪み中心なので u ≈ cx, v ≈ cy.
     assert abs(uv[0, 0] - intr.cx) < 1e-6
     assert abs(uv[0, 1] - intr.cy) < 1e-6
 
 
-def test_mei_pixel_ray_roundtrip_is_subpixel_exact():
+def test_omni_pixel_ray_roundtrip_is_subpixel_exact():
     intr = _camera_system().sensors[0].intrinsics.scaled(3840, 3840)
     theta = np.linspace(0.0, math.radians(85.0), 30)
     azimuth = np.linspace(0.0, 2.0 * math.pi, 40, endpoint=False)
@@ -125,8 +152,8 @@ def test_mei_pixel_ray_roundtrip_is_subpixel_exact():
         )
     )
 
-    pixels, projected = proj.project_mei(rays, intr)
-    recovered, unprojected = proj.unproject_mei(pixels, intr)
+    pixels, projected = proj.project_omni(rays, intr)
+    recovered, unprojected = proj.unproject_omni(pixels, intr)
 
     valid = projected & unprojected
     angular_error = np.arccos(np.clip(np.sum(rays[valid] * recovered[valid], axis=1), -1.0, 1.0))
@@ -134,13 +161,61 @@ def test_mei_pixel_ray_roundtrip_is_subpixel_exact():
     assert np.max(angular_error) < 2e-7
 
 
-def test_project_mei_back_hemisphere_rejected():
+def test_radtan_pro_projection_matches_calibration_reference_values():
+    angles = ((30.0, 0.0), (60.0, 45.0), (85.0, 120.0))
+    rays = np.asarray(
+        [
+            (
+                math.sin(math.radians(theta)) * math.cos(math.radians(azimuth)),
+                math.sin(math.radians(theta)) * math.sin(math.radians(azimuth)),
+                math.cos(math.radians(theta)),
+            )
+            for theta, azimuth in angles
+        ]
+    )
+
+    pixels, valid = proj.project_omni(rays, _v6_intrinsics())
+
+    np.testing.assert_allclose(
+        pixels,
+        (
+            (3413.38030560, 2651.34896644),
+            (3757.51597730, 3747.15204162),
+            (1526.27719960, 4613.26126894),
+        ),
+        atol=1e-6,
+    )
+    assert valid.all()
+
+
+def test_radtan_pro_newton_inverse_roundtrips_forward_hemisphere():
+    theta = np.linspace(0.0, math.radians(88.0), 36)
+    azimuth = np.linspace(0.0, 2.0 * math.pi, 48, endpoint=False)
+    theta_grid, azimuth_grid = np.meshgrid(theta, azimuth, indexing="ij")
+    rays = np.column_stack(
+        (
+            (np.sin(theta_grid) * np.cos(azimuth_grid)).ravel(),
+            (np.sin(theta_grid) * np.sin(azimuth_grid)).ravel(),
+            np.cos(theta_grid).ravel(),
+        )
+    )
+
+    pixels, projected = proj.project_omni(rays, _v6_intrinsics())
+    recovered, unprojected = proj.unproject_omni(pixels, _v6_intrinsics())
+
+    valid = projected & unprojected
+    angular_error = np.arccos(np.clip(np.sum(rays[valid] * recovered[valid], axis=1), -1.0, 1.0))
+    assert valid.sum() > 1500
+    assert np.max(angular_error) < 2e-7
+
+
+def test_project_omni_back_hemisphere_rejected():
     intr = _camera_system().sensors[0].intrinsics
     # xi=2 なので Z=-1 でも denom = -1+2 = 1 > 0, まだ valid.
     # Z=-3 なら denom = -3+2 = -1 < 0, front-side は不通.
     # ただし unit sphere 上で Z=-3 は不可能なので, 正規化前で強めに -1 を渡す.
     rays = np.array([[0.0, 0.0, -1.0]])
-    uv, valid = proj.project_mei(rays, intr)
+    uv, valid = proj.project_omni(rays, intr)
     # 正規化後 Z=-1, denom = -1+2 = 1 > 0. まだ画像内かどうかは fx / distortion 次第.
     # xi=2 は真横方向まで見えるようなモデルなので, 画像内に落ちる可能性が高い. OK.
     # ここでは 「valid が bool で返ってくる」ことだけ確認.
@@ -148,7 +223,7 @@ def test_project_mei_back_hemisphere_rejected():
     assert uv.shape == (1, 2)
 
 
-def test_mei_calibration_fits_forward_thin_prism_fisheye():
+def test_omni_calibration_fits_forward_thin_prism_fisheye():
     results = []
     for sensor in _camera_system().sensors:
         intr = sensor.intrinsics.scaled(3840, 3840)

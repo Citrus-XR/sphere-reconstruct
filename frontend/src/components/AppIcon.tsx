@@ -1,4 +1,5 @@
 import { Add24Regular } from '@fluentui/react-icons/svg/add'
+import { ArrowUndo24Regular } from '@fluentui/react-icons/svg/arrow-undo'
 import { Broom24Regular } from '@fluentui/react-icons/svg/broom'
 import { Camera24Regular } from '@fluentui/react-icons/svg/camera'
 import { Checkmark24Regular } from '@fluentui/react-icons/svg/checkmark'
@@ -31,6 +32,7 @@ import { ZoomIn24Regular } from '@fluentui/react-icons/svg/zoom-in'
 
 const icons = {
   add: Add24Regular,
+  undo: ArrowUndo24Regular,
   broom: Broom24Regular,
   camera: Camera24Regular,
   checkmark: Checkmark24Regular,

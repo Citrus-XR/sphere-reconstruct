@@ -11,14 +11,17 @@ from __future__ import annotations
 
 import logging
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
-from .api import events, jobs, previews, projects, stages, system
+from .api import events, jobs, preferences, previews, projects, stages, system
 from .api import settings as settings_api
+from .imaging.source_region import migrate_source_regions
 from .infrastructure.database import close_db, init_db
+from .infrastructure.filesystem import PathNotAllowedError, ensure_within
 from .job_supervisor import init_supervisor, shutdown_supervisor
 from .settings import get_settings, workspace_root
 
@@ -31,20 +34,34 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
 
     db_path = workspace_root() / "state.db"
     db = await init_db(db_path)
-    init_supervisor(db, db_path)
+    for project_dir in (workspace_root() / "projects").glob("*"):
+        if project_dir.is_dir():
+            capped = migrate_source_regions(project_dir)
+            if capped:
+                logger.info("Capped %d source-region radii to 0.5 (project=%s)", capped, project_dir.name)
+    supervisor = init_supervisor(db, db_path)
 
     # クラッシュ復旧: 前回のプロセスが死んだ時点で running/queued だった job は,
     # その Worker プロセスがもう存在しないので 'failed' (interrupted) にする.
     # 成果物はステージ単位で原子的に確定しているので, 再実行すれば完了済みステージは
     # キャッシュヒットで飛ばし, 中断ステージから再開される.
+    interrupted_jobs = await (
+        await db.conn.execute("SELECT id FROM job WHERE status IN ('running', 'queued')")
+    ).fetchall()
+    interrupted_at = datetime.now(UTC).isoformat()
     async with db.transaction() as conn:
         await conn.execute(
-            "UPDATE job SET status='failed', error_text='interrupted by restart' "
-            "WHERE status IN ('running', 'queued')"
+            "UPDATE job SET status='failed', finished_at=?, error_text='interrupted by restart' "
+            "WHERE status IN ('running', 'queued')",
+            (interrupted_at,),
         )
         await conn.execute(
-            "UPDATE stage_run SET status='failed', error_text='interrupted by restart' WHERE status='running'"
+            "UPDATE stage_run SET status='failed', finished_at=?, error_text='interrupted by restart' "
+            "WHERE status='running'",
+            (interrupted_at,),
         )
+    for row in interrupted_jobs:
+        await supervisor.cleanup_scratch(row["id"])
 
     logger.info("sphere-reconstruct backend started (db=%s)", db_path)
 
@@ -74,6 +91,7 @@ app.add_middleware(
 )
 
 app.include_router(projects.router)
+app.include_router(preferences.router)
 app.include_router(jobs.router)
 app.include_router(events.router)
 app.include_router(settings_api.router)
@@ -106,8 +124,12 @@ def _mount_frontend() -> None:
 
     @app.get("/{full_path:path}")
     async def spa_fallback(full_path: str):
-        # API パスはここに来ない (先に登録済みルータが処理する).
-        candidate = dist / full_path
+        if full_path == "api" or full_path.startswith("api/"):
+            raise HTTPException(status_code=404, detail="API route not found")
+        try:
+            candidate = ensure_within(dist, dist / full_path)
+        except PathNotAllowedError as error:
+            raise HTTPException(status_code=404, detail="file not found") from error
         if full_path and candidate.is_file():
             return FileResponse(candidate)
         return FileResponse(dist / "index.html")

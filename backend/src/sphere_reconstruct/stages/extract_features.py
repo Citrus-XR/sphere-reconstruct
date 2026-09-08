@@ -34,7 +34,7 @@ class ExtractFeatures(Stage):
             "feature_type": feature_type,
             "use_gpu": bool(raw.get("use_gpu", True)),
             "use_feature_masks": bool(raw.get("use_feature_masks", True)),
-            "max_image_size": int(raw.get("max_image_size", 2048)),
+            "max_image_size": int(raw.get("max_image_size", 0)),
             "max_num_features": int(raw.get("max_num_features", 8192)),
             "sift_peak_threshold": float(raw.get("sift_peak_threshold", 0.0)),
             "sift_edge_threshold": float(raw.get("sift_edge_threshold", 0.0)),

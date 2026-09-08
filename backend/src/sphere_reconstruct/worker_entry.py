@@ -18,7 +18,7 @@ from typing import Any
 
 # stages パッケージ import で `@register` が走り, レジストリが埋まる.
 from . import stages as _stages  # noqa: F401
-from .domain.pipeline_state import StageName
+from .domain.pipeline_state import StageName, requested_stage_plan
 from .pipeline.engine import Engine
 
 
@@ -42,7 +42,9 @@ def run_pipeline_entry(
     try:
         engine = Engine(db, ws, project_id, job_id)
         if stage:
-            engine.run_stage(StageName(stage), (params_by_stage or {}).get(stage, {}))
+            target = StageName(stage)
+            for planned in requested_stage_plan(target):
+                engine.run_stage(planned, (params_by_stage or {}).get(planned.value, {}))
         else:
             typed_params = {StageName(k): v for k, v in (params_by_stage or {}).items()}
             skip_set = {StageName(s) for s in (skip or [])}

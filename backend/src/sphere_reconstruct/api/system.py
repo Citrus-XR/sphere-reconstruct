@@ -11,6 +11,7 @@ FastAPI プロセスで動くため CUDA/torch は触らない. GPU 情報は nv
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from pathlib import Path
 
 import psutil
@@ -148,9 +149,16 @@ async def _gpu_stats() -> list[dict]:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
         )
-        out, _ = await asyncio.wait_for(proc.communicate(), timeout=3.0)
-    except (TimeoutError, FileNotFoundError, OSError):
+    except OSError:
         return []
+    try:
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=3.0)
+    except (TimeoutError, OSError):
+        await _terminate_gpu_probe(proc)
+        return []
+    except asyncio.CancelledError:
+        await _terminate_gpu_probe(proc)
+        raise
     gpus = []
     for line in out.decode(errors="replace").strip().splitlines():
         parts = [x.strip() for x in line.split(",")]
@@ -166,6 +174,13 @@ async def _gpu_stats() -> list[dict]:
             }
         )
     return gpus
+
+
+async def _terminate_gpu_probe(proc: asyncio.subprocess.Process) -> None:
+    if proc.returncode is None:
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
+    await proc.communicate()
 
 
 def _num(s: str) -> float | None:

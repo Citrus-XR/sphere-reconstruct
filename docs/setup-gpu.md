@@ -1,341 +1,306 @@
-# GPU・native runtime setup
+# Runtime / GPU setup
 
-Platform ごとの起動、dependency diagnosis、hardware decode、COLMAP CUDA Bundle Adjustment、SAM3、
-RoMaV2、LichtFeld Studio の実行条件をまとめる。System Python へ package を追加せず、start script と
-`backend` の uv environment を使う。
+Development checkout と packaged runtime の起動、dependency diagnosis、CUDA、COLMAP、optional model、UI progress contract を説明する。Machine-specific media path や experiment output path は記録しない。
 
-## Start scripts
+## Launchers
 
 ### Windows
 
 ```powershell
-.\scripts\start-windows.ps1
+scripts\start-windows.ps1
 ```
 
-Command Prompt は `scripts\start-windows.cmd` を使う。Script は frontend build、uv sync、pinned native
-tool install、Doctor、FastAPI の順に実行し、native command が失敗した時点で停止する。起動 URL は
-`http://127.0.0.1:8787`。
-
-SAM3 / RoMaV2 を同時に導入する場合:
-
-```powershell
-$env:SPHERE_WITH_SAM3="1"
-$env:SPHERE_WITH_DENSE="1"
-.\scripts\start-windows.ps1
-```
-
-RoMaV2 v2.0.1 weights は `.runtime/torch/hub/checkpoints` へ temporary download し、固定 SHA-256 を検証後に
-publish する。Torch / model は heavy worker だけが import し、API process に CUDA context を持ち込まない。
-
-Machine 固有 config と auto-install override:
-
-```powershell
-$env:SPHERE_CONFIG="D:/path/to/config.toml"
-$env:SPHERE_SKIP_AUTO_INSTALL_COLMAP="1"
-$env:SPHERE_SKIP_AUTO_INSTALL_JPEGTRAN="1"
-.\scripts\start-windows.ps1
+```bat
+scripts\start-windows.cmd
 ```
 
 ### Linux
 
-COLMAP 4.1+、FFmpeg、FFprobe を system package または独自 build で用意する。
-
 ```bash
 ./scripts/start-linux.sh
-SPHERE_WITH_SAM3=1 SPHERE_WITH_DENSE=1 ./scripts/start-linux.sh
 ```
-
-`filesystem.allowed_roots` が空なら user home が file-browser root になる。External drive は config の
-`filesystem.allowed_roots` へ明示する。
 
 ### macOS
 
 ```bash
-brew install colmap ffmpeg
 ./scripts/start-macos.sh
 ```
 
-VideoToolbox decoder を actual input で probe する。CUDA BA は使わず、GPU/CPU SIFT capability と CPU BA を
-Doctor が個別表示する。
+Launcher は backend / frontend environment を作成し、runtime config を読み、server と Vite frontend を起動する。Python package は uv、Node package は pnpm で管理する。Global Python / npm install は使用しない。
 
-## Doctor
+### Background service
 
-```text
-GET /api/system/doctor
-cd backend && uv run sphere-doctor
-```
-
-Doctor は次を独立 capability として調べる。
-
-- Workspace と file-browser root の read/write
-- FFmpeg hardware method と actual source decoder
-- COLMAP 4.1、Global Mapper、ALIKED、ERP camera
-- Ceres dense CUDA solver と cuDSS sparse CUDA solver
-- NVIDIA GPU、driver、compute capability
-- FAISS SIFT vocabulary-tree header
-- Native ALIKED 用 ONNX CUDA / cuDNN runtime
-- Optional SAM3、RoMaV2、jpegtran
-
-`COLMAP ... with CUDA` は GPU feature を示すだけで、Ceres CUDA / cuDSS BA を保証しない。
-
-## Windows COLMAP runtime
-
-`scripts/install_colmap.py` は URL、version、SHA-256 を固定し、temporary directory で検査してから
-`.runtime/tools/` を atomic replace する。Binary resolution は explicit config、auto-installed record、PATH
-の順なので、導入済み runtime が古い PATH binary に隠れない。
-
-| Variant | Selection | Feature GPU | BA GPU |
-|---|---|---:|---:|
-| `cuda-ba` | Driver 580+、compute capability 7.5+ | Yes | Ceres CUDA + cuDSS |
-| `cuda` | 上記条件を満たさない NVIDIA GPU | Yes | No |
-| `cpu` | NVIDIA GPU なし | No | No |
-
-Override / manual install:
-
-```powershell
-$env:SPHERE_COLMAP_VARIANT="cuda-ba"
-backend\.venv\Scripts\python.exe scripts\install_colmap.py --variant cuda-ba
-```
-
-Pinned CUDA-BA runtime:
-
-- COLMAP 4.1.1
-- Ceres commit `bac1127f9ef672405bd0d2d9c84e809ae89bd239`
-- CUDA 12.8、cuDSS 0.8.0.10、cuDNN 9.20.0.48、cuFFT、NVRTC
-- ONNX Runtime CUDA provider
-- vcpkg commit `6d9d7df564a1ccdaa994e4ad39ccd4a32360867b`
-- Native SASS sm75 / sm80 / sm86 / sm89 / sm90、forward PTX compute75
-- CLI only、GUI / MVS / CGAL / OpenGL off
-- COLMAP PR #4591 の folder-major rig sequential-pairing fix
-
-CUDA 12.8 は current Windows driver で native sm89 を使え、CUDA 13.2 PTX の R595 requirement に依存しない。
-Ceres の pinned source が caller の `CMAKE_CUDA_ARCHITECTURES` を上書きするため、build script は repository の
-patch で non-empty caller value を保持する。
-
-Official COLMAP 4.1.1 Windows CUDA archive の Ceres は CUDA / cuDSS 無効で、次の warning 後に CPU BA へ
-fallback する。
+初回 launcher 実行後は `scripts/server_service.py` が Windows / Linux / macOS 共通の background lifecycle を提供する。Windows Task Scheduler、systemd、launchd を application contract にしない。Windows では detached + breakaway process、POSIX では independent session を作り、共通 PID record、stdout / stderr log、health check を使う。
 
 ```text
-Requested to use GPU for bundle adjustment, but Ceres was compiled without CUDA support.
-Requested to use GPU for bundle adjustment, but Ceres was compiled without cuDSS support.
+server_service.py start [--port 8787]
+server_service.py status
+server_service.py restart
+server_service.py stop
 ```
 
-UI の `ba_use_gpu` は version string ではなく capability metadata、DLL closure、actual mapper log で決める。
+Python executable は `backend/.venv` の platform 固有 path を使う。PID record は `runtime/backend.pid.json`、log は `runtime/logs/backend.stdout.log` と `backend.stderr.log`。Backend restart 時は前回の `running / queued` Job を `interrupted by restart` として終了し、未確定 Stage は再実行可能な状態へ戻す。
 
-### Reproducible local build
+同じ workspace に対する API service は一つだけ起動する。Project ごとの排他制御はこの API process が所有し、Worker の稼働状態は SQLite の Job record で共有する。Frontend build の静的配信は解決後の path を `frontend/dist` 内に限定し、上位 directory や外部を指す symlink を配信しない。未定義の `/api` route は HTML に置き換えず HTTP 404 を返す。
 
-```powershell
-.\scripts\build_colmap_cuda_ba.ps1 -OutputDirectory dist
-```
+## Runtime config
 
-失敗後に同じ build root を明示的に再利用する時だけ:
-
-```powershell
-.\scripts\build_colmap_cuda_ba.ps1 -OutputDirectory dist -ReuseBuildRoot
-```
-
-Script は CMake 3.30+、Release try-compile、pinned shallow source を使う。Vcpkg の CPU Ceres を除外し、custom
-Ceres を CUDA / CHOLMOD / SPQR / LAPACK / cuDSS 付きで一回 build する。cuFFT / cuDNN / NVRTC / nvJitLink
-も app-local に配置し、PE normal / delay-load imports と `LoadLibraryExW` を検査する。Runtime archive は
-executable、DLL、capability metadata、license だけを含める。
-
-Repository は CI workflow を持たない。Runtime release は local clean-machine smoke を通した archive だけを
-manual publish する。
-
-## FFmpeg decode、PTS、frame selection
+`runtime/config.toml` または `SPHERE_CONFIG` で指定した TOML を読む。Environment variable は `SPHERE_` prefix と `__` delimiter を使う。
 
 ```toml
+[server]
+host = "127.0.0.1"
+port = 8787
+
+[workspace]
+root = "./workspace"
+
+[filesystem]
+allowed_roots = []
+
+[binaries]
+ffmpeg = ""
+ffprobe = ""
+colmap = ""
+jpegtran = ""
+vocab_tree = ""
+
 [frame_extraction]
 hwaccel = "auto"
 require_hwaccel = false
 score_workers = 0
 ```
 
-Dedicated NVIDIA machine:
+Empty binary value は `PATH` resolution を使う。Filesystem browser は `allowed_roots` 内だけを表示する。
 
-```toml
-[frame_extraction]
-hwaccel = "cuda"
-require_hwaccel = true
-score_workers = 0
+## Doctor
+
+Settings の Doctor は file existence だけでなく capability を検査する。
+
+- FFmpeg decoder / encoder と selected hardware decode
+- FFprobe
+- COLMAP version / command set
+- Global Mapper
+- Final point `color_extractor`
+- Ceres CUDA / cuDSS dense / sparse BA
+- ONNX CUDA provider
+- FAISS vocabulary tree
+- jpegtran（legacy JPEG crop のみ）
+- SAM3 package / checkpoint
+- RoMaV2 package / checkpoint
+
+Feature が利用できない場合は disabled reason を UI に表示する。Software fallback を CUDA success と表示しない。
+
+## FFmpeg hardware decode
+
+`frame_extraction.hwaccel = "auto"` は representative frame を実際に decode し、動作した backend を採用する。
+
+| Platform | Typical backend |
+|---|---|
+| NVIDIA Windows / Linux | CUDA / NVDEC |
+| Intel Windows / Linux | QSV / VAAPI |
+| AMD Linux | VAAPI |
+| macOS | VideoToolbox |
+
+`require_hwaccel = true` は hardware decode が使えない時に error とする。`score_workers = 0` は logical CPU 全数。Raw dual-fisheye は二 stream を一 demux pass で decode し、Packet PTS で sensor pairing を検証する。
+
+## COLMAP installation
+
+Generic installer:
+
+```bash
+uv run scripts/install_colmap.py
 ```
 
-Priority は CUDA、VideoToolbox、QSV、D3D11VA、D3D12VA、DXVA2、VAAPI、VDPAU。`ffmpeg -hwaccels` は build
-capability だけなので、actual input の一 frame decode と software filter transfer を probe する。Required
-hardware が失敗した場合は software fallback を隠さず Step error にする。
+Windows CUDA / cuDSS build:
 
-Raw dual-fisheye は二 stream を一 process / 一 demux pass で decodeする。Extractor は container packet の
-PTS / duration を presentation 順へ並べ、二 stream の全 frame count / PTS を 0.5 ms tolerance で検証する。
-Selected capture の時刻は `frame_index / fps` ではなく実 PTS。VFR、non-zero start、gap、B-frame を想定する。
+```powershell
+scripts\build_colmap_cuda_ba.ps1 -OutputDirectory <output>
+```
 
-Sharpness、exposure、feature count は全 required sensor の worst value、optical-flow motion は maximum を使う。
-一方の lens だけ blurred / clipped の capture を選ばない。Spatial candidate JPEG は final quality で生成し、採用時に
-再 encode しない。
+Build は次を pin / bundle する。
 
-`score_workers=0` は logical CPU 全数を使う。各 worker の OpenCV internal thread は 1 に固定し、nested
-oversubscription を避ける。Decision が前回採用 frame に依存する optical-flow selection 自体は sequential。
+- COLMAP 4.1.1
+- Ceres CUDA build
+- cuDSS runtime
+- cuDNN / ONNX CUDA runtime
+- target CUDA architectures
+- COLMAP PR #4591 semantic backport
 
-RTX 4070 Ti、3840² HEVC の実測は CUDA 8.98× realtime、software 0.85×。同じ frame の output は pixel
-MAE 0、maximum difference 0。
+Generated capability metadata を Doctor が読み、`ba_use_gpu` の availability を決める。System CUDA install が存在するだけでは GPU BA capability と判定しない。
 
-## Camera、rig、rolling shutter
+## BA and CPU/GPU boundaries
 
-Core requirements:
+`ba_use_gpu` は Ceres linear solver に CUDA/cuDSS を許可し、geometry model や loss は変更しない。
 
-- `THIN_PRISM_FISHEYE`、`OPENCV_FISHEYE`、`SIMPLE_RADIAL`、`PINHOLE`、`EQUIRECTANGULAR`
-- `feature_extractor --image_list_path`
-- Multi-camera rig と generalized rig verification
-- Global Mapper
-- Optional native ALIKED / LightGlue
+- 50 images 未満の small local BA は transfer overhead を避けて CPU を選ぶ
+- Large BA は CUDA dense / cuDSS sparse solver を選択できる
+- Residual / Jacobian preparation の一部は CPU
+- Track completion、merge、retriangulation は CPU
+- Global Positioning GPU と BA GPU は別 capability
 
-Raw camera metadata は adapter が `camera_system.json` へ正規化する。Core projection / rig code は
-`offset_v3`、メーカー名、合成 calibration canvas を知らない。Current Insta360 adapter は per-sensor MEI と
-full 6DoF relative extrinsic を出力し、MEI を `THIN_PRISM_FISHEYE` へ近似する。
+Incremental Mapper の `Retriangulation and Global bundle adjustment` は複数の CPU / GPU phase をまとめた upstream label である。Label 中に BA があっても phase 全体が GPU になる意味ではない。UI は registered rig frame count と current phase を別 detail として表示する。
 
-Raw fisheye は mask / feature より前の mandatory `rectify_fisheye` Step で、同解像度 OPENCV_FISHEYE PNG へ
-一回だけ backward resample する。Target pixel → OPENCV ray → source MEI pixel を使い、validity bitmap も同じ
-map で変換する。COLMAP と LFStudio は rectified image / camera / rig の一つの contract だけを読む。
-192×3840² の実測は 74秒、PNG 1.89 GB。二回補間 roundtrip は 40.47–42.02 dB PSNR、MAE
-0.39–0.45 / 255。実 pipeline は一回だけ補間する。PNG encode が主な CPU / disk cost になる。
+`Linear solver failure. Failed to compute a finite step.` は無効な trial step の棄却である。Ceres は trust radius を縮小して再試行するため、warning 件数と BA 終了失敗数は一致しない。実際に解を利用できない場合の `Bundle adjustment failed:` を別途確認する。Reconstruction Inspector は両方の件数、log file、local/global context を記録する。GPU を許可しても小規模 local BA は CPU のままなので、GPU 切替だけをこの warning の解決策にしない。詳細診断には stock CLI の `--log_level 3` を使う。
 
-X5 metadata field 27 の window crop は 5376²→5312² centered crop。各辺 32 px を引いてから decoded size へ
-scale する。これを省くと focal が 1.204819% 小さくなり、principal point はほぼ同じまま single-lens shape が
-曲がる。Crop と rig extrinsics は独立で、crop は `cam_from_rig` を変更しない。
+根拠: [Ceres step 検証](https://github.com/ceres-solver/ceres-solver/blob/bac1127f9ef672405bd0d2d9c84e809ae89bd239/internal/ceres/levenberg_marquardt_strategy.cc#L106-L129)、[COLMAP BA 終了判定](https://github.com/colmap/colmap/blob/a0d785fba74b2664f31edc4a29026a8b27c00f67/src/colmap/estimators/bundle_adjustment_ceres.cc#L556-L563)。
 
-COLMAP と LFStudio v0.5.3 は同名 THIN_PRISM model の tangential / prism 適用位置が異なる。Joint fit の実測:
+Video source では COLMAP の `ModifyForVideoData()` と同じ `ba_global_frames_ratio=1.4` / `ba_global_points_ratio=1.4` を使う。final global BA は省略せず、成長ごとの中間 global BA だけを減らす。これは low-texture 画像を削る設定ではなく、同じ観測グラフに対する mapper の実行 schedule である。
 
-| Sensor | COLMAP RMS | LFStudio RMS | Combined maximum |
+### Incremental Mapper の三角測量設定
+
+Inspector の `Reconstruct > Incremental Mapper > COLMAP Advanced` で、三角測量の品質ゲートをプリセットまたは個別値で指定できる。これらは `--Mapper.*` オプションであり、Global Mapper には適用されない。値の単位は再投影誤差が pixel、角度が degree である。空欄または `0` を個別入力した項目は、その項目の COLMAP 既定値へ委譲する。
+
+| 設定 | 既定 (COLMAP 4.1.1) | 一般 | 厳格 |
 |---|---:|---:|---:|
-| lens0 | 0.0396 px | 0.0421 px | 0.247 px |
-| lens1 | 0.1029 px | 0.1112 px | 0.590 px |
+| `filter_max_reproj_error` | 4.0 px | 1.5 px | 1.0 px |
+| `filter_min_tri_angle` | 1.5° | 3.0° | 5.0° |
+| `tri_create_max_angle_error` | 2.0° | 1.0° | 0.75° |
+| `tri_continue_max_angle_error` | 2.0° | 1.0° | 0.75° |
+| `tri_merge_max_reproj_error` | 4.0 px | 1.5 px | 1.0 px |
+| `tri_complete_max_reproj_error` | 4.0 px | 1.5 px | 1.0 px |
+| `tri_min_angle` | 1.5° | 3.0° | 5.0° |
 
-Consumer ごとの residual を保存し、1 px を超える近似は native default にしない。Valid region は user physical
-circle と calibrated forward ray (`theta < 89.55°`) の積であり、scalar radius だけで hemisphere を切らない。
-基準円中心は `(0.5,0.5)` 固定、sensor ごとの ordered add/subtract brush operation で任意領域を調整する。
+既定は登録数と遠景の coverage を優先する。一般は低視差・高残差の点を減らしながら接続を保ち、厳格は不安定な点をさらに除外する代わりに登録数と遠距離点が減る可能性がある。プリセットを選択すると 7 項目が同時に設定され、個別値を編集すると `カスタム` に切り替わる。Global Mapper を選択している間はこの Incremental 専用設定を表示しない。
 
-Current X5 readout は 21.244001 ms。現在の frame selection は `|omega| × readout` で high-risk frame を避ける
-だけで、rolling-shutter correction ではない。Correction には sensor ごとの scan direction、frame timestamp
-reference、encoded crop、`R_rig_from_imu`、gyro bias、video↔IMU offset / drift が必要。Unknown value を仮定して
-top-to-bottom remap を実行しない。詳細は [adding-360-camera-formats.md](adding-360-camera-formats.md)。
+## GLOMAP and fisheye
 
-Opaque stitched ERP は元 sensor / scan row の二次元 time-map が無いため、単一 ERP-row rolling-shutter model を
-適用しない。
+COLMAP 4.1.1 の `OPENCV_FISHEYE` は forward hemisphere camera である。
 
-## Matching と FAISS vocabulary tree
+- `ImgFromCam` は `z <= 0` を reject
+- Default `CamRayFromImg` は `z > 0`
+- Effective field of view は 180° 以下
 
-Single-source video は Sequential + loop closure + one-pass transitive。COLMAP 4.1.1 の folder-major sensor
-boundary bug は upstream [PR #4591](https://github.com/colmap/colmap/pull/4591) の same-camera guard を
-backport する。Runtime を切り替えた後は旧 match row を再利用せず database を clean rebuild する。
+Native dual-fisheye + Global Mapper selection には warning を表示する。Warning は mapper を自動変更しない。
 
-COLMAP 4.1 は FLANN から FAISS へ移行した。旧 tree は file が存在しても crash するので、installer / Doctor は
-header `{version: 1|2, desc: 128, embedding: 64}` を検証する。既定 tree:
+Current recommendation:
+
+- Default / calibrated dual-fisheye: Incremental Mapper
+- Perspective / ERP / well-connected graph: Global Mapper を選択可能
+
+192 camera test では Global fixed rig が 179 cross-sensor points、Incremental fixed rig が 5,760 を保持した。Experimental more-than-180° extension は same-capture verification を回復したが、Global Mapper の later stage が stereo constraint を保持しなかったため production dependency にしない。
+
+Matching は calibrated rig の同一 capture edge を consumer-valid angular cap で検査する。`cam_from_rig` の optical axis separation が二つの half-angle の和を超える場合だけ、その二視図 edge は物理的に共有 ray を持てないため除外する。これは adapter が報告する外参と validity から導かれ、機種固有の閾値ではない。時間の異なる capture と angular cap が重なる sensor pair は保持する。
+
+Rig 検証の `min_num_inliers` は集約した frame pair に適用され、`CALIBRATED_RIG` の各 image pair はそれ未満になることがある。Mapper の `min_num_matches` を下回る pair は database cache が既に除外する。その pair を再度削除しても BA の観測は改善しない。Matching 統計は総 pair 数と内点閾値以上の pair 数を併記する。根拠: [rig inlier の分配](https://github.com/colmap/colmap/blob/a0d785fba74b2664f31edc4a29026a8b27c00f67/src/colmap/estimators/two_view_geometry.cc#L514-L557)、[cache の閾値](https://github.com/colmap/colmap/blob/a0d785fba74b2664f31edc4a29026a8b27c00f67/src/colmap/scene/database_cache.cc#L39-L45)。
+
+## Fisheye runtime contract
+
+Raw adapter は source-local intrinsics、calibration crop、`cam_from_rig`、shutter、physical/custom validity を出力する。Image preparation の内部 dependency が次を実行する。
 
 ```text
-https://github.com/colmap/colmap/releases/download/3.11.1/
-vocab_tree_faiss_flickr100K_words256K.bin
-SHA-256 96ca8ec8ea60b1f73465aaf2c401fd3b3ca75cdba2d3c50d6a2f6f760f275ddc
+target OPENCV pixel -> target ray -> source omnidirectional pixel
 ```
 
-FAISS indexing は CPU / sequential outer loop なので GPU utilization が低いのは正常。GPU SIFT pair matching は
-indexing 後に始まる。Rig verification は小さい sequential / loop graph に一回適用し、transitive extension 後の
-巨大 graph に generalized RANSAC を再実行しない。
+RGB は same-resolution Lanczos4 で一回 resample、validity は nearest。Mask / SfM / export は rectified catalog を読む。Camera metadata だけを交換して source pixels を残す方法は禁止する。Device-specific constants は adapter に置く。
+INSV extraction は MP4 stream1→calibration lens0、stream0→calibration lens1 の canonical sensor mapping を適用する。V6 radtan-pro の非対称 decentering / prism 項を含む source ray から backward remap を構築する。
 
-## Metric scale と ground
+Fisheye normalization は独立 Stage として UI hierarchy、進捗、統計、clear / regenerate を公開する。Feature Mask、Training Mask、Feature extraction の単独 Job も同じ Job 内で normalization を先に生成または cache reuse してから target Stage を実行する。
 
-Fixed `cam_from_rig` の sensor spacing が設定 baseline と一致することは、metric scale の独立 evidence ではない。
-同 capture の複数 sensor が十分な共有 3D point / parallax を持つ場合だけ baseline が scale を拘束する。背面
-dual-fisheye のように overlap が弱い source は VIO、control point、overlapping stereo なしで meter と表示しない。
+## Optional models
 
-Gravity Step は rotation だけ、Ground Step は Y translation だけを適用する。IMU acceleration 二重積分を scale
-restoration に使わない。
-
-## SAM3 と jpegtran
+### SAM3
 
 ```toml
 [sam3]
-repo_path = "D:/models/sam3"
-checkpoint_path = "D:/models/sam3.pt"
+repo_path = ""
+checkpoint_path = ""
 device = "cuda:0"
 dtype = "bfloat16"
 max_inference_size = 2048
-training_prompt = "person,camera operator,person's shadow"
-feature_prompt = "person,camera operator,person's shadow,animal,sky,tree,vehicle,airplane,water"
+confidence_threshold = 0.5
 ```
 
-Feature / Training mask は別 Step / artifact。Inference は physical circle 外を含む full image context で行い、
-出力だけを geometric valid region と交差する。PNG は atomic publish 後すぐ running preview index に追加する。
-Propagation は multi-prompt で遅く independent detection より miss が残ったため default にしない。
+`sam3.max_inference_size` は UI 以外から parameter を省略した場合の backend fallback。UI の Auto resolution は source ごとの projection と native dimensions を使い、Perspective 2048、dual-fisheye 最大 3072、ERP 最大 4096 を解決する。Feature extraction は Perspective 2048、native dual-fisheye の source edge、ERP horizontal edge を使い、0 を手動指定した場合は COLMAP の無制限既定へ委譲する。Feature count は Perspective / pinhole view 8192、dual-fisheye 16384、ERP 32768。Pinhole view は dual-fisheye edge の 1/2、ERP width の 1/4 を 256 px 単位へ切り上げる。複数 source は各 parameter の最大要求を採用する。
 
-Windows jpegtran installer:
+Feature / Training は別 Step、prompt、manifest を持つ。Missing checkpoint は Doctor が表示する。Per-image coverage は manifest / Inspector に保存し、threshold warning を一画像一行 Console へ出さない。
 
-```powershell
-backend\.venv\Scripts\python.exe scripts\install_jpegtran.py
-```
-
-Rectified fisheye PNG は validity bitmap bounds で lossless pixel crop し、principal point、2D observation、mask
-を同じ offset で更新する。Perspective JPEG の MCU crop には jpegtran を使う。
-
-## LichtFeld Studio
-
-Native distorted / fisheye / ERP dataset は MRNF または MCMC + GUT を使う。Recommended default:
-
-```text
-LichtFeld-Studio --config <dataset>/train_configs/train_config.mrnf.json \
-  --data-path <dataset> --max-width 2048 --headless --train
-```
-
-- MRNF v0.5.3 UI defaults
-- GUT on、`undistort=false`
-- resolved segment mask
-- PPISP / controller off
-- Mandatory OPENCV_FISHEYE rectification completed before SfM
-- max width 2048
-- general cap 2M、30,000 iterations
-
-`Undistort: source -> destination` log は loader の hypothetical crop metadata であり、training tensor resize では
-ない。Actual size は `Image info` log を見る。
-
-Stock LFStudio の THIN_PRISM inverse は non-radial delta を前回 UV から五回減算し、forward と inverse が
-一致しない。Lens1 は 2048 scale で maximum 約 11.4 px。Mandatory rectification が RGB / validity / camera を
-feature extraction 前に一緒に OPENCV grid へ変換するため、stock LFStudio でもこの inverse を通らない。
-Legacy THIN dataset を直接使う場合だけ source patch が必要。`undistort=true` は別の prism packing bug がある。
-
-12 GB RTX 4070 Ti の Parktest は 2.4M / 2304 で OOM、2M / 2048 で完走。旧 eval preset は UI default より
-means LR 6.4 倍、scaling LR 約 2.86 倍で巨大な sky splat を生成した。PPISP off でも再現したため、config は
-`mrnf_defaults()` を基準にする。PPISP は appearance model で denoiser ではなく opt-in。
-
-RoMaV2 dense seed は training-camera PSNR / SSIM を改善したが free-view sharpness を安定して改善せず、runtime
-も増えたため default off。Sparse point cloud は surface ではなく feature track sample なので、地面が連続面に
-見えないこと自体は異常ではない。
-
-## Verification
+### RoMaV2
 
 ```bash
-cd backend
-uv sync --extra dev --extra imaging
-uv run ruff check src tests
-uv run pytest -q
-uv run sphere-doctor
+uv run scripts/install_romav2.py
 ```
 
+Dense initialization は optional、default off。Native rays、certainty、mask、parallax、ray gap、reprojection、voxel dedupe を通した point だけを追加する。魚眼 view を含む場合だけ、depth seed は光軸から 85° 以内に制限し、有効候補の certainty 下位 8% を除外する。これは魚眼の物理有効領域や SfM mask を変更しない。
+
+Scene coordinate alignment は metric scale の成否から独立して実行する。Ground は最大 100,000 sample、Manhattan yaw は最大 20,000 sample / 2,048 candidate line へ固定し、point count が増えても推定計算量を増やさない。Gravity-aligned model の primary camera path 下方から最も近い dominant horizontal plane を Y=0 へ移し、十分な vertical / horizontal support、scene 内交点、10° 以下の orthogonality residual を持つ wall pair がある場合だけ yaw を揃える。その後に conditional sparse cleanup を実行する。Camera path からの距離 threshold と track 内最大 triangulation angle を AND 条件にし、近景や十分な baseline を持つ遠景を保持する。Default は trajectory diameter 30%、far angle 2°、reprojection / track-length additional filter は実質 off。Cleanup output があれば Dense / Export が読み、clear すれば Scene-aligned preview へ戻る。
+
+UI `High` は package API に存在しない文字列を直接渡さず、RoMaV2 `precise` setting（800 / 1280 px、bidirectional）へ変換する。Supported runtime setting は `turbo / fast / base / precise`。Unknown setting は model load 前に validation error とする。
+
+### Vocabulary tree
+
 ```bash
+uv run scripts/install_vocab_tree.py
+```
+
+Sequential loop closure と large mixed-source vocab pairing に使用する。Missing tree で loop closure を要求した場合は error とする。
+
+### jpegtran
+
+```bash
+uv run scripts/install_jpegtran.py
+```
+
+Legacy JPEG の lossless MCU crop にだけ使用する。Rectified PNG は pixel crop のため jpegtran を必要としない。
+
+Export の crop、decode validation、hard-link materialization は logical CPU 全数の worker pool を使う。Crop / jpegtran の完了時に image size と decode success を記録し、dataset validation では同じ大容量 PNG を再 decode しない。未変換 hard-link は link 前に worker 内で完全 decode するため、corrupt image / mask の検出を省略しない。
+
+## Progress and recovery
+
+Worker は SQLite event table を single progress source とする。
+
+- `progress_event`: 最新の numeric progress / counter
+- `activity_event`: 最新の phase / tool activity
+- `kind=progress`: Inspector / hierarchy 用、Console 非表示
+- `kind=log`: lifecycle、warning、failure、Console 表示
+
+`GET /api/projects/{id}/stages` は activity と numeric snapshot を別々に返す。WebSocket reconnect 後も count と phase を復元できる。Activity-only event が numeric progress を上書きしてはならない。Frontend freshness は各 Stage の normalized manifest parameters と現在の UI parameters を比較し、差がある黄色行には old / new value を明示する。HTTP polling が失敗した場合、Frontend は最後の `running` snapshot を stale として表示し、elapsed timer、spinner、Stop control を止める。Backend startup は中断 Job / Stage に `finished_at` と `interrupted by restart` を記録し、その Job の一時 Stage directory と frame-selection scratch を削除する。
+
+Job の開始と成果物を変更する API は、同じ project の ownership check と変更処理を一つの排他区間に置く。`queued` / `running` Job が存在する場合、run / rerun、Stage clear、project 削除、source 追加・削除・primary 変更、有効領域保存は HTTP 409 を返す。Cancel 中も Worker が停止するまで Job の稼働状態を保持し、完了後に `cancelled` を確定する。Scratch cleanup も同じ排他制御を使うため、次の Job の一時出力を削除しない。別 project の操作、読み取り、UI 設定保存は待たせない。
+
+SQLite は独立 SQL 用の autocommit 接続と、複数文の transaction 用の専用接続を分離する。明示 transaction は直列化して `BEGIN IMMEDIATE` から commit / rollback まで保持し、別 request の `commit()` / `rollback()` が途中の変更を確定・破棄しない。Filesystem の処理や Worker 停止を待つ間は DB transaction を保持しない。
+
+Worker を起動できない場合は Job を `failed` にして原因を event に残し、`queued` のまま放置しない。Stage の公開処理も実行 lifecycle の例外境界に含める。Downstream invalidation が成功してから manifest を一時 file 経由で原子置換し、project state 更新後に成功を確定する。公開失敗は Job / Stage の両方を `failed` にし、不完全な manifest を cache として再利用しない。
+
+COLMAP Incremental の counter は `num_reg_frames` を読む。この値は次の image registration を試す直前の registered count なので、次の registration または Global refinement が success を証明した時点で pending frame を commit する。Failure 行では commit しない。Dual-fisheye の同一 capture は 2 images だが 1 rig frame であるため、`InputSpec.frame_count` を denominator にする。Long-running native command は structured count / phase を表示し、raw line は secondary activity として保持する。
+
+Incremental Mapper は final retriangulation 後に全 point を再着色しないため、Mapper 内の incremental color sampling を無効化し、終了後に `color_extractor --num_threads -1` を実行する。Colored output からは `points3D.bin` だけを採用し、LFStudio validation split に影響する `images.bin` ordering は元のまま保持する。Geometry summary が変化した場合は publish せず error にする。
+
+Current Mapper は upstream model write が完了時に行われる。中断 recovery を必要とする大規模 run では COLMAP snapshot / resume support を別途有効にする必要がある。
+
+Stage clear / downstream invalidation は quarantine rename transaction を使う。Custom clear の明示 selection は project UI state に保存し、consumer closure は表示時に再計算するため implied selection を保存値へ混在させない。Backend は requested Stage の consumer closure を先に確定し、全対象を `.pipeline/trash/<transaction>` へ移す。`export_dataset` は外部 tool の `output/` や `.licht` を含めて一つの Stage output として削除する。
+
+Rename failure は移動済みの成果物を rollback し、復元に成功した場合は HTTP 423 を返す。Rollback も失敗した場合は残る backup を保持し、`recovery_required.json` に元の path、backup path、復元エラーを記録する。Error log の保管場所と対応表を使って復旧する。物理削除だけが失敗した場合は bounded retry 後に `pending_cleanup.json` を作り、API の `pending_cleanup` に表示する。次回の自動 retry は pending marker のある確定済み残件だけを対象とし、未確定の quarantine と復旧待ち backup を削除しない。Frontend は clear 前の in-flight artifact query を cancel し、preview / frames / masks / export cache を削除結果に応じて null 化する。
+
+## UI defaults
+
+- Generate all は success 後に次 Step を開始し、failure / cancel / stop で停止
+- Internal fisheye normalization は独立 hierarchy Step として詳細進捗を表示する
+- Fisheye region は extraction 前でも radius / Save / Discard を表示
+- Photos hierarchy は default collapsed
+- Spatial sharpness は 0–2000、primary score から一度 auto-fill
+- Feature size limit の下に primary width / height を表示
+- Float field は `.5` を受け、commit 後 `0.5` に正規化
+- Running Step は percentage、count、activity、elapsed time を同時表示
+- Dense / SAM / matching の高頻度 update は Console へ spam しない
+- Checkbox は unchecked / checked / disabled を light / dark theme の両方で識別可能にする
+- Camera は fixed-pixel gizmo と 8 px screen-space pick、blank-click deselection、selected-only projection guide を使い、fisheye guide / Inspector preview は circular にする
+- Browser refresh は最後に開いた project を復元し、保存 ID が存在しない場合だけ先頭 project へ fallback する
+
+## LFStudio
+
+Export directory 自体を dataset root として渡す。Application は `export_dataset` を所有し、clear / regenerate では LFStudio output を含む全内容を削除する。Recommended profile は MRNF + GUT + segment masks、PPISP / controller off、`undistort=false`、width cap 2048。
+
+Dense initialization は optional。Export は dense artifact が存在する時だけそれを使用し、Dense off / cleared の場合は scene-aligned sparse model と preview へ明示的に fallback する。LFStudio 自身の CUDA context / VRAM は application worker と別 process であり、system stats は process owner を混同しない。GPU 統計用の `nvidia-smi` は 3 秒で timeout し、timeout・通信失敗・request cancel 時には subprocess を終了して回収する。監視 request のたびに停止した probe を残さない。
+
+## Validation
+
+```bash
+uv run --project backend pytest -q backend/tests
 cd frontend
-pnpm install --frozen-lockfile
+pnpm exec tsc --noEmit
+pnpm exec playwright test
 pnpm build
-pnpm test:e2e
 ```
 
-Windows CUDA-BA runtime は少なくとも次を確認する。
-
-```text
-colmap.capabilities.gpu_bundle_adjustment = true
-colmap.capabilities.gpu_bundle_adjustment_dense = true
-colmap.capabilities.gpu_bundle_adjustment_sparse = true
-colmap.ceres_cuda = true
-colmap.cudss = 0.8.0.10
-colmap.cudnn = 9.20.0.48
-colmap.capabilities.onnx_cuda_runtime = true
-```
-
-Remote deployment は listener とその worker process tree だけを停止し、無関係な process を終了しない。Active
-artifact publish 完了後に source / frontend を入れ替える。
+Runtime archive test は executable presence、command availability、capability metadata、small reconstruction route を確認する。UI smoke test は reload / reconnect 後の numeric progress と activity detail を user-visible route から検証する。

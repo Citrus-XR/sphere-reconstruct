@@ -1,4 +1,4 @@
-import { useEffect, useId, useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   api,
@@ -9,15 +9,24 @@ import {
   type SourceInfo,
   type StageStatus,
 } from '../api/client'
-import { paramsForStage, QUALITY_PRESETS, type ReconMode, type StageParams } from './stageParams'
+import {
+  COLMAP_TRIANGULATION_PRESETS,
+  paramsForStage,
+  QUALITY_PRESETS,
+  reconModesForProjection,
+  type ReconMode,
+  type StageParams,
+} from './stageParams'
 import { ProgressRing } from '../components/ProgressRing'
 import { PathText } from '../components/PathText'
+import { AppIcon } from '../components/AppIcon'
 import { useSettings } from '../ui/settings'
+import { translateMsg } from '../ui/i18n'
 
 type SourcePreset = 'insv' | 'erp_video' | 'erp_images' | 'perspective_video' | 'perspective_images'
 
 const SOURCE_PRESETS: Record<SourcePreset, Omit<SourceCreate, 'path' | 'label' | 'role'>> = {
-  insv: { adapter: 'insta360_insv', media_kind: 'video', projection: 'dual_fisheye' },
+  insv: { adapter: 'insta360', media_kind: 'video', projection: 'dual_fisheye' },
   erp_video: { adapter: 'generic_video', media_kind: 'video', projection: 'equirectangular' },
   erp_images: { adapter: 'generic_images', media_kind: 'images', projection: 'equirectangular' },
   perspective_video: { adapter: 'generic_video', media_kind: 'video', projection: 'perspective' },
@@ -32,12 +41,19 @@ const fmtDur = (sec: number): string => {
   return h > 0 ? `${h}:${p(m)}:${p(ss)}` : `${m}:${p(ss)}`
 }
 
-// 右パネル「生成設定」: 選択中工程のパラメータ + 再生成 / クリア. 各コントロール下に説明.
+const recommendSharpness = (scores: number[]): number => {
+  const finite = scores.filter(Number.isFinite).sort((left, right) => left - right)
+  if (!finite.length) return 0
+  const lowerQuintile = finite[Math.floor((finite.length - 1) * 0.2)]
+  return Math.min(2000, Math.max(0, Math.floor(lowerQuintile / 5) * 5))
+}
+
 export const StageSettings = ({
   projectId, stage, status, sourceInfo, reconMode, setReconMode, params, setParams, onJob, hasSource,
   sources, resultMode, primaryProjection, processing, stageIsRunning, onStop,
   onSelectSource, onDeleteSource, onMakePrimarySource, sourceMutationError, frameSelection,
-  stageProgress, stageStartedAt, stageProgressMsg, blockedReason,
+  stageProgress, stageStartedAt, stageProgressMsg, stageActivityMsg, blockedReason,
+  frameSharpnessScores,
 }: {
   projectId: string
   stage: string
@@ -63,9 +79,11 @@ export const StageSettings = ({
   stageProgress: number | null
   stageStartedAt: string | null
   stageProgressMsg: string
+  stageActivityMsg: string
   blockedReason: string | null
+  frameSharpnessScores: number[]
 }) => {
-  const { t } = useSettings()
+  const { t, lang } = useSettings()
   const qc = useQueryClient()
   const { data: doctor } = useQuery({ queryKey: ['doctor'], queryFn: api.getDoctor, staleTime: 30_000 })
   const [advOpen, setAdvOpen] = useState(false)
@@ -78,19 +96,30 @@ export const StageSettings = ({
     const id = setInterval(() => setNow(Date.now()), 1000)
     return () => clearInterval(id)
   }, [stageIsRunning])
-
+  const recommendedSharpness = recommendSharpness(frameSharpnessScores)
+  const localizedStatusError = status?.status === 'failed'
+    ? status.activity_event?.level === 'error' && status.activity_event.msg_key
+      ? translateMsg(lang, status.activity_event.msg_key, status.activity_event.msg_args)
+      : status.error_text
+    : null
   const run = useMutation({
     mutationFn: () => api.rerunStage(projectId, stage, { [stage]: paramsForStage(stage, params, reconMode) }),
     onSuccess: r => { onJob(r.job_id); qc.invalidateQueries({ queryKey: ['stages', projectId] }) },
   })
   const clear = useMutation({
     mutationFn: () => api.clearStage(projectId, stage),
-    onSuccess: () => {
+    onSuccess: async result => {
+      const artifactKeys = ['reconstruction', 'frames', 'masks', 'export-info']
+      await Promise.all(artifactKeys.map(key => qc.cancelQueries({ queryKey: [key, projectId] })))
+      const invalidated = new Set(result.invalidated)
+      if (['reconstruct', 'align_reconstruction', 'restore_metric_scale', 'scene_alignment',
+        'cleanup_sparse', 'dense_initialization'].some(item => invalidated.has(item)))
+        qc.setQueryData(['reconstruction', projectId], null)
+      if (invalidated.has('extract_frames')) qc.setQueryData(['frames', projectId], null)
+      if (invalidated.has('generate_feature_masks') || invalidated.has('generate_training_masks'))
+        qc.setQueriesData({ queryKey: ['masks', projectId] }, null)
+      if (invalidated.has('export_dataset')) qc.setQueryData(['export-info', projectId], null)
       qc.invalidateQueries({ queryKey: ['stages', projectId] })
-      // 成果物が消えると 404 になるクエリは remove で破棄 (invalidate だと前回 data が残る).
-      for (const key of ['reconstruction', 'frames', 'fisheye-region', 'masks', 'export-info']) {
-        qc.removeQueries({ queryKey: [key, projectId] })
-      }
     },
   })
   // export_dataset の出力先 (絶対パス) を Inspector に表示する.
@@ -109,14 +138,27 @@ export const StageSettings = ({
     ? true
     : featureMask ? params.featureMaskEnabled : params.trainingMaskEnabled
   const maskDownsample = featureMask ? params.featureMaskDownsampleOn : params.trainingMaskDownsampleOn
+  const maskSizeAuto = featureMask ? params.featureMaskSizeAuto : params.trainingMaskSizeAuto
   const maskSize = featureMask ? params.featureMaskSize : params.trainingMaskSize
   const maskDilateOn = featureMask ? params.featureMaskDilateOn : params.trainingMaskDilateOn
   const maskDilate = featureMask ? params.featureMaskDilate : params.trainingMaskDilate
   const maskPrompt = featureMask ? params.featureMaskPrompt : params.trainingMaskPrompt
+  const enabledSources = sources.filter(source => source.enabled)
+  const hasVideoSources = enabledSources.some(source => source.media_kind === 'video')
+  const imageSourcesOnly = enabledSources.length > 0 && !hasVideoSources
+  const setTriangulationPreset = (preset: StageParams['colmapTriangulationPreset']) => {
+    if (preset === 'custom') {
+      setParams({ colmapTriangulationPreset: preset })
+      return
+    }
+    setParams({ colmapTriangulationPreset: preset, ...COLMAP_TRIANGULATION_PRESETS[preset] })
+  }
   return (
     <div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
-        <strong style={{ flex: 1 }}>{t(`st_${stage}`)}</strong>
+        <strong style={{ flex: 1 }}>
+          {stage === 'extract_frames' && imageSourcesOnly ? t('st_collect_images') : t(`st_${stage}`)}
+        </strong>
         {processing && stageIsRunning
           ? <button className="btn stop" onClick={onStop}>■ {t('stop')}</button>
           : <button className="btn"
@@ -144,8 +186,14 @@ export const StageSettings = ({
             </div>
             {stageProgressMsg && (
               <div className="mono" style={{ fontSize: 11, color: 'var(--fg-mute)', marginTop: 4,
-                overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                overflowWrap: 'anywhere' }}>
                 {stageProgressMsg}
+              </div>
+            )}
+            {stageActivityMsg && (
+              <div className="mono" style={{ fontSize: 11, color: 'var(--fg-mute)', marginTop: 3,
+                overflowWrap: 'anywhere' }}>
+                {stageActivityMsg}
               </div>
             )}
           </div>
@@ -155,11 +203,16 @@ export const StageSettings = ({
       {blockedReason && <div className="hint" style={{ color: '#d69a2a', marginBottom: 8 }}>{blockedReason}</div>}
       {run.error && <div className="error">{String(run.error)}</div>}
       {clear.error && <div className="error">{String(clear.error)}</div>}
-      {status?.status === 'failed' && status.error_text && <div className="error">{status.error_text}</div>}
+      {localizedStatusError && <div className="error">{localizedStatusError}</div>}
       {status?.has_output && status.extra && <StageResult key={stage} stage={stage} extra={status.extra} />}
 
       {stage === 'extract_frames' && (
-        <>
+        imageSourcesOnly ? (
+          <div className="hint" data-testid="image-collection-hint">{t('hint_collect_images')}</div>
+        ) : <>
+          {enabledSources.some(source => source.media_kind === 'images') && (
+            <div className="hint" style={{ marginBottom: 8 }}>{t('hint_extract_videos_only')}</div>
+          )}
           <div className="ctl">
             <label>{t('lbl_method')}</label>
             <select className="input" value={params.method}
@@ -193,9 +246,15 @@ export const StageSettings = ({
             </>
           ) : (
             <>
-              <Slider label={`① ${t('lbl_sharpThreshold')}`} hint={t('hint_sharpThreshold')} min={0} max={300} step={10}
+              <Slider label={`① ${t('lbl_sharpThreshold')}`} hint={t('hint_sharpThreshold')} min={0} max={2000} step={10}
                 value={params.minSharpness} onChange={v => setParams({ minSharpness: Math.round(v) })}
                 fmt={v => v === 0 ? t('off') : `${v}`} />
+              {recommendedSharpness > 0 && <div className="hint" data-testid="sharpness-recommendation">
+                {translateMsg(lang, 'sharpnessRecommendation', {
+                  value: recommendedSharpness,
+                  count: frameSharpnessScores.length,
+                })}
+              </div>}
               <Slider label={`② ${t('lbl_motion')}`} hint={t('hint_motion')} min={0.5} max={5} step={0.25}
                 value={params.targetMotion} onChange={v => setParams({ targetMotion: v })} fmt={v => `${v.toFixed(2)}`} />
               <div className="predict">{t('predSpatial')}</div>
@@ -203,6 +262,8 @@ export const StageSettings = ({
                 <div className="hint" style={{ marginTop: 4 }}>
                   {t('selReasons')}: 🌫 {frameSelection.reasons.blur} · ☀ {frameSelection.reasons.exposure} · ✦ {frameSelection.reasons.few_features} · RS {frameSelection.reasons.rolling_shutter ?? 0}
                   {' '}({t('selKept')}: {frameSelection.selected}/{frameSelection.candidates ?? '—'})
+                  {frameSelection.maximum_gap_sec != null && ` · ${t('selMaximumGap')}: ${frameSelection.maximum_gap_sec.toFixed(1)}s`}
+                  {frameSelection.bridge_frames != null && frameSelection.bridge_frames > 0 && ` · ${t('selBridged')}: ${frameSelection.bridge_frames}`}
                   {frameSelection.fallback && ` · ${t('selFallback')}`}
                 </div>
               )}
@@ -228,6 +289,18 @@ export const StageSettings = ({
                 <div style={{ marginTop: 6 }}>
                   <Slider label={t('lbl_candidateFps')} hint={t('hint_candidateFps')} min={1} max={10} step={0.5}
                     value={params.candidateFps} onChange={v => setParams({ candidateFps: v })} fmt={v => `${v.toFixed(1)} fps`} />
+                  <div className="ctl">
+                    <label>{t('lbl_continuityStrategy')}</label>
+                    <select className="input" value={params.continuityStrategy}
+                      onChange={event => setParams({ continuityStrategy: event.target.value as StageParams['continuityStrategy'] })}>
+                      <option value="balanced">{t('continuityBalanced')}</option>
+                      <option value="quality">{t('continuityQuality')}</option>
+                      <option value="parallax">{t('continuityParallax')}</option>
+                    </select>
+                    <div className="hint">{t('hint_continuityStrategy')}</div>
+                  </div>
+                  <Slider label={t('lbl_maxTemporalGap')} hint={t('hint_maxTemporalGap')} min={1} max={12} step={0.5}
+                    value={params.maxTemporalGap} onChange={v => setParams({ maxTemporalGap: v })} fmt={v => `${v.toFixed(1)} s`} />
                   <div className="ctl">
                     <label>{t('lbl_minFeatures')}</label>
                     <input className="input" type="number" min={0} value={params.minFeatures}
@@ -264,11 +337,21 @@ export const StageSettings = ({
             <div className="hint">{t('hint_downsample')}</div>
           </div>
           {maskDownsample && (
-            <Slider label={t('lbl_masksize')} hint={t('hint_masksize')} min={6} max={14} step={1}
-              value={Math.round(Math.log2(maskSize))}
-              onChange={v => setParams(featureMask
-                ? { featureMaskSize: 2 ** v }
-                : { trainingMaskSize: 2 ** v })} fmt={v => `${2 ** v}px`} />
+            <>
+              <label className="ctl" style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+                <input type="checkbox" checked={maskSizeAuto} onChange={event => setParams(featureMask
+                  ? { featureMaskSizeAuto: event.target.checked }
+                  : { trainingMaskSizeAuto: event.target.checked })} />
+                {t('autoResolution')}
+              </label>
+              {maskSizeAuto
+                ? <div className="predict">{t('autoResolutionValue').replace('{value}', String(maskSize))}</div>
+                : <Slider label={t('lbl_masksize')} hint={t('hint_masksize')} min={6} max={14} step={1}
+                    value={Math.round(Math.log2(maskSize))}
+                    onChange={v => setParams(featureMask
+                      ? { featureMaskSize: 2 ** v }
+                      : { trainingMaskSize: 2 ** v })} fmt={v => `${2 ** v}px`} />}
+            </>
           )}
           <div className="ctl">
             <label style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
@@ -330,10 +413,35 @@ export const StageSettings = ({
             </select>
             <div className="hint">{t('hint_backend')}</div>
           </div>
-          <NumField label={t('f_maxImageSize')} hint={t('hint_maxImageSize')} value={params.featureMaxImageSize}
-            onChange={value => setParams({ featureMaxImageSize: value, qualityPreset: 'custom' })} />
-          <NumField label={t('f_maxFeatures')} hint={t('hint_maxFeatures')} value={params.featureMaxNumFeatures}
-            onChange={value => setParams({ featureMaxNumFeatures: value, qualityPreset: 'custom' })} />
+          <label className="ctl" style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+            <input type="checkbox" checked={params.featureMaxImageSizeAuto}
+              onChange={event => setParams({ featureMaxImageSizeAuto: event.target.checked })} />
+            {t('autoResolution')}
+          </label>
+          <NumField label={t('f_maxImageSize')} hint={t('hint_maxImageSize')}
+            value={params.featureMaxImageSize} disabled={params.featureMaxImageSizeAuto}
+            onChange={value => setParams({
+              featureMaxImageSize: value,
+              featureMaxImageSizeAuto: false,
+              qualityPreset: 'custom',
+            })} />
+          <div className="hint" data-testid="primary-image-size" style={{ marginTop: -6, marginBottom: 8 }}>
+            {t('currentPrimaryImageSize')}: {sourceInfo?.width && sourceInfo?.height
+              ? `${sourceInfo.width} × ${sourceInfo.height} px`
+              : t('unknown')}
+          </div>
+          <label className="ctl" style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+            <input type="checkbox" checked={params.featureMaxNumFeaturesAuto}
+              onChange={event => setParams({ featureMaxNumFeaturesAuto: event.target.checked })} />
+            {t('autoFeatureCount')}
+          </label>
+          <NumField label={t('f_maxFeatures')} hint={t('hint_maxFeatures')}
+            value={params.featureMaxNumFeatures} disabled={params.featureMaxNumFeaturesAuto}
+            onChange={value => setParams({
+              featureMaxNumFeatures: value,
+              featureMaxNumFeaturesAuto: false,
+              qualityPreset: 'custom',
+            })} />
           <label style={{ display: 'inline-flex', gap: 6, alignItems: 'center', margin: '4px 0' }}>
             <input type="checkbox" checked={params.featureUseGpu}
               onChange={() => setParams({ featureUseGpu: !params.featureUseGpu })} /> GPU
@@ -429,6 +537,13 @@ export const StageSettings = ({
             </select>
             <div className="hint">{t('hint_mapper')}</div>
           </div>
+          {params.mapper === 'global'
+            && reconMode === 'native_fisheye'
+            && primaryProjection === 'dual_fisheye'
+            && <div className="mapper-warning" role="alert" data-testid="glomap-fisheye-warning">
+              <AppIcon name="warning" size={16} />
+              <span>{t('warning_mapperGlobalFisheye')}</span>
+            </div>}
           {params.mapper === 'global' && <div className="ctl">
             <label style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
                 <input type="checkbox" checked={params.viewGraphCalibration}
@@ -460,8 +575,31 @@ export const StageSettings = ({
                 <NumField label="init_image_id1" value={params.initImageId1} onChange={value => setParams({ initImageId1: value })} />
                 <NumField label="init_image_id2" value={params.initImageId2} onChange={value => setParams({ initImageId2: value })} />
                 <NumField label={t('f_absPoseMaxError')} value={params.absPoseMaxError} step={0.5} onChange={value => setParams({ absPoseMaxError: value })} />
-                <NumField label={t('f_filterMaxReproj')} value={params.filterMaxReprojError} step={0.5} onChange={value => setParams({ filterMaxReprojError: value })} />
-                <NumField label={t('f_filterMinTriAngle')} value={params.filterMinTriAngle} step={0.5} onChange={value => setParams({ filterMinTriAngle: value })} />
+                <div className="ctl">
+                  <label>{t('lbl_triangulationPreset')}</label>
+                  <select className="input" value={params.colmapTriangulationPreset}
+                    onChange={event => setTriangulationPreset(event.target.value as StageParams['colmapTriangulationPreset'])}>
+                    <option value="default">{t('triangulationPresetDefault')}</option>
+                    <option value="standard">{t('triangulationPresetStandard')}</option>
+                    <option value="strict">{t('triangulationPresetStrict')}</option>
+                    <option value="custom">{t('triangulationPresetCustom')}</option>
+                  </select>
+                  <div className="hint">{t('hint_triangulationPreset')}</div>
+                </div>
+                <NumField label={t('f_filterMaxReproj')} hint={t('hint_filterMaxReproj')} value={params.filterMaxReprojError} step={0.25}
+                  onChange={value => setParams({ filterMaxReprojError: value, colmapTriangulationPreset: 'custom' })} />
+                <NumField label={t('f_filterMinTriAngle')} hint={t('hint_filterMinTriAngle')} value={params.filterMinTriAngle} step={0.25}
+                  onChange={value => setParams({ filterMinTriAngle: value, colmapTriangulationPreset: 'custom' })} />
+                <NumField label={t('f_triCreateMaxAngle')} hint={t('hint_triCreateMaxAngle')} value={params.triCreateMaxAngleError} step={0.25}
+                  onChange={value => setParams({ triCreateMaxAngleError: value, colmapTriangulationPreset: 'custom' })} />
+                <NumField label={t('f_triContinueMaxAngle')} hint={t('hint_triContinueMaxAngle')} value={params.triContinueMaxAngleError} step={0.25}
+                  onChange={value => setParams({ triContinueMaxAngleError: value, colmapTriangulationPreset: 'custom' })} />
+                <NumField label={t('f_triMergeMaxReproj')} hint={t('hint_triMergeMaxReproj')} value={params.triMergeMaxReprojError} step={0.25}
+                  onChange={value => setParams({ triMergeMaxReprojError: value, colmapTriangulationPreset: 'custom' })} />
+                <NumField label={t('f_triCompleteMaxReproj')} hint={t('hint_triCompleteMaxReproj')} value={params.triCompleteMaxReprojError} step={0.25}
+                  onChange={value => setParams({ triCompleteMaxReprojError: value, colmapTriangulationPreset: 'custom' })} />
+                <NumField label={t('f_triMinAngle')} hint={t('hint_triMinAngle')} value={params.triMinAngle} step={0.25}
+                  onChange={value => setParams({ triMinAngle: value, colmapTriangulationPreset: 'custom' })} />
                 <NumField label={t('f_baLocalIters')} value={params.baLocalIters} onChange={value => setParams({ baLocalIters: value })} />
                 <NumField label={t('f_minModelSize')} value={params.minModelSize} onChange={value => setParams({ minModelSize: value })} />
               </>}
@@ -500,18 +638,18 @@ export const StageSettings = ({
         </div>
       )}
 
-      {stage === 'position_ground' && (
+      {stage === 'scene_alignment' && (
         <div className="ctl">
-          <label>{t('lbl_groundPosition')}</label>
-          <select className="input" value={params.groundPositionMethod}
+          <label>{t('lbl_sceneAlignment')}</label>
+          <select className="input" value={params.sceneAlignmentMethod}
             onChange={event => setParams({
-              groundPositionMethod: event.target.value as StageParams['groundPositionMethod'],
+              sceneAlignmentMethod: event.target.value as StageParams['sceneAlignmentMethod'],
             })}>
-            <option value="auto">{t('groundPositionAuto')}</option>
-            <option value="points">{t('groundPositionRequired')}</option>
+            <option value="auto">{t('sceneAlignmentAuto')}</option>
+            <option value="required">{t('sceneAlignmentRequired')}</option>
             <option value="none">{t('disabledOption')}</option>
           </select>
-          <div className="hint">{t('hint_groundPosition')}</div>
+          <div className="hint">{t('hint_sceneAlignment')}</div>
         </div>
       )}
 
@@ -523,16 +661,18 @@ export const StageSettings = ({
             {t('denseEnable')}
           </label>
           <div className="hint" style={{ marginBottom: 8 }}>{t('denseHint')}</div>
+          <div className="hint" style={{ marginBottom: 8 }}>{t('denseFisheyeGuardHint')}</div>
           <div className="ctl">
             <label>{t('denseQuality')}</label>
             <select className="input" value={params.denseQuality}
               disabled={!params.denseEnabled}
               onChange={event => setParams({ denseQuality: event.target.value as StageParams['denseQuality'] })}>
-              <option value="turbo">Turbo (320px)</option>
-              <option value="fast">Fast (512px)</option>
-              <option value="base">Base (640px)</option>
-              <option value="high">High (640/960px)</option>
+              <option value="turbo">{t('denseQualityTurbo')}</option>
+              <option value="fast">{t('denseQualityFast')}</option>
+              <option value="base">{t('denseQualityBase')}</option>
+              <option value="high">{t('denseQualityHigh')}</option>
             </select>
+            <div className="hint">{t('denseQualityHint')}</div>
           </div>
           <Slider label={t('denseReferences')} hint={t('denseReferencesHint')} min={0.05} max={1} step={0.05}
             value={params.denseReferenceFraction} onChange={value => setParams({ denseReferenceFraction: value })}
@@ -540,34 +680,68 @@ export const StageSettings = ({
           <Slider label={t('denseNeighbors')} hint={t('denseNeighborsHint')} min={1} max={6} step={1}
             value={params.denseNeighbors} onChange={value => setParams({ denseNeighbors: Math.round(value) })}
             fmt={value => String(Math.round(value))} />
-          <NumField label={t('denseMatches')} value={params.denseMatchesPerPair}
+          <NumField label={t('denseMatches')} hint={t('denseMatchesHint')} value={params.denseMatchesPerPair}
             onChange={value => setParams({ denseMatchesPerPair: value })} />
-          <NumField label={t('denseMaximumPoints')} value={params.denseMaximumPoints}
+          <NumField label={t('denseMaximumPoints')} hint={t('denseMaximumPointsHint')} value={params.denseMaximumPoints}
             onChange={value => setParams({ denseMaximumPoints: value })} />
           <label className="ctl" style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
             <input type="checkbox" checked={params.denseUseFeatureMasks} disabled={!params.denseEnabled}
               onChange={event => setParams({ denseUseFeatureMasks: event.target.checked })} />
             {t('denseUseMasks')}
           </label>
+          <div className="hint" style={{ marginTop: -6, marginBottom: 8 }}>{t('denseUseMasksHint')}</div>
           <div className="inspector-section-title">{t('advanced')}</div>
-          <NumField label={t('denseConfidence')} value={params.denseConfidenceThreshold} step={0.05}
+          <div className="hint" style={{ marginBottom: 8 }}>{t('denseAdvancedHint')}</div>
+          <NumField label={t('denseConfidence')} hint={t('denseConfidenceHint')} value={params.denseConfidenceThreshold} step={0.05}
             onChange={value => setParams({ denseConfidenceThreshold: value })} />
-          <NumField label={t('denseReprojection')} value={params.denseReprojectionThreshold} step={0.1}
+          <NumField label={t('denseReprojection')} hint={t('denseReprojectionHint')} value={params.denseReprojectionThreshold} step={0.1}
             onChange={value => setParams({ denseReprojectionThreshold: value })} />
-          <NumField label={t('denseParallax')} value={params.denseMinimumParallax} step={0.1}
+          <NumField label={t('denseParallax')} hint={t('denseParallaxHint')} value={params.denseMinimumParallax} step={0.1}
             onChange={value => setParams({ denseMinimumParallax: value })} />
-          <NumField label={t('denseVoxelRatio')} value={params.denseVoxelRatio} step={0.0001}
+          <NumField label={t('denseVoxelRatio')} hint={t('denseVoxelRatioHint')} value={params.denseVoxelRatio} step={0.0001}
             onChange={value => setParams({ denseVoxelRatio: value })} />
         </>
       )}
 
-      {stage === 'prepare_images' && reconMode === 'pinhole_rig' && (
-        <Slider label={t('lblPinholeSize')} hint={t('hintPinholeSize')} min={512} max={2048} step={128}
-          value={params.size} onChange={value => setParams({ size: Math.round(value) })} fmt={value => `${value}px`} />
+      {stage === 'cleanup_sparse' && (
+        <>
+          <label className="ctl" style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+            <input type="checkbox" checked={params.cleanupSparseEnabled}
+              onChange={event => setParams({ cleanupSparseEnabled: event.target.checked })} />
+            {t('cleanupSparseEnable')}
+          </label>
+          <div className="hint" style={{ marginBottom: 8 }}>{t('cleanupSparseHint')}</div>
+          <Slider label={t('cleanupFarDistance')} hint={t('cleanupFarDistanceHint')}
+            min={0.1} max={1} step={0.05} value={params.cleanupFarDistanceRatio}
+            onChange={value => setParams({ cleanupFarDistanceRatio: value })}
+            fmt={value => `${Math.round(value * 100)}%`} />
+          <Slider label={t('cleanupFarAngle')} hint={t('cleanupFarAngleHint')}
+            min={1.5} max={8} step={0.5} value={params.cleanupFarMinAngle}
+            onChange={value => setParams({ cleanupFarMinAngle: value })}
+            fmt={value => `${value.toFixed(1)}°`} />
+          <NumField label={t('cleanupMaxReprojection')} hint={t('cleanupMaxReprojectionHint')}
+            value={params.cleanupMaxReprojection} step={0.25}
+            onChange={value => setParams({ cleanupMaxReprojection: value })} />
+          <Slider label={t('cleanupMinTrack')} hint={t('cleanupMinTrackHint')}
+            min={2} max={10} step={1} value={params.cleanupMinTrackLength}
+            onChange={value => setParams({ cleanupMinTrackLength: Math.round(value) })}
+            fmt={value => String(Math.round(value))} />
+        </>
       )}
 
-      {stage === 'rectify_fisheye' && (
-        <div className="hint" style={{ marginBottom: 10 }}>{t('hint_rectifyFisheye')}</div>
+      {stage === 'prepare_images' && reconMode === 'pinhole_rig' && (
+        <>
+          <label className="ctl" style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+            <input type="checkbox" checked={params.sizeAuto}
+              onChange={event => setParams({ sizeAuto: event.target.checked })} />
+            {t('autoResolution')}
+          </label>
+          {params.sizeAuto
+            ? <div className="predict">{t('autoResolutionValue').replace('{value}', String(params.size))}</div>
+            : <Slider label={t('lblPinholeSize')} hint={t('hintPinholeSize')} min={512} max={4096} step={128}
+                value={params.size} onChange={value => setParams({ size: Math.round(value) })}
+                fmt={value => `${value}px`} />}
+        </>
       )}
 
       {stage === 'inspect_source' && (
@@ -617,16 +791,12 @@ export const StageSettings = ({
           {sourceMutationError != null && <div className="error">{String(sourceMutationError)}</div>}
           <div style={{ marginTop: 12 }}>
             <label>{t('lbl_mode')}</label>
-            <select className="input" value={reconMode} onChange={e => setReconMode(e.target.value as ReconMode)}>
-              {primaryProjection === 'equirectangular'
-                ? (<>
-                    <option value="equirectangular">{t('modeEquirect')}</option>
-                    <option value="pinhole_rig">{t('modePinhole')}</option>
-                  </>)
-                : (<>
-                    <option value="native_fisheye">{t('modeNative')}</option>
-                    <option value="pinhole_rig">{t('modePinhole')}</option>
-                  </>)}
+            <select className="input" value={reconMode} disabled={processing}
+              onChange={e => setReconMode(e.target.value as ReconMode)}>
+              {reconModesForProjection(primaryProjection).map(mode => (
+                <option key={mode} value={mode}>{mode === 'native_fisheye' ? t('modeNative')
+                  : mode === 'equirectangular' ? t('modeEquirect') : t('modePinhole')}</option>
+              ))}
             </select>
             <div className="hint">{t('hint_mode')}</div>
             {reconMode === 'pinhole_rig' && <div className="hint">{t('hint_needsGen')}</div>}
@@ -690,16 +860,33 @@ export const StageSettings = ({
 }
 
 // COLMAP 詳細用の数値入力 (0 = COLMAP 既定). placeholder で「既定」を示す.
-const NumField = ({ label, hint, value, step = 1, onChange }: {
-  label: string; hint?: string; value: number; step?: number; onChange: (v: number) => void
+const NumField = ({ label, hint, value, step = 1, disabled = false, onChange }: {
+  label: string; hint?: string; value: number; step?: number; disabled?: boolean; onChange: (v: number) => void
 }) => {
   const { t } = useSettings()
   const inputId = useId()
+  const focused = useRef(false)
+  const [draft, setDraft] = useState(() => value === 0 ? '' : String(value))
+  const floatingPoint = !Number.isInteger(step)
+  useEffect(() => {
+    if (!focused.current) setDraft(value === 0 ? '' : String(value))
+  }, [value])
+  const commit = () => {
+    focused.current = false
+    const parsed = draft.trim() === '' ? 0 : Number(draft)
+    const finite = Number.isFinite(parsed) && parsed >= 0 ? parsed : value
+    const normalized = floatingPoint ? finite : Math.round(finite)
+    onChange(normalized)
+    setDraft(normalized === 0 ? '' : String(normalized))
+  }
   return (
     <div className="ctl" style={{ marginBottom: 6 }}>
       <label htmlFor={inputId} style={{ fontSize: 11 }}>{label}</label>
-      <input id={inputId} className="input" type="number" min={0} step={step} value={value || ''}
-        placeholder={t('defaultZero')} onChange={e => onChange(Number(e.target.value) || 0)} />
+      <input id={inputId} className="input" type="number" min={0} step={step} value={draft}
+        disabled={disabled}
+        placeholder={t('defaultZero')} onFocus={() => { focused.current = true }}
+        onChange={event => setDraft(event.target.value)} onBlur={commit}
+        onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur() }} />
       {hint && <div className="hint">{hint}</div>}
     </div>
   )
@@ -775,6 +962,11 @@ const formatStatistic = (t: (key: string) => string, key: string, value: string 
     if (value === 'training') return t('trainingMask')
     if (value === 'physical') return t('physicalMask')
   }
+  if (typeof value === 'string') {
+    const translationKey = `stat_${value}`
+    const translated = t(translationKey)
+    if (translated !== translationKey) return translated
+  }
   if (typeof value === 'boolean') return value ? t('yes') : t('no')
   if (typeof value === 'string') return value
   if (key === 'file_size' || key === 'footer_size' || key.endsWith('_bytes')) {
@@ -786,8 +978,10 @@ const formatStatistic = (t: (key: string) => string, key: string, value: string 
   if (key === 'maximum_to_p95_ratio' || key === 'trajectory_maximum_to_p95_ratio'
     || key === 'max_step_ratio_limit')
     return `${Number(value.toPrecision(6)).toLocaleString()}×`
-  if (key.endsWith('_ratio') || key.endsWith('_coverage')) return `${(value * 100).toFixed(2)}%`
+  if (key === 'confidence' || key.endsWith('_ratio') || key.endsWith('_coverage'))
+    return `${(value * 100).toFixed(2)}%`
   if (key === 'relative_mad') return `${(value * 100).toFixed(4)}%`
+  if (key.endsWith('_model_units')) return `${value.toFixed(3)} units`
   if (key.endsWith('_m')) return `${value.toFixed(3)} m`
   if (key === 'scale_factor') return `${Number(value.toPrecision(8)).toLocaleString()}×`
   if (key.includes('reprojection_error')) return `${value.toFixed(4)} px`

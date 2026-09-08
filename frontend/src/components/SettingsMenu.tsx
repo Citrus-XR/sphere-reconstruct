@@ -8,7 +8,6 @@ import type { Theme } from '../ui/settings'
 import { PathText } from './PathText'
 import { AppIcon } from './AppIcon'
 
-// 右上の設定メニュー: テーマ (自動/ライト/ダーク) + 言語. ブラウザに保存.
 export const SettingsMenu = () => {
   const { theme, setTheme, lang, setLang, t } = useSettings()
   const [open, setOpen] = useState(false)

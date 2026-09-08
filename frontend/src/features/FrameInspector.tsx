@@ -100,7 +100,8 @@ export const FrameInspector = ({
         maskUrl={maskRec
           ? preparedMaskUrl(projectId, maskRec.name, effectivePurpose, maskManifest?.revision)
           : null}
-        view={eff} onViewChange={setView} alt={`${t('frameLabel')} ${frameIndex}`} />
+        view={eff} onViewChange={setView} alt={`${t('frameLabel')} ${frameIndex}`}
+        circular={isInsv} />
 
       <CaptureSummary frameIndex={info?.source_index ?? frameIndex} lens={isInsv ? lens : null}
         pointsLabel={t('framePoints')}

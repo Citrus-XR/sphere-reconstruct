@@ -27,15 +27,11 @@ from pathlib import Path
 from typing import Any
 
 from ..domain.artifacts import StageManifest, manifest_path
-from ..domain.pipeline_state import STAGE_ORDER, StageName, downstream_of
+from ..domain.pipeline_state import STAGE_ORDER, StageName
 from ..domain.source import MediaKind, Projection, SourceRole
 from ..infrastructure.filesystem import atomic_replace_dir
-from .invalidation import (
-    assert_export_is_managed,
-    clear_stale,
-    derive_pipeline_state,
-    invalidate_from,
-)
+from .errors import LocalizedError
+from .invalidation import clear_stale, derive_pipeline_state, invalidate_from
 from .manifest import get as get_stage_cls
 from .stage import ProgressReporter, SourceContext, StageContext
 
@@ -47,8 +43,8 @@ class PipelineError(RuntimeError):
 class Engine:
     """Worker プロセス内で使う同期 API. DB は同期 sqlite3 で開く.
 
-    FastAPI 側は aiosqlite で同じファイルを触るが, SQLite は WAL モードなら
-    複数プロセス並行 OK. write は Engine 側からのみ発生させる (event / stage_run).
+    FastAPI 側は独立した aiosqlite 接続を使い、SQLite WAL で変更を共有する。
+    Worker 内の別 thread からの進捗書き込みは Lock で直列化する。
     """
 
     def __init__(self, db_path: Path, workspace_root: Path, project_id: str, job_id: str) -> None:
@@ -202,6 +198,8 @@ class Engine:
             current_inputs = ctx.inputs_for(stage)
             cached = self._cached_matches(stage, ctx, current_inputs)
             if cached is not None:
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+                self._refresh_project_state()
                 self._execute(
                     """
                     UPDATE stage_run SET status='succeeded', finished_at=?, inputs_hash=?,
@@ -221,16 +219,53 @@ class Engine:
                     key="log.cache_hit",
                     args={"stage": stage_name.value},
                 )
-                shutil.rmtree(tmp_dir, ignore_errors=True)
-                self._refresh_project_state()
                 return
-
-            if StageName.EXPORT_DATASET in downstream_of(stage_name):
-                assert_export_is_managed(project_dir)
 
             manifest = stage.execute(ctx)
             manifest.compute_hashes()
             manifest.finished_at = datetime.now(UTC)
+
+            reporter.tick(
+                progress=0.99,
+                message=f"publishing stage artifacts: {stage_name.value}",
+                key="log.stage_publishing",
+                args={"stage": stage_name.value},
+            )
+            atomic_replace_dir(tmp_dir, final_dir)
+            self._invalidate_downstream(stage_name)
+            manifest_file = manifest_path(project_dir, stage_name.value)
+            temporary_manifest = manifest_file.with_name(f".{stage_name.value}.{stage_run_id}.tmp")
+            try:
+                manifest.dump(temporary_manifest)
+                temporary_manifest.replace(manifest_file)
+            finally:
+                temporary_manifest.unlink(missing_ok=True)
+            clear_stale(project_dir, stage_name)
+            self._refresh_project_state()
+            self._execute(
+                """
+                UPDATE stage_run SET
+                    status='succeeded',
+                    finished_at=?,
+                    inputs_hash=?,
+                    params_hash=?,
+                    manifest_path=?
+                WHERE id=?
+                """,
+                (
+                    _iso_now(),
+                    manifest.inputs_hash,
+                    manifest.params_hash,
+                    str(manifest_file),
+                    stage_run_id,
+                ),
+            )
+            reporter.info(
+                f"stage {stage_name.value} published",
+                progress=1.0,
+                key="log.stage_published",
+                args={"stage": stage_name.value},
+            )
         except BaseException as e:
             self._execute(
                 """
@@ -238,57 +273,16 @@ class Engine:
                 """,
                 (_iso_now(), _short_error(e), stage_run_id),
             )
-            reporter.error(
-                f"stage {stage_name.value} failed: {_short_error(e)}",
-                key="log.stage_failed",
-                args={"stage": stage_name.value, "error": _short_error(e)},
-            )
+            if isinstance(e, LocalizedError):
+                reporter.error(str(e), key=e.key, args=e.formatting_args)
+            else:
+                reporter.error(
+                    f"stage {stage_name.value} failed: {_short_error(e)}",
+                    key="log.stage_failed",
+                    args={"stage": stage_name.value, "error": _short_error(e)},
+                )
             shutil.rmtree(tmp_dir, ignore_errors=True)
             raise
-
-        # 外部アプリケーションの成果は管理しない。dataset root に混在している場合は、
-        # 原子置換で失われる前に明示的に停止する。
-        if stage_name == StageName.EXPORT_DATASET:
-            assert_export_is_managed(project_dir)
-
-        # tmp -> final を原子置換.
-        reporter.tick(
-            progress=0.99,
-            message=f"publishing stage artifacts: {stage_name.value}",
-            key="log.stage_publishing",
-            args={"stage": stage_name.value},
-        )
-        atomic_replace_dir(tmp_dir, final_dir)
-        clear_stale(project_dir, stage_name)
-        manifest_file = manifest_path(project_dir, stage_name.value)
-        manifest.dump(manifest_file)
-
-        self._execute(
-            """
-            UPDATE stage_run SET
-                status='succeeded',
-                finished_at=?,
-                inputs_hash=?,
-                params_hash=?,
-                manifest_path=?
-            WHERE id=?
-            """,
-            (
-                _iso_now(),
-                manifest.inputs_hash,
-                manifest.params_hash,
-                str(manifest_file),
-                stage_run_id,
-            ),
-        )
-        self._invalidate_downstream(stage_name)
-        self._refresh_project_state()
-        reporter.info(
-            f"stage {stage_name.value} published",
-            progress=1.0,
-            key="log.stage_published",
-            args={"stage": stage_name.value},
-        )
 
     def _cached_matches(
         self,

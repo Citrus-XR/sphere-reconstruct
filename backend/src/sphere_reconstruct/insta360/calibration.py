@@ -1,276 +1,168 @@
-"""キャリブレーションモデル.
-
-INSV / PB / 内蔵 profile / manual override のいずれかから得られた「デュアル魚眼
-キャリブレーション」を統一データ構造で保持する.
-
-- MeiLensCalibration: 1 レンズ. MEI (Mei-Rives) + 拡張 (radial k1-k3, tangential
-  p1/p2) + 姿勢 (3 角) + オフセット (tx/ty/tz).
-- DualLensCalibration: container / calibration block 順の lens0 / lens1。物理的な
-  front / back 名は camera adapter が根拠を持つ場合だけ付ける。
-
-X5 サンプルで観測された offset_v3 の値 (実例):
-    lens A: xi=2.0 fx=4278.3 fy=4277.33 cx=2694.63 cy=2681.84
-            angles=(0.615, 0.016, 89.937) trans=(0,0,0)
-            k=(0.184, 2.073, -3.280) p=(-5.3e-5, 6.5e-4)
-            ref=10752x5376 tag=113
-    lens B: xi=2.0 fx=4296.81 fy=4298.54 cx=8064.92 cy=2686.41
-            angles=(-0.718, 0.211, 89.840) trans=(-4.8e-5, 1.3e-4, -0.032273)
-            k=(0.183, 2.053, -3.267) p=(1.87e-3, 3.82e-4)
-            ref=10752x5376 tag=113
-    trailing id: 197632
-
-lens B の tz が -32.3mm = X5 前後鏡頭の物理ベースライン (~30mm) と一致する.
-lens B の cx が 8064.92 = 2686.41 + 5376.0 なので, 参照座標系は 「左右横並び
-10752 x 5376」の合成画像で表現されている (共通イメージ座標).
-
-`source_priority` の降級鎖:
-  PB -> offset_v3 -> 機種内蔵 profile -> manual override -> エラー
-"""
+"""INSV footer の versioned dual-fisheye calibration を解釈する。"""
 
 from __future__ import annotations
 
 import re
-import struct
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 
+from ..domain.camera_system import OmniDistortionModel
+
 
 class CalibSource(StrEnum):
-    PB = "pb"
-    OFFSET_V3 = "offset_v3"
-    BUILTIN_PROFILE = "builtin_profile"
-    USER = "user"
+    OFFSET = "insta360_offset"
 
 
-@dataclass
-class MeiLensCalibration:
-    """MEI (Mei-Rives) 鱼眼モデル + 拡張畜れみ.
-
-    投影過程:
-      P = point in camera coords, normalized to ||P|| = 1
-      x = P.x / (P.z + xi)
-      y = P.y / (P.z + xi)
-      r2 = x*x + y*y
-      radial = 1 + k1*r2 + k2*r2^2 + k3*r2^3
-      x' = x * radial + tangential(p1, p2, x, y)
-      y' = y * radial + tangential(p1, p2, y, x)
-      u = fx * x' + cx
-      v = fy * y' + cy
-
-    yaw/pitch/roll と tx/ty/tz は「参照座標系 -> このレンズ座標系」の姿勢.
-    参照座標系のスケールは m (メートル) と観測.
-    """
-
+@dataclass(frozen=True)
+class OmniLensCalibration:
     xi: float
     fx: float
     fy: float
     cx: float
     cy: float
-    yaw: float = 0.0
-    pitch: float = 0.0
-    roll: float = 0.0
-    tx: float = 0.0
-    ty: float = 0.0
-    tz: float = 0.0
-    k1: float = 0.0
-    k2: float = 0.0
-    k3: float = 0.0
-    p1: float = 0.0
-    p2: float = 0.0
-    # 参照解像度 (offset_v3 の cx, cy はこの座標系に定義されている).
-    ref_image_width: int = 0
-    ref_image_height: int = 0
-    lens_flags: int = 0  # X5 では 113 が観測される. 意味は要調査.
+    yaw: float
+    pitch: float
+    roll: float
+    tx: float
+    ty: float
+    tz: float
+    distortion_model: OmniDistortionModel
+    distortion_parameters: tuple[float, ...]
+    ref_image_width: int
+    ref_image_height: int
+    lens_flags: int
 
     def to_dict(self) -> dict[str, Any]:
-        return {key: getattr(self, key) for key in self.__dataclass_fields__}
+        return {
+            "xi": self.xi,
+            "fx": self.fx,
+            "fy": self.fy,
+            "cx": self.cx,
+            "cy": self.cy,
+            "yaw": self.yaw,
+            "pitch": self.pitch,
+            "roll": self.roll,
+            "tx": self.tx,
+            "ty": self.ty,
+            "tz": self.tz,
+            "distortion_model": self.distortion_model.value,
+            "distortion_parameters": list(self.distortion_parameters),
+            "ref_image_width": self.ref_image_width,
+            "ref_image_height": self.ref_image_height,
+            "lens_flags": self.lens_flags,
+        }
 
 
-@dataclass
+@dataclass(frozen=True)
 class DualLensCalibration:
     source: CalibSource
-    lenses: list[MeiLensCalibration] = field(default_factory=list)
-    raw: dict[str, Any] = field(default_factory=dict)  # 出所依存の生データ
+    version: int
+    lenses: tuple[OmniLensCalibration, OmniLensCalibration]
+    raw: dict[str, Any] = field(default_factory=dict)
 
     def is_valid(self) -> bool:
-        return len(self.lenses) >= 2 and all(lens.fx > 0 and lens.fy > 0 for lens in self.lenses)
+        return all(lens.fx > 0.0 and lens.fy > 0.0 and lens.xi > 0.0 for lens in self.lenses)
 
 
-# ---------- offset_v3 (ASCII underscore-separated) --------------------------------
-# X5 では inst box の末尾付近に, 数字を "_" で連結した長い ASCII 文字列として
-# offset_v3 が入っている. 実サンプルで確認したレイアウト:
-#
-#   <count=2>_<lens A 19 values>_<lens B 19 values>_<calibration_id>
-#
-# 各レンズブロック 19 items の並び:
-#   xi, fx, fy, cx, cy,
-#   angle1, angle2, angle3,     (yaw / pitch / roll 相当, 単位未確定. deg 想定)
-#   tx, ty, tz,                 (m)
-#   k1, k2, k3,                 (radial distortion, k4 なし)
-#   p1, p2,                     (tangential)
-#   ref_w, ref_h, lens_flags    (参照解像度 + フラグ 113)
-#
-# 全体で 1 + 19*2 + 1 = 40 items.
-
-
-LENS_ITEMS = 19
-TOTAL_ITEMS = 1 + LENS_ITEMS * 2 + 1
-
-# 数字 6 個以上を "_" で連結した ASCII 塊を候補として拾う正規表現.
-_ASCII_CALIB_RE = re.compile(rb"-?[0-9]+(?:\.[0-9]+)?(?:_-?[0-9]+(?:\.[0-9]+)?){5,}")
-
-
-@dataclass
-class OffsetV3Ascii:
-    """inst box 内で発見された ASCII underscore-separated calibration 文字列."""
-
-    inst_offset: int  # inst box data 内の byte offset
+@dataclass(frozen=True)
+class OffsetCandidate:
+    inst_offset: int
     text: str
-    values: list[float]
+    values: tuple[float, ...]
+
+    @property
+    def calibration_id(self) -> int:
+        return int(self.values[-1]) if self.values else 0
+
+    @property
+    def version(self) -> int:
+        return self.calibration_id >> 16
 
 
-def find_ascii_calibrations(inst_bytes: bytes) -> list[OffsetV3Ascii]:
-    """inst box 内から ASCII underscore-separated calibration 候補を全部列挙する.
+_ASCII_CALIBRATION = re.compile(rb"-?[0-9]+(?:\.[0-9]+)?(?:_-?[0-9]+(?:\.[0-9]+)?){5,}")
+_LENS_PARAMETER_COUNTS = {3: 19, 6: 27}
 
-    候補には短いバージョン (5-6 items のみ) から長いバージョン (40 items) まで
-    複数含まれる. 呼び出し側は `pick_offset_v3()` で最も情報量の多いものを選ぶ.
-    """
-    out: list[OffsetV3Ascii] = []
-    for m in _ASCII_CALIB_RE.finditer(inst_bytes):
-        text = m.group().decode("ascii", "replace")
-        parts = text.split("_")
+
+def find_ascii_calibrations(inst_bytes: bytes) -> list[OffsetCandidate]:
+    candidates = []
+    for match in _ASCII_CALIBRATION.finditer(inst_bytes):
+        text = match.group().decode("ascii", "strict")
         try:
-            values = [float(p) for p in parts]
+            values = tuple(float(part) for part in text.split("_"))
         except ValueError:
             continue
-        out.append(OffsetV3Ascii(inst_offset=m.start(), text=text, values=values))
-    return out
+        candidates.append(OffsetCandidate(match.start(), text, values))
+    return candidates
 
 
-def pick_offset_v3(candidates: list[OffsetV3Ascii]) -> OffsetV3Ascii | None:
-    """40 items ちょうどの候補を優先. 見つからなければ最長のものを返す."""
-    exact = [c for c in candidates if len(c.values) == TOTAL_ITEMS]
-    if exact:
-        # 複数あれば inst_offset が大きい (末尾側の) ものを取る.
-        return max(exact, key=lambda c: c.inst_offset)
-    return max(candidates, key=lambda c: len(c.values), default=None)
+def supported_candidate(candidate: OffsetCandidate) -> bool:
+    lens_parameter_count = _LENS_PARAMETER_COUNTS.get(candidate.version)
+    if lens_parameter_count is None or len(candidate.values) < 2:
+        return False
+    sensor_count = int(candidate.values[0])
+    return sensor_count == 2 and len(candidate.values) == 2 + sensor_count * lens_parameter_count
 
 
-def parse_offset_v3_ascii(cand: OffsetV3Ascii) -> DualLensCalibration:
-    """40 items 版の offset_v3 を DualLensCalibration にマップする."""
-    v = cand.values
-    if len(v) != TOTAL_ITEMS:
-        return DualLensCalibration(
-            source=CalibSource.OFFSET_V3,
-            lenses=[],
-            raw={
-                "kind": "ascii_underscore",
-                "text": cand.text,
-                "count": len(v),
-                "note": f"expected {TOTAL_ITEMS} items, got {len(v)}; not confidently mappable",
-            },
+def pick_calibration(candidates: list[OffsetCandidate]) -> OffsetCandidate | None:
+    supported = [candidate for candidate in candidates if supported_candidate(candidate)]
+    return max(supported, key=lambda candidate: (candidate.version, candidate.inst_offset), default=None)
+
+
+def parse_ascii_calibration(candidate: OffsetCandidate) -> DualLensCalibration:
+    if not supported_candidate(candidate):
+        versions = ", ".join(str(version) for version in sorted(_LENS_PARAMETER_COUNTS))
+        raise ValueError(
+            f"未対応の Insta360 calibration です: version={candidate.version}, "
+            f"items={len(candidate.values)}; supported versions: {versions}"
         )
-
-    count = int(v[0])  # 通常 2
-    lens_a = _parse_lens(v[1 : 1 + LENS_ITEMS])
-    lens_b = _parse_lens(v[1 + LENS_ITEMS : 1 + LENS_ITEMS * 2])
-    calibration_id = int(v[-1])
+    count = _LENS_PARAMETER_COUNTS[candidate.version]
+    first = _parse_lens(candidate.values[1 : 1 + count], candidate.version)
+    second = _parse_lens(candidate.values[1 + count : 1 + count * 2], candidate.version)
     return DualLensCalibration(
-        source=CalibSource.OFFSET_V3,
-        lenses=[lens_a, lens_b],
+        source=CalibSource.OFFSET,
+        version=candidate.version,
+        lenses=(first, second),
         raw={
             "kind": "ascii_underscore",
-            "count": count,
-            "calibration_id": calibration_id,
-            "text": cand.text,
-            "inst_offset": cand.inst_offset,
+            "calibration_id": candidate.calibration_id,
+            "text": candidate.text,
+            "inst_offset": candidate.inst_offset,
         },
     )
 
 
-def _parse_lens(items: list[float]) -> MeiLensCalibration:
-    if len(items) != LENS_ITEMS:
-        raise ValueError(f"lens block must have {LENS_ITEMS} items, got {len(items)}")
-    (
-        xi,
-        fx,
-        fy,
-        cx,
-        cy,
-        a1,
-        a2,
-        a3,
-        tx,
-        ty,
-        tz,
-        k1,
-        k2,
-        k3,
-        p1,
-        p2,
-        ref_w,
-        ref_h,
-        lens_flags,
-    ) = items
-    return MeiLensCalibration(
+def _parse_lens(items: tuple[float, ...], version: int) -> OmniLensCalibration:
+    common = items[:11]
+    if version == 3:
+        distortion_model = OmniDistortionModel.RADTAN
+        distortion = items[11:16]
+        trailer = items[16:]
+    elif version == 6:
+        distortion_model = OmniDistortionModel.RADTAN_PRO
+        distortion = items[11:24]
+        trailer = items[24:]
+    else:
+        raise ValueError(f"未対応の Insta360 calibration version です: {version}")
+    if len(common) != 11 or len(trailer) != 3:
+        raise ValueError(f"calibration lens block が不正です: version={version}, items={len(items)}")
+    xi, fx, fy, cx, cy, yaw, pitch, roll, tx, ty, tz = common
+    ref_width, ref_height, lens_flags = trailer
+    return OmniLensCalibration(
         xi=xi,
         fx=fx,
         fy=fy,
         cx=cx,
         cy=cy,
-        yaw=a1,
-        pitch=a2,
-        roll=a3,
+        yaw=yaw,
+        pitch=pitch,
+        roll=roll,
         tx=tx,
         ty=ty,
         tz=tz,
-        k1=k1,
-        k2=k2,
-        k3=k3,
-        p1=p1,
-        p2=p2,
-        ref_image_width=int(ref_w),
-        ref_image_height=int(ref_h),
+        distortion_model=distortion_model,
+        distortion_parameters=tuple(distortion),
+        ref_image_width=int(ref_width),
+        ref_image_height=int(ref_height),
         lens_flags=int(lens_flags),
     )
-
-
-# ---------- offset_v3 (bytes-level, legacy path) ---------------------------------
-# 一部の古い INSV では inst box 内に float32 バイナリで保持されている可能性がある.
-# 実サンプルでは今のところ観測できていないため, ここは維持だけしておく.
-
-
-OFFSET_V3_RECORD_TYPE = 0x0101  # 未確認
-
-
-@dataclass
-class OffsetV3Raw:
-    version: int
-    values: list[float]
-    payload_hex: str
-
-
-def parse_offset_v3_bytes(payload: bytes) -> OffsetV3Raw:
-    if len(payload) < 4:
-        raise ValueError("offset_v3 payload too small")
-    version = struct.unpack_from("<I", payload, 0)[0]
-    floats_bytes = payload[4:]
-    n = len(floats_bytes) // 4
-    values = list(struct.unpack_from(f"<{n}f", floats_bytes, 0))
-    return OffsetV3Raw(version=version, values=values, payload_hex=payload.hex())
-
-
-# ---------- 選択ロジック --------------------------------------------------------
-
-
-def choose(*candidates: DualLensCalibration | None) -> DualLensCalibration | None:
-    """降級鎖に従って最初に is_valid() な候補を返す.
-
-    呼び出し側は優先度順に None 可で並べる. 全部ダメなら None -> 呼び出し側は
-    「静默にデフォルト焦距を差し込むのではなく」明示エラーを出す責務がある.
-    """
-    for c in candidates:
-        if c is not None and c.is_valid():
-            return c
-    return None

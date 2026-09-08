@@ -60,7 +60,7 @@ class _CandidateFrameCache:
 @register
 class ExtractFrames(Stage):
     name = StageName.EXTRACT_FRAMES
-    impl_version = "3.0"
+    impl_version = "4.1"
 
     def collect_inputs(self, ctx: StageContext) -> list[FileRef]:
         return collect_source_inputs(
@@ -74,16 +74,28 @@ class ExtractFrames(Stage):
 
     def normalize_params(self, raw: dict) -> dict:
         extraction = get_settings().frame_extraction
+        sensor_order = str(raw.get("sensor_order", "calibration_lens_order"))
+        if sensor_order != "calibration_lens_order":
+            raise ValueError(f"unsupported sensor order: {sensor_order}")
+        continuity_strategy = str(raw.get("continuity_strategy", "balanced")).lower()
+        if continuity_strategy not in {"quality", "parallax", "balanced"}:
+            raise ValueError(f"unsupported continuity strategy: {continuity_strategy}")
+        max_temporal_gap_sec = float(raw.get("max_temporal_gap_sec", 4.0))
+        if max_temporal_gap_sec < 0:
+            raise ValueError("max_temporal_gap_sec must be >= 0")
         return {
+            "sensor_order": sensor_order,
             "interval_sec": float(raw.get("interval_sec", 1.0)),
             "max_frames": int(raw.get("max_frames", 0)),
-            "selection_mode": str(raw.get("selection_mode", "interval")),
+            "selection_mode": str(raw.get("selection_mode", "spatial")),
             "sharpness_candidates": int(raw.get("sharpness_candidates", 1)),
-            "candidate_fps": float(raw.get("candidate_fps", 3.0)),
+            "candidate_fps": float(raw.get("candidate_fps", 1.5)),
             "min_sharpness": float(raw.get("min_sharpness", 0.0)),
             "max_clip": float(raw.get("max_clip", 0.25)),
-            "min_features": int(raw.get("min_features", 0)),
-            "target_motion": float(raw.get("target_motion", 1.5)),
+            "min_features": int(raw.get("min_features", 50)),
+            "target_motion": float(raw.get("target_motion", 2.0)),
+            "max_temporal_gap_sec": max_temporal_gap_sec,
+            "continuity_strategy": continuity_strategy,
             "max_rolling_shutter_motion_deg": float(
                 raw.get("max_rolling_shutter_motion_deg", 0.8)
             ),
@@ -115,7 +127,7 @@ class ExtractFrames(Stage):
                 key="log.extract_source_start",
                 args={"source": source.label, "cur": source_number + 1, "tot": len(ctx.sources)},
             )
-            if source.adapter == SourceAdapter.INSTA360_INSV:
+            if source.adapter == SourceAdapter.INSTA360:
                 source_manifest, source_outputs = self._extract_insv(
                     ctx,
                     source,
@@ -181,16 +193,19 @@ class ExtractFrames(Stage):
             raise RuntimeError(
                 f"source {source.label}: expected 2 matching video streams, got {len(probe.video_streams)}"
             )
-        lens0, lens1 = pair
+        stream0, stream1 = pair
+        # INSV の offset calibration lens block は MP4 video stream ordinal と逆順である。
+        # sensor-local lens0/lens1 artifact は calibration 順へ正規化して保存する。
+        calibration_stream_ordinals = (stream1.video_ordinal, stream0.video_ordinal)
         timings_by_stream = ffprobe.frame_timings(
             source.path,
-            stream_indices=(lens0.index, lens1.index),
+            stream_indices=(stream0.index, stream1.index),
             ffprobe_bin=ffprobe_bin,
         )
-        timings0 = timings_by_stream[lens0.index]
-        timings1 = timings_by_stream[lens1.index]
-        lens0.validate_timing_count(timings0)
-        lens1.validate_timing_count(timings1)
+        timings0 = timings_by_stream[stream0.index]
+        timings1 = timings_by_stream[stream1.index]
+        stream0.validate_timing_count(timings0)
+        stream1.validate_timing_count(timings1)
         maximum_pts_skew = ffprobe.validate_synchronized_timings(
             timings0,
             timings1,
@@ -198,7 +213,7 @@ class ExtractFrames(Stage):
         )
         first_pts = timings0[0].pts_sec
         frame_times = [timing.pts_sec - first_pts for timing in timings0]
-        duration = probe.duration or (lens0.nb_frames or 0) / lens0.fps
+        duration = probe.duration or (stream0.nb_frames or 0) / stream0.fps
         recording = insv_imu.read_imu_recording(source.path)
         rolling_shutter_motion = (
             insv_imu.rolling_shutter_motion_at_times(
@@ -219,13 +234,13 @@ class ExtractFrames(Stage):
         indices, selection, scores, candidate_cache = self._select_indices(
             ctx,
             source,
-            fps=lens0.fps,
+            fps=stream0.fps,
             duration=duration,
-            nb_frames=lens0.nb_frames,
+            nb_frames=stream0.nb_frames,
             ffmpeg_bin=ffmpeg_bin,
             hwaccel=decoder.method,
             paired_candidates=True,
-            paired_stream_ordinals=(lens0.video_ordinal, lens1.video_ordinal),
+            paired_stream_ordinals=calibration_stream_ordinals,
             frame_times_sec=frame_times,
             rolling_shutter_motion=rolling_shutter_motion,
             progress_span=progress_span.child(0.02, selection_end),
@@ -254,7 +269,7 @@ class ExtractFrames(Stage):
                     frame_indices=indices,
                     out_dir_lens0=output_root / "lens0",
                     out_dir_lens1=output_root / "lens1",
-                    stream_ordinals=(lens0.video_ordinal, lens1.video_ordinal),
+                    stream_ordinals=calibration_stream_ordinals,
                     ffmpeg_bin=ffmpeg_bin,
                     hwaccel=decoder.method,
                     progress=paired_progress,
@@ -296,14 +311,16 @@ class ExtractFrames(Stage):
         selection["pairing"] = {
             "method": "pts",
             "maximum_skew_sec": maximum_pts_skew,
+            "lens0_video_ordinal": calibration_stream_ordinals[0],
+            "lens1_video_ordinal": calibration_stream_ordinals[1],
         }
         return (
             _source_manifest(
                 source,
                 kind="insv_dual",
-                width=lens0.width,
-                height=lens0.height,
-                fps=lens0.fps,
+                width=stream0.width,
+                height=stream0.height,
+                fps=stream0.fps,
                 selection=selection,
                 frames=frames,
             ),
@@ -816,6 +833,8 @@ class ExtractFrames(Stage):
                     min_features=ctx.params["min_features"],
                     target_motion=ctx.params["target_motion"],
                     max_frames=ctx.params["max_frames"],
+                    max_temporal_gap_sec=ctx.params["max_temporal_gap_sec"],
+                    continuity_strategy=ctx.params["continuity_strategy"],
                     max_rolling_shutter_motion_deg=ctx.params[
                         "max_rolling_shutter_motion_deg"
                     ],
@@ -834,7 +853,16 @@ class ExtractFrames(Stage):
                     key="log.extract_selection_done",
                     args={"source": source.label, "count": len(result.selected_indices)},
                 )
-            statistics = {"candidates": len(candidates), "reasons": dict(result.reasons)}
+            statistics = {
+                "candidates": len(candidates),
+                "reasons": dict(result.reasons),
+                "continuity_strategy": ctx.params["continuity_strategy"],
+                "maximum_gap_sec": round(result.maximum_gap_sec, 3),
+                "bridge_frames": result.bridge_frames,
+                "bridge_relaxed_sharpness": result.bridge_relaxed_sharpness,
+                "bridge_relaxed_rolling_shutter": result.bridge_relaxed_rolling_shutter,
+                "unresolved_gaps": result.unresolved_gaps,
+            }
             if not result.selected_indices:
                 step = max(1, len(candidate_indices) // max(1, fallback_count))
                 keep_scratch = candidate_cache is not None

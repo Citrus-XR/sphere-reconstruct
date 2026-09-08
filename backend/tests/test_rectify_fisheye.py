@@ -5,7 +5,7 @@ import json
 import numpy as np
 from PIL import Image
 
-from sphere_reconstruct.domain.camera_system import MeiIntrinsics
+from sphere_reconstruct.domain.camera_system import OmniDistortionModel, OmniIntrinsics
 from sphere_reconstruct.imaging import projection
 from sphere_reconstruct.pipeline.stage import ProgressReporter, StageContext
 from sphere_reconstruct.stages.rectify_fisheye import RectifyFisheye
@@ -19,7 +19,7 @@ def test_rectify_fisheye_materializes_consistent_opencv_png(tmp_path):
     grid_y, grid_x = np.mgrid[:64, :64]
     source_rgb = np.stack((grid_x * 4, grid_y * 4, (grid_x + grid_y) * 2), axis=2).astype(np.uint8)
     Image.fromarray(source_rgb, mode="RGB").save(source_path, format="JPEG", quality=100, subsampling=0)
-    source_projection = MeiIntrinsics(
+    source_projection = OmniIntrinsics(
         width=64,
         height=64,
         xi=2.0,
@@ -27,17 +27,14 @@ def test_rectify_fisheye_materializes_consistent_opencv_png(tmp_path):
         fy=71.0,
         cx=32.0,
         cy=31.5,
-        k1=0.02,
-        k2=0.01,
-        k3=-0.002,
-        p1=0.001,
-        p2=-0.001,
+        distortion_model=OmniDistortionModel.RADTAN,
+        distortion_parameters=(0.02, 0.01, -0.002, 0.001, -0.001),
     )
     thin = projection.approximate_thin_prism_fisheye(source_projection)
     target = projection.approximate_opencv_fisheye(source_projection)
     name = "sources/source/lens0/frame_000000.jpg"
     catalog = {
-        "version": 2,
+        "version": 3,
         "reconstruction_mode": "native_fisheye",
         "primary_source_id": "source",
         "sources": [
@@ -45,7 +42,7 @@ def test_rectify_fisheye_materializes_consistent_opencv_png(tmp_path):
                 "id": "source",
                 "label": "Source",
                 "role": "primary",
-                "adapter": "insta360_insv",
+                "adapter": "insta360",
                 "media_kind": "video",
                 "projection": "dual_fisheye",
                 "count": 1,

@@ -70,7 +70,7 @@ def test_extract_gravity_none_without_gyro_record(monkeypatch) -> None:
 
 
 def test_extract_gravity_raw_u16_format(monkeypatch) -> None:
-    # X5 実機の raw(u16) 形式: 20B/サンプル, 値 = u16 - 32768, accel 先.
+    # Raw u16 形式: 20B/サンプル, 値 = u16 - 32768, accel 先.
     def _raw(accel):  # accel は -32768..32767 の生値
         return struct.pack("<Q6H", 0, *(int(a + 32768) for a in accel), 0, 0, 0)
 

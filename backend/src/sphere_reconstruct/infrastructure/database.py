@@ -1,27 +1,29 @@
 """SQLite (aiosqlite) データストア.
 
-project / job / stage_run / event の 4 テーブル. WAL モードで運用.
+Project / job / stage_run / event と関連設定を WAL モードで管理する。
 大きな成果物 (画像, mask, 点群) はファイルシステム側に置き, DB には path とハッシュだけを持つ.
 """
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import aiosqlite
 
-from .migrations import migrate_dual_mask_artifacts
-
 _SCHEMA = """
+CREATE TABLE IF NOT EXISTS workspace_preferences (
+    id INTEGER PRIMARY KEY CHECK(id=1),
+    value_json TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS project (
     id           TEXT PRIMARY KEY,
     name         TEXT NOT NULL,
     created_at   TEXT NOT NULL,
     updated_at   TEXT NOT NULL,
-    source_kind  TEXT,          -- migration 専用旧列. runtime は project_source を使う.
-    source_path  TEXT,          -- migration 専用旧列.
     state        TEXT NOT NULL, -- pipeline_state.PipelineState の value
     metadata_json TEXT NOT NULL DEFAULT '{}'
 );
@@ -64,6 +66,12 @@ CREATE TABLE IF NOT EXISTS job (
 CREATE INDEX IF NOT EXISTS idx_job_project ON job(project_id);
 CREATE INDEX IF NOT EXISTS idx_job_status ON job(status);
 
+CREATE TABLE IF NOT EXISTS job_request (
+    job_id                TEXT PRIMARY KEY REFERENCES job(id) ON DELETE CASCADE,
+    params_by_stage_json  TEXT NOT NULL,
+    skip_json             TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS stage_run (
     id            TEXT PRIMARY KEY,
     project_id    TEXT NOT NULL REFERENCES project(id) ON DELETE CASCADE,
@@ -100,84 +108,54 @@ CREATE INDEX IF NOT EXISTS idx_event_job ON event(job_id, id);
 
 
 class Database:
-    """aiosqlite の薄いラッパ. 常に単一の接続を握って WAL で使う."""
+    """独立 SQL 用と明示 transaction 用の 2 接続を保持する。"""
 
     def __init__(self, path: Path) -> None:
         self._path = path
         self._conn: aiosqlite.Connection | None = None
+        self._transaction_conn: aiosqlite.Connection | None = None
+        self._transaction_lock = asyncio.Lock()
 
     async def connect(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = await aiosqlite.connect(self._path)
+        self._conn = await aiosqlite.connect(self._path, isolation_level=None)
         self._conn.row_factory = aiosqlite.Row
         await self._conn.execute("PRAGMA journal_mode=WAL;")
         await self._conn.execute("PRAGMA foreign_keys=ON;")
         await self._conn.executescript(_SCHEMA)
-        # 既存 DB (ALTER 前に作られたファイル) にも追加カラムを足す. マイグレーション層が
-        # 無いので冪等な ADD COLUMN で吸収する (存在すれば OperationalError を握りつぶす).
-        for col, decl in (("msg_key", "TEXT"), ("msg_args", "TEXT"), ("kind", "TEXT NOT NULL DEFAULT 'log'")):
-            with suppress(aiosqlite.OperationalError):
-                await self._conn.execute(f"ALTER TABLE event ADD COLUMN {col} {decl}")
-        # 廃止済みの独立画像処理 branch は camera solve を変更しなかったため、旧要約状態は
-        # main branch の最終成果である aligned へ一度だけ正規化する。
-        await self._conn.execute("UPDATE project SET state='aligned' WHERE state='denoised'")
-        await self._conn.execute("UPDATE project SET state='prepared' WHERE state='reprojected'")
-        # 単一 source 列を正規化 table へ移し、以後は project_source だけを正とする。
-        await self._conn.execute(
-            """
-            INSERT OR IGNORE INTO project_source
-                (id, project_id, label, role, adapter, media_kind, projection, path,
-                 ordinal, enabled, created_at, updated_at)
-            SELECT
-                'legacy-' || id,
-                id,
-                CASE
-                    WHEN instr(replace(source_path, '\\', '/'), '/') > 0
-                    THEN replace(source_path, '\\', '/')
-                    ELSE source_path
-                END,
-                'primary',
-                CASE source_kind
-                    WHEN 'insv' THEN 'insta360_insv'
-                    WHEN 'erp_video' THEN 'generic_video'
-                    ELSE 'generic_images'
-                END,
-                CASE WHEN source_kind='erp_images' THEN 'images' ELSE 'video' END,
-                CASE WHEN source_kind='insv' THEN 'dual_fisheye' ELSE 'equirectangular' END,
-                source_path,
-                0,
-                1,
-                created_at,
-                updated_at
-            FROM project
-            WHERE source_path IS NOT NULL AND source_kind IS NOT NULL
-            """
-        )
-        await self._conn.execute("UPDATE project SET source_kind=NULL, source_path=NULL")
-        await migrate_dual_mask_artifacts(self._conn, self._path.parent)
-        await self._conn.commit()
+        self._transaction_conn = await aiosqlite.connect(self._path, isolation_level=None)
+        self._transaction_conn.row_factory = aiosqlite.Row
+        await self._transaction_conn.execute("PRAGMA foreign_keys=ON;")
 
     async def close(self) -> None:
+        if self._transaction_conn is not None:
+            await self._transaction_conn.close()
+            self._transaction_conn = None
         if self._conn is not None:
             await self._conn.close()
             self._conn = None
 
     @property
     def conn(self) -> aiosqlite.Connection:
+        """単一文の autocommit 接続。複数文の変更は transaction() を使う。"""
         if self._conn is None:
             raise RuntimeError("Database is not connected. call connect() first.")
         return self._conn
 
     @asynccontextmanager
     async def transaction(self) -> AsyncIterator[aiosqlite.Connection]:
-        """明示的なトランザクション. with 抜けで commit, 例外なら rollback."""
-        conn = self.conn
-        try:
-            yield conn
-            await conn.commit()
-        except BaseException:
-            await conn.rollback()
-            raise
+        """専用接続を直列化し、他の request の commit / rollback から隔離する。"""
+        if self._transaction_conn is None:
+            raise RuntimeError("Database is not connected. call connect() first.")
+        async with self._transaction_lock:
+            conn = self._transaction_conn
+            try:
+                await conn.execute("BEGIN IMMEDIATE")
+                yield conn
+                await conn.commit()
+            except BaseException:
+                await conn.rollback()
+                raise
 
 
 # アプリ全体で 1 インスタンス.

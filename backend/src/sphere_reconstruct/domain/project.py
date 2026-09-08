@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -92,19 +93,18 @@ async def update_state(db: Database, project_id: str, state: PipelineState) -> N
         )
 
 
-async def set_ui_state(db: Database, project_id: str, ui: dict) -> None:
-    """工程ごとの UI 設定 (各 step のパラメータ / モード) を metadata に永続化する.
+async def patch_ui_state(db: Database, project_id: str, ui: dict) -> None:
+    """設定の読み取りと部分更新を同じ transaction で行う。"""
+    from .ui_state import merge_ui_patch
 
-    リロードで消えないよう metadata_json["ui"] に丸ごと保存する. 中身の形はフロント任せ.
-    """
-    import json
-
-    p = await get_project(db, project_id)
-    if p is None:
-        raise LookupError(f"project {project_id} not found")
-    meta = dict(p.metadata)
-    meta["ui"] = ui
     async with db.transaction() as conn:
+        row = await (await conn.execute(
+            "SELECT metadata_json FROM project WHERE id=?", (project_id,)
+        )).fetchone()
+        if row is None:
+            raise LookupError(f"project {project_id} not found")
+        meta = json.loads(row[0])
+        meta["ui"] = merge_ui_patch(meta.get("ui", {}), ui)
         await conn.execute(
             "UPDATE project SET metadata_json=?, updated_at=? WHERE id=?",
             (json.dumps(meta, ensure_ascii=False), _now_iso(), project_id),

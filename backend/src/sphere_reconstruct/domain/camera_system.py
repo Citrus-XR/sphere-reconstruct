@@ -17,9 +17,20 @@ CANONICAL_COORDINATE_SYSTEM = {
 }
 
 
+class OmniDistortionModel(StrEnum):
+    RADTAN = "radtan"
+    RADTAN_PRO = "radtan_pro"
+
+
+_DISTORTION_PARAMETER_COUNTS = {
+    OmniDistortionModel.RADTAN: 5,
+    OmniDistortionModel.RADTAN_PRO: 13,
+}
+
+
 @dataclass(frozen=True)
-class MeiIntrinsics:
-    """単一センサー画像のローカル座標で表した MEI 内部パラメータ。"""
+class OmniIntrinsics:
+    """単一 sensor image 座標へ正規化した unified omnidirectional projection。"""
 
     width: int
     height: int
@@ -28,37 +39,27 @@ class MeiIntrinsics:
     fy: float
     cx: float
     cy: float
-    k1: float
-    k2: float
-    k3: float
-    p1: float
-    p2: float
+    distortion_model: OmniDistortionModel
+    distortion_parameters: tuple[float, ...]
 
     def __post_init__(self) -> None:
         if self.width <= 0 or self.height <= 0:
-            raise ValueError(f"MEI の参照サイズが不正です: {self.width}x{self.height}")
+            raise ValueError(f"omnidirectional projection の参照サイズが不正です: {self.width}x{self.height}")
         if self.xi <= 0.0 or self.fx <= 0.0 or self.fy <= 0.0:
-            raise ValueError("MEI の xi/fx/fy は正数でなければなりません")
-        if not all(
-            math.isfinite(value)
-            for value in (
-                self.xi,
-                self.fx,
-                self.fy,
-                self.cx,
-                self.cy,
-                self.k1,
-                self.k2,
-                self.k3,
-                self.p1,
-                self.p2,
+            raise ValueError("omnidirectional projection の xi/fx/fy は正数でなければなりません")
+        expected = _DISTORTION_PARAMETER_COUNTS[self.distortion_model]
+        if len(self.distortion_parameters) != expected:
+            raise ValueError(
+                f"{self.distortion_model.value} は {expected} distortion parameter が必要です: "
+                f"{len(self.distortion_parameters)}"
             )
-        ):
-            raise ValueError("MEI parameter に non-finite value があります")
+        values = (self.xi, self.fx, self.fy, self.cx, self.cy, *self.distortion_parameters)
+        if not all(math.isfinite(value) for value in values):
+            raise ValueError("omnidirectional projection に non-finite value があります")
 
     @classmethod
-    def from_dict(cls, value: dict[str, Any]) -> MeiIntrinsics:
-        if value["model"] != "mei":
+    def from_dict(cls, value: dict[str, Any]) -> OmniIntrinsics:
+        if value["model"] != "omni":
             raise ValueError(f"未対応の投影モデルです: {value['model']}")
         return cls(
             width=int(value["width"]),
@@ -68,22 +69,30 @@ class MeiIntrinsics:
             fy=float(value["fy"]),
             cx=float(value["cx"]),
             cy=float(value["cy"]),
-            k1=float(value["k1"]),
-            k2=float(value["k2"]),
-            k3=float(value["k3"]),
-            p1=float(value["p1"]),
-            p2=float(value["p2"]),
+            distortion_model=OmniDistortionModel(value["distortion_model"]),
+            distortion_parameters=tuple(float(item) for item in value["distortion_parameters"]),
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return {"model": "mei", **self.__dict__}
+        return {
+            "model": "omni",
+            "width": self.width,
+            "height": self.height,
+            "xi": self.xi,
+            "fx": self.fx,
+            "fy": self.fy,
+            "cx": self.cx,
+            "cy": self.cy,
+            "distortion_model": self.distortion_model.value,
+            "distortion_parameters": list(self.distortion_parameters),
+        }
 
-    def scaled(self, width: int, height: int) -> MeiIntrinsics:
+    def scaled(self, width: int, height: int) -> OmniIntrinsics:
         if width <= 0 or height <= 0:
             raise ValueError(f"変換先サイズが不正です: {width}x{height}")
         scale_x = width / self.width
         scale_y = height / self.height
-        return MeiIntrinsics(
+        return OmniIntrinsics(
             width=width,
             height=height,
             xi=self.xi,
@@ -91,11 +100,8 @@ class MeiIntrinsics:
             fy=self.fy * scale_y,
             cx=self.cx * scale_x,
             cy=self.cy * scale_y,
-            k1=self.k1,
-            k2=self.k2,
-            k3=self.k3,
-            p1=self.p1,
-            p2=self.p2,
+            distortion_model=self.distortion_model,
+            distortion_parameters=self.distortion_parameters,
         )
 
 
@@ -256,7 +262,7 @@ class ShutterCalibration:
 class CalibratedSensor:
     id: str
     image_key: str
-    intrinsics: MeiIntrinsics
+    intrinsics: OmniIntrinsics
     calibration_image_transform: CalibrationImageTransform
     cam_from_rig: SensorExtrinsic
     shutter: ShutterCalibration
@@ -270,7 +276,7 @@ class CalibratedSensor:
         return cls(
             id=str(value["id"]),
             image_key=str(value["image_key"]),
-            intrinsics=MeiIntrinsics.from_dict(value["projection"]),
+            intrinsics=OmniIntrinsics.from_dict(value["projection"]),
             calibration_image_transform=CalibrationImageTransform.from_dict(
                 value["calibration_image_transform"]
             ),
@@ -313,7 +319,7 @@ class CalibratedCameraSystem:
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> CalibratedCameraSystem:
-        if int(value["version"]) != 1:
+        if int(value["version"]) != 2:
             raise ValueError(f"未対応の camera system version です: {value['version']}")
         if value["coordinate_system"] != CANONICAL_COORDINATE_SYSTEM:
             raise ValueError("camera system の座標系が canonical contract と一致しません")
@@ -325,7 +331,7 @@ class CalibratedCameraSystem:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "version": 1,
+            "version": 2,
             "coordinate_system": dict(CANONICAL_COORDINATE_SYSTEM),
             "calibration_source": self.calibration_source,
             "reference_sensor_id": self.reference_sensor_id,

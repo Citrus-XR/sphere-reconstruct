@@ -4,7 +4,7 @@ FastAPI プロセス側で Job のライフサイクルを管理する.
 
 - POST /api/projects/{id}/run が来ると Job を作り, Worker サブプロセスを spawn.
 - Job ID とプロセスハンドルを保持し, cancel API で殺せるようにする.
-- Worker 終了は非同期タスクで監視し, 事後処理 (無し. Worker 側で job.status を書く).
+- Worker の通常終了状態を引き継ぎ、起動失敗・異常終了・cancel と一時出力の回収を管理する。
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 import shutil
 import uuid
 from datetime import UTC, datetime
@@ -19,7 +20,10 @@ from pathlib import Path
 
 from .infrastructure.database import Database
 from .infrastructure.processes import WorkerHandle, cancel, spawn_worker, wait_for
-from .settings import get_settings, workspace_root
+from .infrastructure.project_lock import project_lock, require_idle_project
+from .settings import workspace_root
+
+_logger = logging.getLogger(__name__)
 
 
 class JobSupervisor:
@@ -40,6 +44,20 @@ class JobSupervisor:
         params_by_stage: dict[str, dict] | None = None,
         skip: list[str] | None = None,
     ) -> str:
+        async with project_lock(project_id):
+            await require_idle_project(self._db, project_id)
+            return await self._start_pipeline(
+                project_id=project_id, stage=stage, params_by_stage=params_by_stage, skip=skip
+            )
+
+    async def _start_pipeline(
+        self,
+        *,
+        project_id: str,
+        stage: str | None,
+        params_by_stage: dict[str, dict] | None,
+        skip: list[str] | None,
+    ) -> str:
         job_id = str(uuid.uuid4())
         now = datetime.now(UTC).isoformat()
         async with self._db.transaction() as conn:
@@ -56,28 +74,52 @@ class JobSupervisor:
                     now,
                 ),
             )
+            await conn.execute(
+                """
+                INSERT INTO job_request (job_id, params_by_stage_json, skip_json)
+                VALUES (?, ?, ?)
+                """,
+                (
+                    job_id,
+                    json.dumps(params_by_stage or {}, ensure_ascii=False, sort_keys=True),
+                    json.dumps(skip or [], ensure_ascii=False),
+                ),
+            )
 
-        from .worker_entry import run_pipeline_entry  # 遅延 import で subprocess pickle 用.
+        try:
+            from .worker_entry import run_pipeline_entry
 
-        handle = spawn_worker(
-            run_pipeline_entry,
-            job_id=job_id,
-            kwargs={
-                "db_path": str(self._db_path),
-                "workspace_root": str(workspace_root()),
-                "project_id": project_id,
-                "job_id": job_id,
-                "stage": stage,
-                "params_by_stage": params_by_stage,
-                "skip": skip,
-            },
-        )
-        # pid を job テーブルへ書き込む.
-        async with self._db.transaction() as conn:
-            await conn.execute("UPDATE job SET pid=? WHERE id=?", (handle.pid, job_id))
+            handle = spawn_worker(
+                run_pipeline_entry,
+                job_id=job_id,
+                kwargs={
+                    "db_path": str(self._db_path),
+                    "workspace_root": str(workspace_root()),
+                    "project_id": project_id,
+                    "job_id": job_id,
+                    "stage": stage,
+                    "params_by_stage": params_by_stage,
+                    "skip": skip,
+                },
+            )
+        except Exception as error:
+            finished_at = datetime.now(UTC).isoformat()
+            diagnostic = f"worker could not start: {type(error).__name__}: {error}"
+            async with self._db.transaction() as conn:
+                await conn.execute(
+                    "UPDATE job SET status='failed', finished_at=?, error_text=? WHERE id=?",
+                    (finished_at, diagnostic, job_id),
+                )
+                await conn.execute(
+                    "INSERT INTO event (job_id, project_id, level, message, ts) VALUES (?, ?, 'error', ?, ?)",
+                    (job_id, project_id, diagnostic, finished_at),
+                )
+            raise
         self._handles[job_id] = handle
         task = asyncio.create_task(self._await_worker(job_id, handle))
         self._tasks[job_id] = task
+        async with self._db.transaction() as conn:
+            await conn.execute("UPDATE job SET pid=? WHERE id=?", (handle.pid, job_id))
         return job_id
 
     async def _await_worker(self, job_id: str, handle: WorkerHandle) -> int:
@@ -90,26 +132,32 @@ class JobSupervisor:
             self._tasks.pop(job_id, None)
             # worker がネイティブクラッシュ (CUDA/ONNX の VRAM 不足など) や kill で異常終了すると
             # worker 内の except を通らず job/stage_run が 'running' のまま残る. ここで回収する.
-            with contextlib.suppress(Exception):  # 回収失敗でも監視タスク自体は落とさない.
+            try:
                 await self._finalize_if_orphaned(job_id, code)
+            except Exception:
+                _logger.exception("Could not finalize job %s after worker exit %s", job_id, code)
             self._cancelling.discard(job_id)
-            await self._cleanup_scratch(job_id)
+            await self.cleanup_scratch(job_id)
 
-    async def _cleanup_scratch(self, job_id: str) -> None:
+    async def cleanup_scratch(self, job_id: str) -> None:
         cur = await self._db.conn.execute("SELECT project_id FROM job WHERE id=?", (job_id,))
         row = await cur.fetchone()
         if row is None:
             return
+        async with project_lock(row["project_id"]):
+            await self._cleanup_scratch(job_id, row["project_id"])
+
+    async def _cleanup_scratch(self, job_id: str, project_id: str) -> None:
         active = await (
             await self._db.conn.execute(
                 "SELECT 1 FROM job WHERE project_id=? AND id<>? "
                 "AND status IN ('queued', 'running') LIMIT 1",
-                (row["project_id"], job_id),
+                (project_id, job_id),
             )
         ).fetchone()
         if active is not None:
             return
-        project_dir = workspace_root() / "projects" / row["project_id"]
+        project_dir = workspace_root() / "projects" / project_id
         stage_rows = await (
             await self._db.conn.execute(
                 "SELECT DISTINCT stage FROM stage_run WHERE job_id=?",
@@ -178,26 +226,26 @@ class JobSupervisor:
             )
 
     async def cancel_job(self, job_id: str) -> bool:
+        row = await (
+            await self._db.conn.execute("SELECT project_id FROM job WHERE id=?", (job_id,))
+        ).fetchone()
+        if row is None:
+            return False
+        async with project_lock(row["project_id"]):
+            return await self._cancel_job(job_id)
+
+    async def _cancel_job(self, job_id: str) -> bool:
         handle = self._handles.get(job_id)
         if handle is None:
             return False
-        now = datetime.now(UTC).isoformat()
         async with self._db.transaction() as conn:
             cur = await conn.execute("SELECT status FROM job WHERE id=?", (job_id,))
             row = await cur.fetchone()
             if row is None or row["status"] not in ("queued", "running"):
                 return False
             self._cancelling.add(job_id)
-            await conn.execute(
-                "UPDATE job SET status='cancelled', finished_at=?, error_text=NULL WHERE id=?",
-                (now, job_id),
-            )
-            await conn.execute(
-                "UPDATE stage_run SET status='cancelled', finished_at=?, error_text=NULL "
-                "WHERE job_id=? AND status='running'",
-                (now, job_id),
-            )
         await asyncio.to_thread(cancel, handle, grace_seconds=3.0)
+        await self._finalize_if_orphaned(job_id, -1)
         return True
 
     async def shutdown(self) -> None:
@@ -233,8 +281,3 @@ async def shutdown_supervisor() -> None:
     if _supervisor is not None:
         await _supervisor.shutdown()
         _supervisor = None
-
-
-def _unused_settings_touch() -> None:
-    # settings を import しておかないと循環回避のための遅延 import が忘れられがち.
-    _ = get_settings()

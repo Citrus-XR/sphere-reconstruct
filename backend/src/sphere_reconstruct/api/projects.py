@@ -17,10 +17,12 @@ from pydantic import BaseModel
 from ..domain import project as project_domain
 from ..domain import source as source_domain
 from ..domain.pipeline_state import PipelineState
+from ..domain.ui_state import ProjectUiState
 from ..infrastructure.database import get_db
 from ..infrastructure.filesystem import PathNotAllowedError, ensure_within_any
-from ..pipeline.invalidation import clear_pipeline
+from ..pipeline.invalidation import ArtifactBusyError, clear_pipeline
 from ..settings import get_settings
+from .project_access import MutableProject
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
 
@@ -98,23 +100,11 @@ async def get_project(project_id: str) -> ProjectRead:
     return _to_read(p)
 
 
-async def _prepare_source_mutation(project_id: str) -> project_domain.Project:
-    db = get_db()
-    existing = await project_domain.get_project(db, project_id)
-    if existing is None:
-        raise HTTPException(status_code=404, detail="project not found")
-
-    cursor = await db.conn.execute(
-        "SELECT 1 FROM job WHERE project_id=? AND status IN ('queued', 'running') LIMIT 1",
-        (project_id,),
-    )
-    if await cursor.fetchone() is not None:
-        raise HTTPException(status_code=409, detail="project has a running job")
-    return existing
-
-
 async def _invalidate_for_source_mutation(project: project_domain.Project) -> None:
-    await run_in_threadpool(clear_pipeline, project.workspace_dir)
+    try:
+        await run_in_threadpool(clear_pipeline, project.workspace_dir)
+    except ArtifactBusyError as error:
+        raise HTTPException(status_code=423, detail=str(error)) from error
 
 
 def _resolve_source_path(path: str) -> Path:
@@ -129,13 +119,12 @@ def _resolve_source_path(path: str) -> Path:
 
 
 @router.post("/{project_id}/sources", response_model=ProjectRead)
-async def add_source(project_id: str, body: SourceCreateBody) -> ProjectRead:
+async def add_source(project_id: str, body: SourceCreateBody, existing: MutableProject) -> ProjectRead:
     resolved = _resolve_source_path(body.path)
     if body.media_kind == source_domain.MediaKind.IMAGES and not resolved.is_dir():
         raise HTTPException(status_code=400, detail="image source must be a directory")
     if body.media_kind == source_domain.MediaKind.VIDEO and not resolved.is_file():
         raise HTTPException(status_code=400, detail="video source must be a file")
-    existing = await _prepare_source_mutation(project_id)
     if any(Path(source.path) == resolved for source in existing.sources):
         raise HTTPException(status_code=409, detail="source path is already registered")
     if body.role == source_domain.SourceRole.PRIMARY and any(
@@ -178,8 +167,7 @@ async def add_source(project_id: str, body: SourceCreateBody) -> ProjectRead:
 
 
 @router.delete("/{project_id}/sources/{source_id}", response_model=ProjectRead)
-async def delete_source(project_id: str, source_id: str) -> ProjectRead:
-    existing = await _prepare_source_mutation(project_id)
+async def delete_source(project_id: str, source_id: str, existing: MutableProject) -> ProjectRead:
     target = next((source for source in existing.sources if source.id == source_id), None)
     if target is None:
         raise HTTPException(status_code=404, detail="source not found")
@@ -201,8 +189,7 @@ async def delete_source(project_id: str, source_id: str) -> ProjectRead:
 
 
 @router.post("/{project_id}/sources/{source_id}/make-primary", response_model=ProjectRead)
-async def make_primary_source(project_id: str, source_id: str) -> ProjectRead:
-    existing = await _prepare_source_mutation(project_id)
+async def make_primary_source(project_id: str, source_id: str, existing: MutableProject) -> ProjectRead:
     if not any(source.id == source_id for source in existing.sources):
         raise HTTPException(status_code=404, detail="source not found")
     await _invalidate_for_source_mutation(existing)
@@ -216,35 +203,32 @@ async def make_primary_source(project_id: str, source_id: str) -> ProjectRead:
 
 
 class UiStateBody(BaseModel):
-    ui: dict
+    ui: ProjectUiState
 
 
-@router.put("/{project_id}/ui-state", response_model=ProjectRead)
-async def put_ui_state(project_id: str, body: UiStateBody) -> ProjectRead:
-    """工程ごとの UI 設定 (step パラメータ / モード / 無効化) を保存する."""
+@router.patch("/{project_id}/ui-state", response_model=ProjectRead)
+async def patch_ui_state(project_id: str, body: UiStateBody) -> ProjectRead:
+    """工程ごとの UI 設定を部分更新する。省略されたフィールドは変更しない。"""
     db = get_db()
     existing = await project_domain.get_project(db, project_id)
     if existing is None:
         raise HTTPException(status_code=404, detail="project not found")
-    await project_domain.set_ui_state(db, project_id, body.ui)
+    await project_domain.patch_ui_state(db, project_id, body.ui.model_dump(exclude_unset=True))
     p = await project_domain.get_project(db, project_id)
     assert p is not None
     return _to_read(p)
 
 
 @router.delete("/{project_id}")
-async def delete_project(project_id: str) -> dict:
+async def delete_project(project_id: str, project: MutableProject) -> dict:
     """プロジェクトをディスクから完全に削除する (中間成果物含む).
 
     ソース動画はプロジェクト外のパス参照なので削除されない. DB 行削除で stage_run /
     job / event は ON DELETE CASCADE で消える.
     """
     db = get_db()
-    p = await project_domain.get_project(db, project_id)
-    if p is None:
-        raise HTTPException(status_code=404, detail="project not found")
-    if p.workspace_dir.exists():
-        await run_in_threadpool(shutil.rmtree, p.workspace_dir)
+    if project.workspace_dir.exists():
+        await run_in_threadpool(shutil.rmtree, project.workspace_dir)
     await db.conn.execute("DELETE FROM project WHERE id=?", (project_id,))
     await db.conn.commit()
     return {"deleted": project_id}

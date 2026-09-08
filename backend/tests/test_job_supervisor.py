@@ -12,6 +12,39 @@ from sphere_reconstruct.job_supervisor import JobSupervisor
 
 
 @pytest.mark.asyncio
+async def test_spawn_failure_is_terminal_and_preserves_diagnostic(tmp_path: Path, monkeypatch):
+    database = Database(tmp_path / "state.db")
+    await database.connect()
+    try:
+        await database.conn.execute(
+            "INSERT INTO project (id,name,created_at,updated_at,state) "
+            "VALUES ('project','project','2026-09-07','2026-09-07','created')"
+        )
+        supervisor = JobSupervisor(database, tmp_path / "state.db")
+        error = OSError("worker process unavailable")
+
+        def fail(*_args, **_kwargs):
+            raise error
+
+        monkeypatch.setattr("sphere_reconstruct.job_supervisor.spawn_worker", fail)
+        with pytest.raises(OSError) as raised:
+            await supervisor.enqueue_run_pipeline(project_id="project", stage="extract_frames")
+        assert raised.value is error
+        row = await (await database.conn.execute("SELECT * FROM job")).fetchone()
+        assert row["status"] == "failed"
+        assert row["finished_at"] is not None
+        assert row["started_at"] is None
+        assert str(error) in row["error_text"]
+        event = await (await database.conn.execute("SELECT level,message FROM event")).fetchone()
+        assert event["level"] == "error"
+        assert str(error) in event["message"]
+        assert not supervisor._handles
+        assert not supervisor._tasks
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_cancel_is_terminal_even_when_worker_exit_races(tmp_path: Path, monkeypatch):
     database = Database(tmp_path / "state.db")
     await database.connect()
@@ -94,7 +127,7 @@ async def test_cancel_cleanup_removes_stage_temporary_artifacts(tmp_path: Path, 
     monkeypatch.setattr("sphere_reconstruct.job_supervisor.workspace_root", lambda: tmp_path)
 
     supervisor = JobSupervisor(database, tmp_path / "state.db")
-    await supervisor._cleanup_scratch("job")
+    await supervisor.cleanup_scratch("job")
 
     assert not temporary.exists()
     assert final.is_dir()

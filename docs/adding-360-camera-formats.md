@@ -1,69 +1,27 @@
-# 360 camera format adapter guide
+# Adding 360 camera formats
 
-この文書は、新しい 360 camera、raw multi-fisheye container、metadata sidecar、または
-stitch 済み panorama を追加する AI / developer の実装契約である。特定メーカーの SDK を
-pipeline backend に据えるための手順ではない。Vendor SDK や公式 app の出力は ground truth、
-互換性確認、任意の derived-product generator としてだけ扱い、物理 sensor の native path と混同しない。
+この文書は新しい 360 camera、raw multi-fisheye container、metadata sidecar、stitched panorama を追加する AI / developer 向け contract である。実装は素材から検証可能な metadata と projection contract だけに依存する。
 
-## 設計原則
+## Principles
 
-Pipeline core が知るものは、source adapter ID、sensor topology、正規化済み camera system、capture、
-motion track だけである。Container box、metadata key、メーカー座標、stream ordinal、sidecar file 名は
-adapter 内で正規化する。
+1. Vendor parsing と geometry core を分離する
+2. Sensor-local pixel coordinates へ正規化する
+3. Rotation 名は `target_from_source`
+4. Rig 外参は `cam_from_rig`
+5. Unit は meter、quaternion は wxyz
+6. Original source は immutable
+7. Unknown value を heuristic default で隠さない
+8. RGB、mask、camera、observation は同じ transform chain を使う
 
-- `lens0` / `lens1` は container 順の opaque sensor ID であり、front / back を意味しない。
-- 回転名は常に `target_from_source`、rig 外参は `cam_from_rig` とする。
-- 長さは meter、gyro は rad/s、時刻は integer nanosecond または明記した second とする。
-- Principal point は sensor-local image 座標へ変換してから core へ渡す。
-- 不明な値を推測 default で埋めない。`unknown` として correction を無効化する。
-- 固定 rig、stitch 済み ERP、virtual pinhole、rolling-shutter correction は別の概念である。
+Device-specific数値は adapter / parsed metadata にだけ置く。Current camera の crop、focal、baseline、shutter readout を別 device の default にしない。複数 device で同じことが specification / test により確認された場合だけ generic core へ昇格する。
 
-現在の code は `domain/camera_system.py` を vendor-neutral calibration boundary とし、
-`insta360/camera_system.py` だけが `offset_v3` の合成画布と軸規約を知る。Source adapter ID は
-closed Enum ではなく `domain/source.py` の registry で検証する。
+## Adapter output
 
-## 三つの artifact boundary
-
-### Source bundle
-
-将来の multi-file adapter は一つの `path` に依存せず、media、calibration、motion、time-map を
-resource として保持する。目標 schema は次の形にする。
+Adapter は source inspection と `camera_system.json` を生成する。
 
 ```json
 {
-  "schema_version": 1,
-  "source_id": "uuid",
-  "adapter": {"id": "vendor.camera_format", "version": "1"},
-  "resources": [
-    {"id": "media-0", "purpose": "media", "path": "capture-a.bin", "ordinal": 0},
-    {"id": "media-1", "purpose": "media", "path": "capture-b.bin", "ordinal": 1},
-    {"id": "calibration", "purpose": "calibration", "path": "capture.json", "ordinal": 2}
-  ],
-  "adapter_options": {}
-}
-```
-
-現行 DB は source ごとに一つの `path` を持つ。単一 container はこのまま追加できるが、dual-file、
-明示 sidecar、外部 time-map を必要とする format を追加する前に `project_source_resource` へ正規化する。
-Runtime compatibility branch を増やさず、DB migration で既存 `path` を `media-0` resource へ移す。
-
-### Inspected source と camera system
-
-Inspection はメーカー依存 metadata をそのまま下流へ渡さない。次を確定する。
-
-- adapter ID / version と probe evidence
-- sensor 数、stable sensor ID、resource / stream mapping
-- decoded size、codec、pixel rotation / mirror
-- 全 frame PTS / duration と sensor 間 skew
-- calibration provenance と camera-system artifact path
-- motion track と shutter capability
-- opaque stitched / stitched with time-map / raw sensors の区別
-
-現行 `camera_system.json` は次の schema を使う。
-
-```json
-{
-  "version": 1,
+  "calibration_source": "vendor_metadata_version",
   "coordinate_system": {
     "handedness": "right",
     "x_axis": "right",
@@ -72,42 +30,38 @@ Inspection はメーカー依存 metadata をそのまま下流へ渡さない�
     "length_unit": "meter",
     "pixel_origin": "top_left_pixel_center_0"
   },
-  "calibration_source": "offset_v3",
-  "reference_sensor_id": "lens0",
+  "reference_sensor_id": "sensor0",
   "sensors": [
     {
-      "id": "lens0",
-      "image_key": "lens0",
+      "id": "sensor0",
+      "image_key": "sensor0",
       "calibration_image_transform": {
-        "reference_width": 5376,
-        "reference_height": 5376,
-        "crop_x": 32.0,
-        "crop_y": 32.0,
-        "crop_width": 5312,
-        "crop_height": 5312
+        "reference_width": 0,
+        "reference_height": 0,
+        "crop_x": 0,
+        "crop_y": 0,
+        "crop_width": 0,
+        "crop_height": 0
       },
       "projection": {
-        "model": "mei",
-        "width": 5312,
-        "height": 5312,
-        "xi": 2.0,
-        "fx": 4278.3,
-        "fy": 4277.33,
-        "cx": 2662.63,
-        "cy": 2649.84,
-        "k1": 0.18366432,
-        "k2": 2.07332635,
-        "k3": -3.27984834,
-        "p1": -0.00005305,
-        "p2": 0.00065176
+        "model": "omni",
+        "width": 0,
+        "height": 0,
+        "xi": 0,
+        "fx": 0,
+        "fy": 0,
+        "cx": 0,
+        "cy": 0,
+        "distortion_model": "radtan_pro",
+        "distortion_parameters": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
       },
       "cam_from_rig": {
-        "rotation_wxyz": [1.0, 0.0, 0.0, 0.0],
-        "translation_xyz": [0.0, 0.0, 0.0]
+        "rotation_wxyz": [1, 0, 0, 0],
+        "translation_xyz": [0, 0, 0]
       },
       "shutter": {
-        "type": "rolling",
-        "readout_time_ms": 21.244001,
+        "type": "unknown",
+        "readout_time_ms": null,
         "scan_direction": "unknown",
         "timestamp_reference": "unknown"
       }
@@ -116,220 +70,311 @@ Inspection はメーカー依存 metadata をそのまま下流へ渡さない�
 }
 ```
 
-`projection.width/height/cx/cy` は各 sensor の local reference image に対する値である。例えば
-二つの sensor が横並びの 10752×5376 calibration canvas を使っていても、sensor 1 の `cx` から
-5376 を引く処理は adapter 内で終える。Core の `imaging/projection.py` に canvas offset を入れない。
+Unsupported intrinsics を別 model と偽装しない。New projection は `domain/camera_system.py` と numerical projection module に明示追加する。
 
-新しい native model が MEI でない場合、`CalibratedSensor` の projection を discriminated union とし、
-camera-model registry に exact pixel↔ray 実装を追加する。未知 model を無理に MEI へ詰め替えない。
+Insta360 は UI / persistence 上で単一 adapter とし、camera model 名から calibration を推測しない。素材内の versioned calibration について、V3 は 5-parameter radtan、V6 は 13-parameter radtan-pro として解釈する。同一素材に複数 version がある場合は最高の対応 version を選び、未知 version しかない場合は inspection を失敗させる。
 
-### Capture manifest
+Container stream ordinal と calibration sensor ordinal を同一視しない。INSV は MP4 stream1 を calibration lens0、stream0 を calibration lens1 として sensor-local artifact へ正規化する。新 adapter も decoded stream から canonical sensor ID への写像を明示し、単なる列挙順を camera identity にしてはならない。
 
-任意 sensor 数へ進む時の canonical capture は、special key ではなく sensor frame array を使う。
+V6 radtan-pro の coefficient order は `k1..k5,p1..p4,s1,s3,s2,s4`。`a=p1+p3·r²`、`b=p2+p4·r²` とした時、水平項は `a·(r²+2x²)+2bxy`、垂直項は `2axy+b·(r²+2y²)` である。Forward と analytic Jacobian は同じ contract を実装する。
+
+## Inspection
+
+Inspection は少なくとも次を記録する。
+
+- adapter id / version
+- media kind
+- sensor count
+- stream codec / dimensions / FPS / time base
+- packet PTS range
+- calibration block version / checksum
+- lens model / image transform
+- physical rig extrinsics
+- exposure / IMU / shutter metadata availability
+- warnings / unsupported reason
+
+Opaque vendor blob は parsed field と raw reference を区別する。Calibration validity が不足する raw format は native reconstruction を開始しない。
+
+## Frame extraction
+
+Multi-sensor video は同じ demux decision から capture を作る。
 
 ```json
 {
-  "capture_index": 12,
-  "source_capture_index": 12,
-  "timestamp_ns": 500000000,
-  "frames": [
-    {
-      "sensor_id": "lens0",
-      "path": "extract_frames/sources/id/lens0/frame_000012.jpg",
-      "source_frame": 12,
-      "pts_ns": 500000000,
-      "duration_ns": 41666667
-    }
-  ]
+  "index": 42,
+  "source_frame": 420,
+  "timestamp_sec": 17.5,
+  "sensor0": "...",
+  "sensor1": "...",
+  "score": {
+    "rolling_shutter_motion_deg": 0.2
+  }
 }
 ```
 
-現行 manifest は `lens0` / `lens1` / `image` key を残している。三 sensor 以上、dual-file、sensor ごとの
-time offset を追加する前に、Prepare、preview、valid-region editor をこの array schema へ一度に移行する。
-Runtime で旧 key と新 key の両方を読む分岐は作らず、artifact migration と stage invalidation を行う。
+Requirements:
 
-## Adapter 実装手順
+- Packet PTS を presentation order で扱う
+- Sensor skew を測り、許容値を超えた capture を error / reject
+- Frame selection は全 required sensor の worst quality を使う
+- Video source だけ decode、image source は original still を直接登録
+- Cancellation / progress は decode、score、selection、write の各 phase を報告
 
-### 1. Probe と source identity
+Exposure timestamp がある場合、encoded PTS と exposure clock を混同しない。
 
-拡張子だけで判定しない。Magic、container brand、metadata signature、stream topology を読み、confidence と
-evidence を返す。別 format と曖昧なら自動選択せず UI に候補を出す。Wrong extension の正しい file を検出し、
-同じ拡張子の無関係な MP4 を拒否する test を作る。
+## Calibration image transform
 
-Adapter は sensor order を stream ordinal だけで front / back と命名しない。Selfie mode、mirror flag、
-camera rotation、旧機種の dual-file naming を evidence から確定する。確定できなければ `lens0` のような
-opaque ID を保つ。
-
-### 2. PTS と sensor pairing
-
-`frame_index / fps` は VFR、non-zero start、gap、B-frame、drop frame で誤る。現行 extractor は
-container packet の PTS / duration を読み、B-frame を PTS で presentation 順へ戻して全 sensor の sequence と
-frame count を検証する。新 adapter も次を満たす。
-
-- PTS は各 stream で strictly increasing
-- 全 required sensor frame が一 capture に揃うか、atomic failure
-- 許容 skew を adapter contract に明記
-- Selected capture の時刻は実 PTS
-- Source hash、adapter version、resource hash が stage invalidation に入る
-
-Frame quality は全 required sensor で評価する。現行 dual-fisheye は sharpness、exposure、feature count の
-minimum と optical-flow motion の maximum を使う。一方だけ blurred / clipped の frame を選ばない。
-
-### 3. Intrinsics と pixel transform
-
-Metadata の reference canvas から decoded sensor image までの crop、scale、90° rotation、mirror を式として
-記録し、principal point と distortion domain に同じ変換を適用する。非正方、off-center、rotated fixture を
-必ず用意する。
-
-Projection test は center、四象限、valid boundary で `pixel -> ray -> pixel` を検証する。Forward hemisphere
-だけを consumer が扱える場合、physical circle をそのまま通さず ray angle と交差させる。
-
-COLMAP と LFStudio の同名 model が同じ式とは限らない。現在の `THIN_PRISM_FISHEYE` は COLMAP と LFStudio
-v0.5.3 で tangential / prism の適用位置が異なるため、両 consumer residual を同時に最小化し、個別 RMS / max
-を記録する。Consumer 変換 artifact は native calibration provenance と分離する。
-
-Forward 式だけでなく `ray -> pixel -> ray` を consumer 実装そのもので検証する。Stock LFStudio の
-THIN_PRISM inverse は fixed-point iteration が前回 UV から delta を繰り返し減算するため forward と一致せず、
-non-radial 項が大きい sensor で円を非対称に変形する。Camera metadata だけを OPENCV_FISHEYE approximation
-へ交換してはいけない。Sensor ごとの approximation error が異なると cross-sensor ray がずれる。修正版 build を
-保証できない場合は、RGB、mask、2D observation と camera を同じ inverse map で一回だけ再投影する。
-原因箇所は [LFStudio v0.5.3 Cameras.cuh](https://github.com/MrNeRF/LichtFeld-Studio/blob/d8c50c6a3e2273cb74130a6e9023de8d068af52d/src/training/rasterization/gsplat/Cameras.cuh#L1147-L1160)。
-正しい fixed point は毎回 `uv = uv_distorted - delta(uv)` とし、元の observed UV を保持する。Patched build の
-roundtrip test が通るまで `undistort=true` へ逃げない。この経路にも prism packing bug がある。Repository の
-source patch は [`scripts/patches/lichtfeld-thin-prism-inverse.patch`](../scripts/patches/lichtfeld-thin-prism-inverse.patch)。
-
-### 3.1 Raw fisheye の mandatory consumer rectification
-
-Raw fisheye adapter は `prepare_images` の直後に mandatory `rectify_fisheye` Step を通す。UI や adapter option で
-無効化できない。Perspective / ERP source は同じ Step を artifact passthrough として通過する。
+Metadata calibration canvas と decoded sensor image が異なる場合、transform を必ず明示する。
 
 ```text
-target OPENCV pixel
-  -> target OPENCV_FISHEYE ray
-  -> source native MEI pixel
-  -> one Lanczos sample from decoded RGB
+reference sensor canvas
+  -> crop / window
+  -> decoded sensor-local image
+  -> optional rectification target
 ```
 
-要求事項:
+Principal point と focal を同じ順序で transform する。Half-pixel convention を混在させない。Crop は rig extrinsics を変更しない。
 
-- target は source と同じ width / height、forward-ray domain とする。
-- RGB は一回だけ backward resample し、PNG へ保存する。
-- Physical circle と ordered add/subtract custom region は同じ map で nearest resample し、bitmap validity にする。
-- Camera group と rig config は target OPENCV parameters へ同時更新する。
-- SAM、feature extraction、matching、SfM、BA、dense seed、export は rectified catalog だけを読む。
-- Pose、`cam_from_rig`、timestamp、camera center は変更しない。
-- Consumer camera だけを交換し、source RGB をそのまま残す実装は禁止する。
+Validation:
 
-この位置で変換すれば feature / 2D observation は最初から target pixel coordinate で生成されるため、後段で
-observation を移し替える必要がない。Export 時の補修より単純で、COLMAP と trainer が同じ ray contract を共有する。
+- reference corner / center mapping
+- round-trip pixel error
+- scaled resolution
+- odd dimensions
+- asymmetric principal point
+- sensor order swap failure
 
-### 4. Rig extrinsics
+## Projection
 
-各 transform の向き、quaternion order、translation の意味を source code permalink と real fixture で確認する。
-`cam_from_rig` の camera center は `C = -R^T t` である。Reference sensor は identity に正規化し、他 sensor は
-full 6DoF relative transform を使う。理想 180° や baseline 軸だけへ丸めない。
+Projection module は vectorized forward / inverse を提供する。
 
-Native fisheye と derived pinhole は同じ camera system を読む。Pinhole 側で別の Euler convention を再実装しない。
-現在の code は native / pinhole とも canonical quaternion から rotation と camera center を導出する。
+```text
+project(ray, intrinsics) -> pixel + validity
+unproject(pixel, intrinsics) -> unit ray + validity
+```
 
-### 5. Shutter と motion
+Tests:
 
-Readout magnitude だけでは rolling-shutter correction を実行できない。Sensor ごとに最低でも次が必要である。
+- optical axis
+- azimuth signs
+- 0° / edge angles
+- distortion monotonicity
+- forward/inverse round trip
+- source crop scaling
+- invalid / non-finite domain
+
+Camera model approximation の RMS だけを採用条件にしない。Maximum error、azimuth distribution、consumer implementation difference も測る。
+
+Scene View の selected camera guide は model family へ対応させる。Perspective は rectangular frustum、`*FISHEYE` は circular view boundary、`EQUIRECTANGULAR` は spherical guide とする。Native fisheye Inspector preview は circular clip、reprojected pinhole / ERP は rectangular layout を保つ。Camera pick は device-independent な screen pixel distance で判定し、world scale を threshold に使わない。新 camera model を追加する場合は classification、blank-click deselection、pick boundary の UI test も更新する。
+
+## Internal consumer normalization
+
+Raw non-consumer projection は `rectify_fisheye` artifact を独立した user-visible Step として生成する。下流 Stage から直接実行した場合も dependency plan が先に生成するため、adapter が normalization を bypass することはできない。
+
+```text
+target consumer pixel
+  -> target camera ray
+  -> source calibrated pixel
+  -> backward image sample
+```
+
+Contract:
+
+- Same-resolution one-pass resample
+- RGB: Lanczos4
+- Validity / hand-painted region: nearest
+- Camera group と rig config を同時更新
+- Pose、timestamp、sensor center は維持
+- SAM、features、matching、SfM、dense seed、export は rectified catalog を読む
+- Matching は同一 capture の sensor pair について、`cam_from_rig` の optical axis 間隔が両 consumer-valid half-angle の和を超える時だけ edge を除外する
+- Adapter option で bypass しない
+
+Camera metadata だけを consumer model に交換し、source pixels を残す方法は禁止。Image と camera ray が一致しないためである。
+
+## More-than-180° fisheye
+
+COLMAP 4.1.1 と LFStudio v0.5.3 の `OPENCV_FISHEYE` は forward hemisphere implementation である。
+
+- Projection は `z <= 0` を reject
+- Default unprojection は `z > 0`
+- Consumer domain は half-angle 90° 未満
+
+Physical lens が 180° を超える場合でも、stock consumer へ back-facing ray を渡さない。UI は native dual-fisheye + Global Mapper selection に warning を表示する。
+
+Current experiment では physical overlap を使える COLMAP extension が 86 / 96 same-capture pair と 2,862 inliers を作ったが、GLOMAP が later stages で stereo track を保持しなかった。したがって extension は production dependency ではない。
+
+Future adapter は次を別々に記録する。
+
+- physical sensor coverage
+- consumer-valid forward coverage
+- removed overlap / blind region
+- training-valid region
+
+Outer overlap を SfM-only auxiliary constraint に使う場合、final LFStudio export から auxiliary camera / back-facing pixel を除外し、stock loader compatibility を smoke test する。
+
+## Rig extrinsics
+
+`cam_from_rig` は:
+
+```text
+p_cam = R_cam_from_rig * p_rig + t_cam_from_rig
+C_rig = -R^T t
+```
+
+Reference sensor は identity に正規化する。他 sensor は full 6DoF を保持し、ideal 180° rotation や単一 baseline axis へ丸めない。
+
+Tests:
+
+- Unit quaternion
+- Camera-center baseline
+- Sensor order
+- Same capture frame membership
+- Non-overlapping same-capture sensor edge is rejected; overlapping caps and different captures are retained
+- Relative rotation / translation reproduction after mapper / export
+- `images.bin` pose consistency
+
+Fixed rig が model に書かれていることは metric scale evidence ではない。同じ world point を同 capture の複数 sensor が観測する必要がある。
+
+## Rolling shutter and synchronization
+
+Shutter fields:
 
 - global / rolling / unknown
-- readout duration
-- top-to-bottom / bottom-to-top / left-to-right / right-to-left
-- frame timestamp が exposure start / center / end のどれか
-- encoded crop と physical sensor scan coordinate の関係
-- `R_rig_from_imu`、gyro bias、video↔IMU clock offset / drift
+- readout time
+- scan direction
+- exposure start / center / end reference
+- sensor exposure offset
+- IMU-to-rig rotation
+- gyro bias
+- video / IMU offset and drift
 
-これらが欠ける場合、現在と同様に high-motion frame risk filtering だけを使い、status を `corrected` にしない。
-Generic raw-sensor correction を実装する場合は独立 Step を extraction 後、SAM / feature 前に置き、各 sensor を
-同一 capture-center pose の同一 native grid へ一回だけ resample する。Frame 間 stabilization は行わない。
+Unknown scan direction で row dewarp を default-enable しない。Risk filter と correction を区別する。Correction を実装する場合、source raw grid で行い、後段 rectification と不要な多重 resample を避ける。
 
-Opaque stitched ERP に単純な row-time model を適用してはいけない。ERP の longitude ごとに元 sensor と scan row
-が異なり、時刻は通常 `t(u,v)` の二次元 field になる。Stitch mesh / time-map が無い場合は diagnostics と frame
-rejection だけを提供する。
+Validation は static、constant rotation、reversed scan、zero readout、clock drift を含む。
 
-Production reference:
+## Valid region and object masks
 
-- [telemetry-parser Insta360 parser](https://github.com/AdrianEddy/telemetry-parser/blob/77a3b810a0e0f64688a90546c5aaf24c9dba00bd/src/insta360/record.rs#L94-L178)
-- [telemetry-parser orientation mapping](https://github.com/AdrianEddy/telemetry-parser/blob/77a3b810a0e0f64688a90546c5aaf24c9dba00bd/src/insta360/mod.rs#L149-L176)
-- [Gyroflow rolling-shutter row timestamps](https://github.com/gyroflow/gyroflow/blob/b5e8828f82c150676e48a7c2e3db39c97392f606/src/core/stabilization/frame_transform.rs#L220-L257)
-- [Gyroflow visual RS synchronization](https://github.com/gyroflow/gyroflow/blob/b5e8828f82c150676e48a7c2e3db39c97392f606/src/core/synchronization/find_offset/rs_sync.rs#L74-L180)
-- [Gyroflow iterative source-row ST map](https://github.com/gyroflow/gyroflow/blob/b5e8828f82c150676e48a7c2e3db39c97392f606/src/core/stmap.rs#L89-L103)
+ソース有効領域は source ID と sensor ID ごとに独立する。魚眼 source は `lens0` / `lens1` の中心固定円を持ち、既定・最大半径は `r=0.5`。UI の slider・drag と API validation は同じ上限を使う。保存済みの超過半径は起動時に `0.5` へ補正し、それ以外の設定・brush は保持する。Perspective / ERP source は `main` の全画像領域から開始し、円形制限を持たない。いずれも add/subtract brush を保存できる。
 
-### 6. Valid region、mask、export
+保存先は `<project>/source_regions.json`。`views` の各値は `kind: circle | full` と `operations` を持ち、円形の場合だけ `cx/cy/r` を含む。Brush の `x/y` は EXIF 表示向きを適用した画像の幅/高さに対する比、半径 `r` は画像幅に対する比である。`stroke_id` は pointer down から up までの一筆を識別し、Undo は一筆全体を戻す。旧 `fisheye_regions.json` は起動時に保存済み半径・brush を維持して新形式へ移行する。
 
-Valid region は source / sensor ごとに保持し、camera model の ray domain と user-adjusted physical region の積を
-使う。SAM は object context のため full decoded image を入力できるが、出力 mask は geometric validity と交差する。
-比較用の基準円は image center に固定し、中心 offset を intrinsics の代用にしない。任意形状は resolution-independent
-な ordered circle-stamp operation (`add` / `subtract`) として sensor ごとに保存し、mask renderer、bounding box、
-training crop が同じ順序で適用する。
+UI の source selector は主素材・補助素材の全 source を列挙し、選択した source の frame だけをプレビューする。切替中の未保存 draft は source ごとに保持する。Step の完了判定は有効 source の `saved && !needs_review` を集計し、未設定・設定済み数・全件完了を表示する。Save の応答を editor と Step の共通 query cache へ反映し、保存直後に更新する。無効 source と未保存 draft は完了判定に含めない。除外範囲は半透明黒に明るいピンクの斜線と輪郭を重ね、暗部でも識別できる。輪郭は最終的な除外 mask から作り、重複 brush の内部境界や add で復元した部分には残さない。この表示は保存・出力 mask の値に影響しない。Frame がない状態でも魚眼の半径を保存できる。領域変更の保存は `prepare_images` 以降を無効化する。
 
-Geometry correction、crop、resize を追加した場合、RGB、feature mask、training mask、principal point、2D
-observation を同じ transform で更新する。Mask は nearest、image は一回の高品質 resample を使う。
+Native image には解析的な valid region を適用し、魚眼正規化や pinhole 再投影では RGB と同じ remap で bitmap validity を生成する。Source validity は SAM3 の有効/無効とは独立し、COLMAP feature mask、dense initialization、training export mask に適用する。
 
-Export は registered image だけを含め、LFStudio loader roundtrip で camera center と representative pixel ray を
-確認する。`rigs.bin` / `frames.bin` を trainer が読むと仮定せず、`images.bin` に焼き込まれた pose を検証する。
+Screen-space artifact の例:
 
-## Error pattern の切り分け
+- lens flare / blue ring
+- camera body
+- hand / operator attached to camera
+- stitching border
 
-| Pattern | 主な原因 |
-|---|---|
-| 静止 / low-gyro frame でも radius / azimuth に固定した residual | Intrinsics / projection model |
-| Sensor 境界で一定の spherical offset、gyro と無関係 | Rig extrinsics |
-| Signed scan coordinate × angular velocity に比例し、回転方向で符号反転 | Rolling shutter |
-| Frame 全体が angular velocity と相関して回転 | IMU clock offset |
-| Seam で不連続または局所 mesh pattern | Stitching |
-| Rotational correction 後も近距離だけ残る | Translational rolling shutter / depth dependence |
+これらは world geometry ではないため feature extraction から除外する。Local artifact に対して uniform radius を過剰に縮めない。Object SAM mask は physical validity の後に合成する。
 
-Held-out frame で fixed lens basis と rolling-shutter basis のどちらが residual を説明するか比較する。Calibration に
-使った frame と評価 frame を混ぜない。
+Per-image coverage、threshold exceed、detections は manifest に保存し、Inspector が live partial manifest から読む。Coverage exceed を一画像一行の Console warning にしない。Progress は `kind=progress` の image / prompt ticks で駆動し、diagnostic record と log verbosity を結合しない。
 
-## 必須 test matrix
+## Mapper selection
 
-- Probe: magic、wrong extension、missing / duplicate resource、ambiguous format
-- Timing: non-zero start、VFR、B-frame、drop / duplicate、unequal sensor count、allowed skew
-- Decode: hardware / software pixel tolerance、atomic multi-sensor capture
-- Projection: grid roundtrip、boundary、non-square crop / scale / rotation / mirror
-- Rig: known baseline / direction、quaternion norm / rotation determinant、real overlap epipolar residual
-- Shutter: all four scan directions、timestamp reference、offset / drift、identity / no-motion
-- Selection: sensor 1 だけ blurred / clipped の fixture を reject
-- Pipeline: inspect → extract → prepare → mandatory rectify → both masks → feature → match → reconstruct → export
-- UI: 全 sensor preview、valid-region edit、source group、localized error / statistics
-- Trainer: LFStudio load、camera center / ray roundtrip、短い training smoke
-- Safety: cancel は temporary artifact だけを消し、original resource を保持
+Mapper selection は user-visible で、warning は自動変更を行わない。
 
-Real golden data は少なくとも current short X5、Parktest、generic official ERP、perspective control、旧 dual-file、
-selfie / reversed mapping、synthetic VFR rig を含める。
+### Incremental
 
-## 現在までの実測 evidence
+Calibrated multi-camera frame を generalized pose として順次登録し、full correspondence graph から complete / merge / retriangulate する。Current dual-fisheye recommendation。
 
-- 同一個体の short clip と Parktest は calibration ID `197632` と完全に同じ `offset_v3` を持つ。
-- 両 file の window crop は 5376²→5312²。旧 5376→3840 direct scale は focal を 1.204819% 過小評価した。
-  Low-motion single-lens pilot で crop 修正は lens0 angular median を 0.342°→0.108°へ改善した。
-- Full relative quaternion は理想 180° ではなく約
-  `[-0.0017243, -0.0019477, 0.9999962, -0.0008950]`、baseline は約 32.273 mm。
-- MEI → joint THIN_PRISM fit は lens0 で COLMAP / LFStudio RMS 0.0396 / 0.0421 px、lens1 で
-  0.1029 / 0.1112 px。ただし stock LFStudio inverse bug は lens1 で training scale maximum 約 11.4 px となる。
-- Readout は 21.244001 ms。Short selected frame の frame 内回転は median 約 0.423°、Parktest は
-  median 約 0.411°、P95 約 1.022°、maximum 8.482°。Risk filtering は correction ではない。
-- Overlap feature だけで rig 回転を上書きした実験は parallax / dynamic object に引かれ、cross-sensor track と
-  SfM residual を悪化させた。Metadata extrinsics を保持する。
-- Official app stitch は optical-flow / rolling-shutter warp を含むため、raw lens と ERP の単純な global rotation
-  difference を subpixel external calibration として使わない。
-- Current mandatory rectification は 192×3840² image を 74秒で PNG 化し、285 MB→1.89 GB。二回補間を含む
-  roundtrip でも lens0 / lens1 は 42.02 / 40.47 dB、MAE 0.445 / 0.390。Same-capture COLMAP は points
-  28,060→29,974、mean reprojection 1.105→1.080 px、全192 image registered を維持した。
+### Global / GLOMAP
 
-## Definition of done
+Global rotation / position を高速に解く。Perspective / ERP / strongly connected rig graph に有効。Native >180° dual-fisheye は unsupported overlap と sensor separation risk を UI で警告する。
 
-新 adapter は sample が読み込めるだけでは完了しない。Adapter 固有 code が probe / metadata / extraction mapping
-へ隔離され、core にメーカー名分岐が増えていないこと、全 PTS / sensor / projection / rig / shutter test が通ること、
-real UI path から export と LFStudio loader smoke が通ること、held-out geometry report が既存 adapter を退行させない
-こと、raw fisheye の rectification を bypass できないことを満たして初めて default-enabled とする。
+Acceptance は registration count だけでなく:
 
-[Insta360 Desktop Media SDK](https://github.com/Insta360Develop/Desktop-MediaSDK-Cpp) のような proprietary
-SDK は、公式 stitch との A/B や optional derived ERP generator に使う余地はあるが、この application の
-native backend、必須 dependency、calibration source of truth にはしない。
+- per-sensor observations
+- cross-sensor 3D points
+- same-capture shared points
+- trajectory continuity
+- baseline / path ratio
+- per-sensor reprojection residual
+- free-view thin edge / far landmark visual
+
+を記録する。
+
+## Export contract
+
+Export は loader-ready folder を生成する。
+
+```text
+images/
+masks/
+sparse/0/
+preview/
+train_configs/
+export_manifest.json
+```
+
+Requirements:
+
+- Registered images only
+- Image / mask dimensions match camera
+- Crop offset を principal point / observation へ適用
+- `images.bin` pose が canonical
+- Camera model が LFStudio supported set に含まれる
+- Back-facing / auxiliary SfM camera を final training set に残さない
+- Rectified PNG は pixel crop、実 JPEG だけ jpegtran MCU crop
+- Per-source registration と warnings を manifest に保存
+
+## New adapter checklist
+
+### Parse
+
+- [ ] adapter registry id
+- [ ] stream / image enumeration
+- [ ] true timestamps
+- [ ] calibration version and checksum
+- [ ] sensor-local crop
+- [ ] projection intrinsics
+- [ ] full rig extrinsics
+- [ ] shutter metadata
+
+### Geometry
+
+- [ ] forward / inverse tests
+- [ ] crop / scale tests
+- [ ] rig center / rotation tests
+- [ ] physical vs consumer FOV report
+- [ ] same-capture sensor validation
+
+### Pipeline
+
+- [ ] inspect
+- [ ] video-only extraction
+- [ ] physical region
+- [ ] internal mandatory normalization artifact
+- [ ] both SAM Steps
+- [ ] feature / matching
+- [ ] both mapper choices and warning behavior
+- [ ] conditional sparse cleanup preserves near points and well-constrained far points
+- [ ] gravity / metric / scene-coordinate alignment
+- [ ] export loader smoke
+
+### Safety
+
+- [ ] original media survives clear / cancel
+- [ ] corrupt input raises
+- [ ] no device-local absolute path
+- [ ] no vendor constant in generic core
+- [ ] no silent heuristic calibration fallback
+
+## Evidence record
+
+When a new format is accepted, document:
+
+- camera / firmware / metadata version
+- calibration transform
+- projection round-trip metrics
+- sensor overlap and consumer FOV
+- timing / shutter evidence
+- feature / matching / mapper metrics
+- LFStudio loader result
+- known limitations
+- source reference URLs with commit permalinks
+
+Local experiment paths、private media names、temporary repository paths は documentation に書かない。

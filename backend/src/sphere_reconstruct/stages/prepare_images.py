@@ -6,6 +6,7 @@ import json
 import math
 import os
 import shutil
+from dataclasses import asdict
 from pathlib import Path
 
 import numpy as np
@@ -17,7 +18,7 @@ from ..domain.artifacts import FileRef, StageManifest
 from ..domain.camera_system import CalibratedCameraSystem, SensorExtrinsic
 from ..domain.pipeline_state import StageName
 from ..domain.source import Projection, SourceRole
-from ..imaging import fisheye_region, projection, rendering
+from ..imaging import projection, rendering, source_region, valid_region
 from ..infrastructure.filesystem import sha256_file
 from ..pipeline.manifest import register
 from ..pipeline.stage import ProgressSpan, Stage, StageContext, new_manifest
@@ -31,7 +32,7 @@ FULL_FRAME_DIAGONAL_MM = math.hypot(36.0, 24.0)
 @register
 class PrepareImages(Stage):
     name = StageName.PREPARE_IMAGES
-    impl_version = "3.2"
+    impl_version = "4.1"
 
     def collect_inputs(self, ctx: StageContext) -> list[FileRef]:
         candidates = [
@@ -39,7 +40,7 @@ class PrepareImages(Stage):
             ctx.project_dir / "manifests" / "extract_frames.json",
             ctx.project_dir / "inspect_source" / "sources.json",
             ctx.project_dir / "extract_frames" / "manifest_frames.json",
-            fisheye_region.region_path(ctx.project_dir),
+            source_region.region_path(ctx.project_dir),
             *sorted((ctx.project_dir / "inspect_source" / "sources").glob("*/camera_system.json")),
         ]
         return [
@@ -69,7 +70,7 @@ class PrepareImages(Stage):
             raise RuntimeError("inspect_source and extract_frames must run before prepare_images")
         frames_document = json.loads(frames_path.read_text(encoding="utf-8"))
         inspection_document = json.loads(inspections_path.read_text(encoding="utf-8"))
-        if int(inspection_document["version"]) != 3:
+        if int(inspection_document["version"]) != 4:
             raise RuntimeError("source inspection artifact を現在の adapter contract で再生成してください")
         inspections = {
             source["id"]: source
@@ -135,7 +136,7 @@ class PrepareImages(Stage):
             outputs.append(_file_ref(rig_file, ctx, "application/json"))
             rig_path = "rig_config.json"
         catalog = {
-            "version": 2,
+            "version": 3,
             "reconstruction_mode": ctx.params["reconstruction_mode"],
             "primary_source_id": primary["id"],
             "sources": [
@@ -190,18 +191,13 @@ class PrepareImages(Stage):
         compatible_approximations = [
             projection.approximate_opencv_fisheye(intr) for intr in intrinsics
         ]
-        if any(approximation.maximum_error_px > 1.0 for approximation in approximations):
-            raise RuntimeError(
-                f"source {source['label']}: MEI → THIN_PRISM_FISHEYE の近似誤差が 1 px を超えました。"
-                "この校正を native mode の default にできません"
-            )
         sensors = tuple(sensor.id for sensor in system.sensors)
         params_by_sensor = {
             sensor: list(approximations[index].params) for index, sensor in enumerate(sensors)
         }
         prefix = f"sources/{source['id']}/"
         group_ids = {sensor: f"{source['id']}:native-fisheye:{sensor}" for sensor in sensors}
-        region = fisheye_region.load_region(ctx.project_dir, source["id"])
+        region = source_region.load_region(ctx.project_dir, source["id"], source["projection"])["views"]
         maximum_theta_rad = math.pi / 2 * 0.995
         images = []
         image_names = {sensor: [] for sensor in sensors}
@@ -273,7 +269,7 @@ class PrepareImages(Stage):
             ),
             "outputs": [],
             "calibration": {
-                "method": f"{system.calibration_source}_mei_to_thin_prism_fisheye",
+                "method": f"{system.calibration_source}_omni_to_thin_prism_fisheye",
                 "forward_hemisphere_only": True,
                 "rolling_shutter_time_ms": system.maximum_rolling_shutter_readout_ms,
                 "rolling_shutter_correction": "risk_filtered",
@@ -339,6 +335,9 @@ class PrepareImages(Stage):
                 intrinsics[lens],
                 extra_rotation=rotations[lens],
             ),
+            remap=lambda view, lens, _size: rendering.build_remap(
+                view, intrinsics[lens], extra_rotation=rotations[lens]
+            ),
             progress_span=progress_span,
         )
 
@@ -346,6 +345,7 @@ class PrepareImages(Stage):
         self, ctx: StageContext, source: dict, progress_span: ProgressSpan
     ) -> dict:
         group_id = f"{source['id']}:equirectangular"
+        region = source_region.load_region(ctx.project_dir, source["id"], source["projection"])["views"]["main"]
         images = []
         names = []
         for frame_number, frame in enumerate(source["frames"], 1):
@@ -369,7 +369,7 @@ class PrepareImages(Stage):
                     camera_group_id=group_id,
                     sensor_id="main",
                     projection_name="equirectangular",
-                    valid_region={"kind": "full"},
+                    valid_region=region,
                 )
             )
             progress_span.tick(
@@ -410,6 +410,7 @@ class PrepareImages(Stage):
             render=lambda frame, view, _lens: rendering.render_perspective_from_equirect(
                 _frame_image_path(ctx.project_dir, frame), view
             ),
+            remap=lambda view, _lens, size: rendering.build_equirect_remap(view, *size),
             progress_span=progress_span,
         )
 
@@ -420,6 +421,7 @@ class PrepareImages(Stage):
         *,
         lenses: list[dict],
         render,
+        remap,
         progress_span: ProgressSpan,
     ) -> dict:
         views = projection.cubemap_views(size=ctx.params["size"], fov_deg=ctx.params["fov_deg"])
@@ -428,6 +430,10 @@ class PrepareImages(Stage):
         images = []
         names = []
         outputs = []
+        regions = source_region.load_region(ctx.project_dir, source["id"], source["projection"])["views"]
+        validity_paths: dict[tuple, str] = {}
+        physical_masks: dict[tuple, np.ndarray] = {}
+        cv2 = rendering._cv2()
         total = len(source["frames"]) * len(views) * len(lenses)
         completed = 0
         for frame in source["frames"]:
@@ -441,7 +447,31 @@ class PrepareImages(Stage):
                         / f"frame_{frame['index']:06d}"
                         / f"{view.name}_lens{lens_index}.jpg"
                     )
-                    image, _statistics = render(frame, view, lens_index)
+                    image, statistics = render(frame, view, lens_index)
+                    sensor = f"lens{lens_index}" if source["projection"] == "dual_fisheye" else "main"
+                    mask_key = (sensor, *statistics.src_size)
+                    validity_key = (view.name, *mask_key)
+                    if validity_key not in validity_paths:
+                        if mask_key not in physical_masks:
+                            physical_masks[mask_key] = valid_region.render_mask(
+                                regions[sensor], *statistics.src_size
+                            )
+                        map_x, map_y, geometric_validity = remap(view, lens_index, statistics.src_size)
+                        projected_mask = cv2.remap(
+                            physical_masks[mask_key], map_x, map_y,
+                            interpolation=cv2.INTER_NEAREST,
+                            borderMode=cv2.BORDER_WRAP if sensor == "main" else cv2.BORDER_CONSTANT,
+                            borderValue=0,
+                        )
+                        projected_mask = ((projected_mask > 0) & geometric_validity).astype(np.uint8)
+                        mask_path = (
+                            ctx.stage_out_dir / "validity" / source["id"]
+                            / f"{view.name}_{sensor}_{statistics.src_size[0]}x{statistics.src_size[1]}.png"
+                        )
+                        mask_path.parent.mkdir(parents=True, exist_ok=True)
+                        Image.fromarray(projected_mask * 255).save(mask_path)
+                        outputs.append(_file_ref(mask_path, ctx, "image/png"))
+                        validity_paths[validity_key] = _final_relpath(mask_path, ctx)
                     rendering.write_jpeg(image, output_path, quality=92)
                     name = f"{prefix}{view.name}_lens{lens_index}/frame_{frame['index']:06d}.jpg"
                     names.append(name)
@@ -459,6 +489,7 @@ class PrepareImages(Stage):
                             valid_region={"kind": "full"},
                         )
                     )
+                    images[-1]["valid_mask_path"] = validity_paths[validity_key]
                     outputs.append(_file_ref(output_path, ctx, "image/jpeg"))
                     completed += 1
                     progress_span.tick(
@@ -469,7 +500,7 @@ class PrepareImages(Stage):
                     )
         focal = (ctx.params["size"] / 2.0) / math.tan(math.radians(ctx.params["fov_deg"]) / 2.0)
         params = [focal, focal, ctx.params["size"] / 2.0, ctx.params["size"] / 2.0]
-        cameras = colmap_rig.compute_rig_cameras(views, lenses, prefix=prefix)
+        cameras = colmap_rig.compute_rig_cameras([asdict(view) for view in views], lenses, prefix=prefix)
         return {
             "images": images,
             "camera_groups": [
@@ -489,6 +520,7 @@ class PrepareImages(Stage):
         }
 
     def _prepare_perspective(self, ctx: StageContext, source: dict, progress_span: ProgressSpan) -> dict:
+        region = source_region.load_region(ctx.project_dir, source["id"], source["projection"])["views"]["main"]
         groups_by_signature: dict[tuple, dict] = {}
         images = []
         outputs = []
@@ -534,7 +566,7 @@ class PrepareImages(Stage):
                     camera_group_id=group["id"],
                     sensor_id="main",
                     projection_name="perspective",
-                    valid_region={"kind": "full"},
+                    valid_region=region,
                 )
             )
             outputs.append(_file_ref(final_path, ctx, "image/jpeg"))

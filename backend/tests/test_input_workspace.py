@@ -1,4 +1,4 @@
-"""Mixed-camera image catalog を InputSpec v2 へ変換する契約を検証する。"""
+"""Mixed-camera image catalog を InputSpec v3 へ変換する契約を検証する。"""
 
 import json
 
@@ -6,6 +6,80 @@ import pytest
 from PIL import Image as PilImage
 
 from sphere_reconstruct.colmap import input_workspace
+
+
+def test_input_spec_counts_multi_sensor_capture_as_one_mapper_frame():
+    spec = input_workspace.InputSpec(
+        version=3,
+        reconstruction_mode="native_fisheye",
+        image_count=3,
+        source_count=2,
+        primary_source_id="rig",
+        primary_image_names=["front.jpg", "back.jpg"],
+        sources=[],
+        images=[
+            {"name": "front.jpg", "source_id": "rig", "capture_index": 7, "sensor_id": "front"},
+            {"name": "back.jpg", "source_id": "rig", "capture_index": 7, "sensor_id": "back"},
+            {"name": "phone.jpg", "source_id": "phone", "capture_index": 0, "sensor_id": "main"},
+        ],
+        feature_batches=[],
+        image_path="images",
+        mask_path=None,
+        feature_masks_enabled=False,
+        rig_config_path="rig_config.json",
+        refine_intrinsics=False,
+        refine_rig=False,
+        multiple_models=False,
+    )
+
+    assert spec.frame_count == 2
+
+
+def test_hydrate_timestamps_migrates_only_missing_legacy_fields(tmp_path, monkeypatch):
+    spec = input_workspace.InputSpec(
+        version=3,
+        reconstruction_mode="perspective",
+        image_count=3,
+        source_count=2,
+        primary_source_id="video",
+        primary_image_names=[],
+        sources=[],
+        images=[
+            {"name": "video/old.jpg", "source_id": "video", "capture_index": 0, "sensor_id": "main"},
+            {"name": "photos/still.jpg", "source_id": "photos", "capture_index": 0, "sensor_id": "main"},
+            {
+                "name": "photos/preserved.jpg",
+                "source_id": "photos",
+                "capture_index": 1,
+                "sensor_id": "main",
+                "timestamp_sec": None,
+            },
+        ],
+        feature_batches=[],
+        image_path="images",
+        mask_path=None,
+        feature_masks_enabled=False,
+        rig_config_path=None,
+        refine_intrinsics=False,
+        refine_rig=False,
+        multiple_models=False,
+    )
+    monkeypatch.setattr(
+        input_workspace.prepared_images,
+        "load_catalog",
+        lambda _project_dir: {
+            "images": [
+                {"name": "video/old.jpg", "timestamp_sec": 12.5},
+                {"name": "photos/still.jpg", "timestamp_sec": None},
+                {"name": "photos/preserved.jpg", "timestamp_sec": 99.0},
+            ]
+        },
+    )
+
+    hydrated = input_workspace.hydrate_timestamps(tmp_path, spec)
+
+    assert [image["timestamp_sec"] for image in hydrated.images] == [12.5, None, None]
+    assert "timestamp_sec" not in spec.images[0]
 
 
 def _write_feature_masks(project, names):
@@ -116,6 +190,7 @@ def test_mixed_workspace_materializes_batches_masks_and_rig(tmp_path):
     assert spec.version == 3
     assert spec.feature_masks_enabled is True
     assert spec.image_count == 2
+    assert spec.frame_count == 2
     assert spec.source_count == 2
     assert [batch.camera_model for batch in spec.feature_batches] == [
         "OPENCV_FISHEYE",
@@ -139,9 +214,7 @@ def test_workspace_without_feature_masks_keeps_only_physical_valid_regions(tmp_p
         "version": 1,
         "reconstruction_mode": "native_fisheye",
         "primary_source_id": "primary",
-        "sources": [
-            {"id": "primary", "label": "360", "role": "primary", "projection": "dual_fisheye"}
-        ],
+        "sources": [{"id": "primary", "label": "360", "role": "primary", "projection": "dual_fisheye"}],
         "rig_config_path": None,
         "camera_groups": [],
         "images": [
@@ -189,9 +262,7 @@ def test_workspace_with_full_regions_and_feature_masks_disabled_has_no_mask_path
         "version": 1,
         "reconstruction_mode": "native_fisheye",
         "primary_source_id": "phone",
-        "sources": [
-            {"id": "phone", "label": "Phone", "role": "primary", "projection": "perspective"}
-        ],
+        "sources": [{"id": "phone", "label": "Phone", "role": "primary", "projection": "perspective"}],
         "rig_config_path": None,
         "camera_groups": [],
         "images": [
@@ -228,9 +299,7 @@ def test_workspace_rejects_image_dimensions_changed_after_prepare(tmp_path):
         "version": 1,
         "reconstruction_mode": "native_fisheye",
         "primary_source_id": "primary",
-        "sources": [
-            {"id": "primary", "label": "Primary", "role": "primary", "projection": "dual_fisheye"}
-        ],
+        "sources": [{"id": "primary", "label": "Primary", "role": "primary", "projection": "dual_fisheye"}],
         "rig_config_path": None,
         "camera_groups": [],
         "images": [

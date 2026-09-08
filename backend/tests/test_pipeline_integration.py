@@ -91,7 +91,7 @@ async def _run_pipeline(tmp_workspace: Path, src: Path):
             p.id,
             label="synthetic INSV",
             role=source_domain.SourceRole.PRIMARY,
-            adapter=source_domain.SourceAdapter.INSTA360_INSV,
+            adapter=source_domain.SourceAdapter.INSTA360,
             media_kind=source_domain.MediaKind.VIDEO,
             projection=source_domain.Projection.DUAL_FISHEYE,
             path=str(src),
@@ -122,6 +122,8 @@ async def _run_pipeline(tmp_workspace: Path, src: Path):
         assert mf_path.exists()
         mf = json.loads(mf_path.read_text())
         assert mf["sources"][0]["kind"] == "insv_dual"
+        assert mf["sources"][0]["selection"]["pairing"]["lens0_video_ordinal"] == 1
+        assert mf["sources"][0]["selection"]["pairing"]["lens1_video_ordinal"] == 0
         assert mf["count"] > 0
         # 相対パスが実際に解決できる (原子置換後の名前になっている) ことを確認.
         first = mf["frames"][0]

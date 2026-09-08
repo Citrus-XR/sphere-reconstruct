@@ -1,8 +1,7 @@
-"""LFStudio 学習用 native fisheye の無効な外周を lossless crop する。
+"""LFStudio 学習用 fisheye image の無効な外周を lossless crop する。
 
-Camera-model valid region を含む JPEG MCU 境界へ外向きに丸めるため、有効 pixel は一つも捨てない。
-画像 crop と同時に camera 主点および images.bin の 2D 観測を平行移動し、COLMAP dataset としての
-整合性を維持する。JPEG は再圧縮せず jpegtran の係数領域 transform を使う。
+Rectified PNG は pixel crop、legacy JPEG は MCU 境界の jpegtran crop を使う。Camera 主点、images.bin の
+2D 観測、mask を同じ offset で平行移動し、COLMAP dataset の整合性を維持する。
 """
 
 from __future__ import annotations
@@ -163,26 +162,36 @@ def crop_images(
     source_dir: Path,
     destination_dir: Path,
     plan: CropPlan,
-    jpegtran: str,
+    jpegtran: str | None,
     *,
     progress=None,
-) -> dict:
+) -> tuple[dict, dict[str, tuple[int, int]]]:
     source_bytes = 0
     cropped_bytes = 0
+    output_sizes: dict[str, tuple[int, int]] = {}
     names = sorted(plan.images)
-    workers = min(16, max(1, os.cpu_count() or 1))
+    workers = max(1, min(len(names), os.cpu_count() or 1))
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {
-            pool.submit(_crop_image, source_dir / name, destination_dir / name, plan.images[name], jpegtran): name
+            pool.submit(
+                _crop_image,
+                source_dir / name,
+                destination_dir / name,
+                plan.images[name],
+                plan.source_sizes[name],
+                jpegtran,
+            ): name
             for name in names
         }
         for index, future in enumerate(as_completed(futures), 1):
-            before, after = future.result()
+            before, after, output_size = future.result()
+            name = futures[future]
             source_bytes += before
             cropped_bytes += after
+            output_sizes[name] = output_size
             if progress is not None:
                 progress(index, len(names))
-    return {"source_bytes": source_bytes, "cropped_bytes": cropped_bytes}
+    return {"source_bytes": source_bytes, "cropped_bytes": cropped_bytes}, output_sizes
 
 
 def crop_masks(
@@ -193,7 +202,7 @@ def crop_masks(
     progress=None,
 ) -> int:
     names = [name for name in sorted(plan.images) if (source_dir / f"{name}.png").is_file()]
-    workers = min(16, max(1, os.cpu_count() or 1))
+    workers = max(1, min(len(names), os.cpu_count() or 1))
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = [
             pool.submit(
@@ -239,17 +248,30 @@ def _record_rect(record: dict, alignment: int, project_dir: Path | None) -> Crop
     return CropRect(left, top, right, bottom)
 
 
-def _crop_image(source: Path, destination: Path, rect: CropRect, jpegtran: str) -> tuple[int, int]:
+def _crop_image(
+    source: Path,
+    destination: Path,
+    rect: CropRect,
+    expected_size: tuple[int, int],
+    jpegtran: str | None,
+) -> tuple[int, int, tuple[int, int]]:
     destination.parent.mkdir(parents=True, exist_ok=True)
     source_size = source.stat().st_size
     with PilImage.open(source) as image:
+        if image.size != expected_size:
+            raise RuntimeError(
+                f"training image dimensions changed for {source}: "
+                f"{image.width}x{image.height} != {expected_size[0]}x{expected_size[1]}"
+            )
         full_image = rect == CropRect(0, 0, *image.size)
+        if full_image:
+            image.load()
     if full_image:
         try:
             os.link(source, destination)
         except OSError:
             shutil.copy2(source, destination)
-        return source_size, destination.stat().st_size
+        return source_size, destination.stat().st_size, expected_size
     if source.suffix.lower() == ".png":
         with PilImage.open(source) as image:
             image.crop((rect.left, rect.top, rect.right, rect.bottom)).save(
@@ -257,9 +279,11 @@ def _crop_image(source: Path, destination: Path, rect: CropRect, jpegtran: str) 
                 format="PNG",
                 compress_level=6,
             )
-        return source_size, destination.stat().st_size
+        return source_size, destination.stat().st_size, (rect.width, rect.height)
     if source.suffix.lower() not in {".jpg", ".jpeg"}:
         raise RuntimeError(f"lossless fisheye crop does not support image format: {source.suffix}")
+    if jpegtran is None:
+        raise RuntimeError(f"JPEG fisheye crop requires jpegtran: {source}")
     command = [
         jpegtran,
         "-copy",
@@ -274,7 +298,15 @@ def _crop_image(source: Path, destination: Path, rect: CropRect, jpegtran: str) 
     completed = subprocess.run(command, capture_output=True, text=True, check=False)
     if completed.returncode != 0:
         raise RuntimeError(f"jpegtran crop failed for {source}: {completed.stderr.strip()}")
-    return source_size, destination.stat().st_size
+    return source_size, destination.stat().st_size, (rect.width, rect.height)
+
+
+def requires_jpegtran(plan: CropPlan) -> bool:
+    return any(
+        Path(name).suffix.lower() in {".jpg", ".jpeg"}
+        and rect != CropRect(0, 0, *plan.source_sizes[name])
+        for name, rect in plan.images.items()
+    )
 
 
 def crop_mask_file(
@@ -297,6 +329,8 @@ def crop_mask_file(
                 format="PNG",
                 compress_level=6,
             )
+        else:
+            image.load()
     if full_image:
         try:
             os.link(source, destination)

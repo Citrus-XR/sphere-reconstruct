@@ -12,6 +12,7 @@ from .model import Reconstruction
 def estimate_ground_position(
     reconstruction: Reconstruction,
     *,
+    analysis_points: np.ndarray | None = None,
     reference_image_prefix: str | None = None,
     min_camera_height_m: float = 0.5,
     max_camera_height_m: float = 4.0,
@@ -36,7 +37,9 @@ def estimate_ground_position(
     if not reference_images:
         return {"applied": False, "reason": "reference_trajectory_unavailable"}
     cameras = np.asarray([image.camera_center for image in reference_images])
-    points = np.asarray([point.xyz for point in reconstruction.points3D.values()])
+    points = analysis_points
+    if points is None:
+        points = sample_analysis_points(reconstruction)
     camera_horizontal_span = _horizontal_span(cameras)
     if camera_horizontal_span <= 1e-9:
         return {"applied": False, "reason": "collapsed_camera_trajectory"}
@@ -109,13 +112,17 @@ def estimate_ground_position(
             "reason": "no_trajectory_local_ground_mode",
             "candidate_points": candidate_count,
         }
-    best = max(hypotheses, key=lambda item: item["score"])
+    maximum_score = max(float(item["score"]) for item in hypotheses)
+    dominant = [item for item in hypotheses if float(item["score"]) >= maximum_score * 0.9]
+    best = min(dominant, key=lambda item: (item["camera_height_median_m"], -item["score"]))
     return {
         "applied": abs(best["ground_y"]) > 1e-9,
         "method": "trajectory_local_ground_mode",
         "translation": [0.0, -best["ground_y"], 0.0],
         "candidate_points": candidate_count,
         "hypotheses": len(hypotheses),
+        "dominant_hypotheses": len(dominant),
+        "plane_selection": "nearest_dominant_horizontal_plane",
         "reference_images": len(reference_images),
         "max_path_distance_m": max_path_distance_m,
         **best,
@@ -193,3 +200,28 @@ def _horizontal_span(points: np.ndarray) -> float:
     horizontal = points[:, [0, 2]]
     low, high = np.percentile(horizontal, [5.0, 95.0], axis=0)
     return float(np.linalg.norm(high - low))
+
+
+def sample_analysis_points(
+    reconstruction: Reconstruction,
+    *,
+    maximum_points: int = 100_000,
+) -> np.ndarray:
+    """点数に関係なく幾何推定の計算量を固定する deterministic uniform sample。"""
+    if maximum_points <= 0:
+        raise ValueError("maximum analysis points must be positive")
+    total = len(reconstruction.points3D)
+    if total <= maximum_points:
+        return np.asarray([point.xyz for point in reconstruction.points3D.values()], dtype=np.float64)
+
+    targets = np.linspace(0, total - 1, maximum_points, dtype=np.int64)
+    sampled = np.empty((maximum_points, 3), dtype=np.float64)
+    target_index = 0
+    for point_index, point in enumerate(reconstruction.points3D.values()):
+        if point_index != targets[target_index]:
+            continue
+        sampled[target_index] = point.xyz
+        target_index += 1
+        if target_index == maximum_points:
+            break
+    return sampled

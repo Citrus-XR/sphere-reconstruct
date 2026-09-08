@@ -42,7 +42,7 @@ class BinariesConfig(BaseModel):
     ffmpeg: str = ""
     ffprobe: str = ""
     colmap: str = ""
-    # LFStudio export の JPEG を再圧縮せず crop する libjpeg-turbo tool.
+    # Legacy JPEG input を再圧縮せず crop する libjpeg-turbo tool。Rectified PNG には不要。
     jpegtran: str = ""
     # COLMAP loop detection 用 vocab tree (.bin). 空なら loop closure 無効.
     vocab_tree: str = ""

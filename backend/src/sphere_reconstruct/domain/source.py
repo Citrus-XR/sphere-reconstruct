@@ -21,7 +21,7 @@ class SourceRole(StrEnum):
 class SourceAdapter:
     """永続化 ID の定数。型を閉じた Enum にせず adapter registry を拡張可能にする。"""
 
-    INSTA360_INSV = "insta360_insv"
+    INSTA360 = "insta360"
     GENERIC_VIDEO = "generic_video"
     GENERIC_IMAGES = "generic_images"
 
@@ -48,7 +48,7 @@ SOURCE_ADAPTERS = {
     definition.id: definition
     for definition in (
         SourceAdapterDefinition(
-            id=SourceAdapter.INSTA360_INSV,
+            id=SourceAdapter.INSTA360,
             media_kind=MediaKind.VIDEO,
             projections=frozenset({Projection.DUAL_FISHEYE}),
         ),

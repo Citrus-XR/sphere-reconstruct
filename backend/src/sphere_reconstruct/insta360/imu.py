@@ -48,7 +48,6 @@ class GravityResult:
 class ImuRecording:
     samples: list[ImuSample]
     timestamps_sec: list[float]
-    orientation: str
     camera_type: str
     is_raw: bool
     gyro_range_dps: int | None
@@ -68,7 +67,7 @@ def parse_imu_payload(payload: bytes) -> list[ImuSample]:
 
 
 def parse_raw_imu_payload(payload: bytes) -> list[ImuSample]:
-    """X5 raw gyro record (20B/entry) を signed 値へ戻して parse する."""
+    """Raw gyro record (20B/entry) を signed 値へ戻して parse する."""
     if len(payload) == 0 or len(payload) % IMU_ENTRY_SIZE_RAW != 0:
         raise ValueError(
             f"raw IMU payload length {len(payload)} is not a positive multiple of {IMU_ENTRY_SIZE_RAW}"
@@ -152,11 +151,9 @@ def read_imu_recording(path) -> ImuRecording | None:
             - (extra.gyro_timestamp / 1_000.0 if extra.has_gyro_timestamp else 0.0)
             for sample in samples
         ]
-    orientation = "yzX" if extra.camera_type == "Insta360 X5" else "Xyz"
     return ImuRecording(
         samples=samples,
         timestamps_sec=timestamps,
-        orientation=orientation,
         camera_type=extra.camera_type,
         is_raw=extra.is_raw_gyro,
         gyro_range_dps=extra.gyro_range,

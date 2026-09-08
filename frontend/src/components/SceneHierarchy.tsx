@@ -5,6 +5,7 @@ import { useSettings } from '../ui/settings'
 const PhotoSourceGroup = ({
   source, frames, expanded, reconstructionAvailable, registration,
   selectedFrameIndex, frameLabel, onToggle, onSelectFrame,
+  sharpnessLabel,
 }: {
   source: FramesManifest['sources'][number]
   frames: FrameInfo[]
@@ -13,6 +14,7 @@ const PhotoSourceGroup = ({
   registration: ReturnType<typeof frameReconMap>
   selectedFrameIndex: number | null
   frameLabel: string
+  sharpnessLabel: string
   onToggle: () => void
   onSelectFrame: (index: number) => void
 }) => (
@@ -32,7 +34,8 @@ const PhotoSourceGroup = ({
           aria-current={selectedFrameIndex === frame.index ? 'true' : undefined}>
           <span className="hier-badge" style={{ background: color }} />
           <span style={{ flex: 1 }}>{frameLabel} {frame.source_index}</span>
-          {frame.score && <span className="mono" style={{ fontSize: 10, color: 'var(--fg-mute)' }}>
+          {frame.score && <span className="mono" title={`${sharpnessLabel}: ${frame.score.sharpness.toFixed(1)}`}
+            style={{ fontSize: 10, color: 'var(--fg-mute)' }}>
             {frame.score.sharpness.toFixed(0)}
           </span>}
         </button>
@@ -92,6 +95,7 @@ export const SceneHierarchy = ({
               frames={framesBySource.get(source.id) ?? []}
               expanded={!collapsedPhotoSources.has(source.id)} reconstructionAvailable={!!recon}
               registration={reg} selectedFrameIndex={selectedFrameIndex} frameLabel={t('frameLabel')}
+              sharpnessLabel={t('sharpness')}
               onToggle={() => togglePhotoSource(source.id)} onSelectFrame={onSelectFrame} />
           ))}
         </>

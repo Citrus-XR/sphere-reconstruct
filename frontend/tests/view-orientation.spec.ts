@@ -9,6 +9,13 @@ import {
   stepMovementSpeed,
   wheelZoomDistance,
 } from '../src/viewers/viewMath'
+import {
+  buildSelectedCameraViewGeometry,
+  cameraViewKind,
+  pickCameraGizmo,
+} from '../src/viewers/cameraGizmo'
+import { createCircularPointMaterial } from '../src/viewers/pointRendering'
+import { applyViewPose, equalViewPose, fitInitialView, readViewPose } from '../src/viewers/viewPose'
 
 test('mouse yaw and pitch do not introduce camera roll', () => {
   for (const [yaw, pitch] of [[0.8, 0.4], [-1.7, 0.9], [2.4, -0.7]]) {
@@ -79,4 +86,122 @@ test('ordinary wheel zoom distance follows the movement-speed multiplier', () =>
   expect(wheelZoomDistance(1000, 100, 1)).toBeCloseTo(-90)
   expect(wheelZoomDistance(1000, 100, 0.5)).toBeCloseTo(-45)
   expect(wheelZoomDistance(1000, -100, 2)).toBeCloseTo(180)
+})
+
+test('camera model selects a projection-specific selected view', () => {
+  expect(cameraViewKind('PINHOLE')).toBe('perspective')
+  expect(cameraViewKind('OPENCV_FISHEYE')).toBe('fisheye')
+  expect(cameraViewKind('THIN_PRISM_FISHEYE')).toBe('fisheye')
+  expect(cameraViewKind('EQUIRECTANGULAR')).toBe('spherical')
+})
+
+test('fisheye selected view uses a circular boundary instead of a square frustum', () => {
+  const depth = 10
+  const geometry = buildSelectedCameraViewGeometry('fisheye', depth, 1)
+  const positions = geometry.getAttribute('position') as THREE.BufferAttribute
+  const ringRadii: number[] = []
+  for (let index = 0; index < positions.count; index += 1) {
+    const z = positions.getZ(index)
+    if (Math.abs(z - depth * 0.35) < 1e-6)
+      ringRadii.push(Math.hypot(positions.getX(index), positions.getY(index)))
+  }
+
+  expect(ringRadii.length).toBeGreaterThanOrEqual(64)
+  for (const radius of ringRadii) expect(radius).toBeCloseTo(depth * 0.94, 5)
+  geometry.dispose()
+})
+
+test('perspective selected view preserves the camera image aspect ratio', () => {
+  const geometry = buildSelectedCameraViewGeometry('perspective', 10, 2)
+  const positions = geometry.getAttribute('position') as THREE.BufferAttribute
+  const far = Array.from({ length: positions.count }, (_, index) => [
+    positions.getX(index), positions.getY(index), positions.getZ(index),
+  ]).filter(position => position[2] === 10 && position[0] !== 0)
+  const maximumX = Math.max(...far.map(position => Math.abs(position[0])))
+  const maximumY = Math.max(...far.map(position => Math.abs(position[1])))
+
+  expect(maximumX / maximumY).toBeCloseTo(2)
+  geometry.dispose()
+})
+
+test('camera gizmo picking uses a fixed screen-pixel radius and ignores empty space', () => {
+  const camera = new THREE.PerspectiveCamera(90, 1, 0.1, 100)
+  camera.position.set(0, 0, 0)
+  camera.lookAt(0, 0, -1)
+  camera.updateMatrixWorld()
+  camera.updateProjectionMatrix()
+  const targets = [{ id: 1, position: [0, 0, -5] }]
+
+  expect(pickCameraGizmo(targets, camera, 50, 50, 100, 100)).toBe(1)
+  expect(pickCameraGizmo(targets, camera, 57.9, 50, 100, 100)).toBe(1)
+  expect(pickCameraGizmo(targets, camera, 58.1, 50, 100, 100)).toBeNull()
+  expect(pickCameraGizmo(targets, camera, 5, 5, 100, 100)).toBeNull()
+})
+
+test('overlapping camera gizmos select the closest visible camera', () => {
+  const camera = new THREE.PerspectiveCamera(60, 1, 0.1, 100)
+  camera.updateMatrixWorld()
+  camera.updateProjectionMatrix()
+
+  expect(pickCameraGizmo([
+    { id: 1, position: [0, 0, -8] },
+    { id: 2, position: [0, 0, -3] },
+    { id: 3, position: [0, 0, 3] },
+  ], camera, 50, 50, 100, 100)).toBe(2)
+})
+
+test('empty scene starts above the ground with the center in view', () => {
+  const camera = new THREE.PerspectiveCamera(55, 1, 0.01, 100000)
+  const center = new THREE.Vector3(3, 2, -8)
+  fitInitialView(camera, center, 10)
+
+  const projected = center.clone().project(camera)
+  expect(projected.x).toBeCloseTo(0)
+  expect(projected.y).toBeCloseTo(0)
+  expect(camera.position.y).toBeGreaterThan(center.y)
+  expect(camera.position.x).not.toBe(center.x)
+  expect(camera.position.distanceTo(center)).toBeGreaterThan(9)
+})
+
+test('saved viewer pose roundtrips without sharing mutable camera arrays', () => {
+  const camera = new THREE.PerspectiveCamera()
+  camera.position.set(10, -3, 17)
+  camera.quaternion.copy(composeViewQuaternion(0.7, -0.4, 0.2))
+  const saved = readViewPose(camera)
+  const restored = new THREE.PerspectiveCamera()
+  applyViewPose(restored, saved)
+
+  expect(equalViewPose(saved, readViewPose(restored))).toBe(true)
+  restored.position.x += 1
+  expect(equalViewPose(saved, readViewPose(restored))).toBe(false)
+  expect(saved.position[0]).toBe(10)
+})
+
+test('point material keeps image colors unlit and uses circular MSAA coverage', () => {
+  const material = createCircularPointMaterial(true)
+  expect(material.vertexColors).toBe(true)
+  expect(material.toneMapped).toBe(false)
+  expect(material.sizeAttenuation).toBe(false)
+  expect(material.depthWrite).toBe(true)
+  expect(material.alphaToCoverage).toBe(true)
+  expect(material.transparent).toBe(false)
+  const shader = {
+    fragmentShader: THREE.ShaderLib.points.fragmentShader,
+    vertexShader: THREE.ShaderLib.points.vertexShader,
+    uniforms: {},
+  }
+  material.onBeforeCompile(shader, {} as THREE.WebGLRenderer)
+  expect(shader.fragmentShader).toContain('fwidth(circleDistance)')
+  expect(shader.fragmentShader).toContain('if (diffuseColor.a <= 0.0) discard;')
+  expect(shader.fragmentShader).toContain('#include <colorspace_fragment>')
+  expect(material.map).toBeNull()
+  material.dispose()
+})
+
+test('point material uses blended edge coverage when MSAA is unavailable', () => {
+  const material = createCircularPointMaterial(false)
+  expect(material.alphaToCoverage).toBe(false)
+  expect(material.transparent).toBe(true)
+  expect(material.depthTest).toBe(true)
+  material.dispose()
 })

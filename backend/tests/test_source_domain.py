@@ -16,7 +16,7 @@ async def test_first_source_becomes_primary_and_role_can_be_swapped(tmp_path):
         project.id,
         label="360",
         role=source_domain.SourceRole.SUPPLEMENTAL,
-        adapter=source_domain.SourceAdapter.INSTA360_INSV,
+        adapter=source_domain.SourceAdapter.INSTA360,
         media_kind=source_domain.MediaKind.VIDEO,
         projection=source_domain.Projection.DUAL_FISHEYE,
         path=str(tmp_path / "primary.insv"),

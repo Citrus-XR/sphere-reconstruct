@@ -15,10 +15,11 @@ from sphere_reconstruct.stages.generate_masks import (  # noqa: E402
     GenerateFeatureMasks,
     GenerateTrainingMasks,
     _compose_valid_mask,
+    _semantic_exclusion,
 )
 
 _TRAINING_PROMPT = "person,camera operator,person's shadow"
-_FEATURE_PROMPT = f"{_TRAINING_PROMPT},animal,sky,tree,vehicle,airplane,water"
+_FEATURE_PROMPT = f"{_TRAINING_PROMPT},animal,sky,vehicle,water"
 
 
 class _FakeEngine:
@@ -84,7 +85,15 @@ def _make_catalog(project_dir, *, circle: bool) -> list[str]:
     return names
 
 
-def _execute(project_dir, monkeypatch, stage_type, *, circle: bool):
+def _execute(
+    project_dir,
+    monkeypatch,
+    stage_type,
+    *,
+    circle: bool,
+    coverage_warn: float = 0.9,
+    events: list[tuple] | None = None,
+):
     names = _make_catalog(project_dir, circle=circle)
     monkeypatch.setattr(sam3_engine, "Sam3Engine", _FakeEngine)
     stage = stage_type()
@@ -95,10 +104,14 @@ def _execute(project_dir, monkeypatch, stage_type, *, circle: bool):
         project_dir=project_dir,
         stage_out_dir=output,
         params=stage.normalize_params(
-            {"prompt": "person,animal", "max_inference_size": 128, "coverage_warn": 0.9}
+            {"prompt": "person,animal", "max_inference_size": 128, "coverage_warn": coverage_warn}
         ),
         sources=(),
-        progress=ProgressReporter(lambda *_args: None),
+        progress=ProgressReporter(
+            lambda *args: events.append(args) if events is not None else None,
+            tick_min_interval=0,
+            tick_min_progress=0,
+        ),
     )
     manifest = stage.execute(context)
     return output, names, manifest
@@ -145,6 +158,71 @@ def test_generate_masks_combines_fisheye_valid_circle(tmp_path, monkeypatch):
     assert mask[128, 245] == 255
     assert mask[128, 10] == 0
     assert mask[2, 2] == 0
+
+
+def test_high_coverage_is_recorded_without_per_image_warning_spam(tmp_path, monkeypatch):
+    project = tmp_path / "project"
+    project.mkdir()
+    events: list[tuple] = []
+
+    output, _names, _manifest = _execute(
+        project,
+        monkeypatch,
+        GenerateFeatureMasks,
+        circle=False,
+        coverage_warn=0.1,
+        events=events,
+    )
+
+    document = json.loads((output / "manifest_masks.json").read_text())
+    assert all(record["coverage_warning"] for record in document["images"])
+    assert not [event for event in events if event[5] == "log" and event[3] == "log.mask_coverage_warn_image"]
+    progress = [event for event in events if event[5] == "progress"]
+    assert progress
+    assert progress[-1][1] == pytest.approx(0.98)
+
+
+def test_semantic_coverage_preserves_mask_and_separates_overlapping_sky_and_water():
+    sky = np.zeros((8, 8), dtype=np.uint8)
+    sky[:6] = 1
+    water = np.zeros_like(sky)
+    water[4:] = 1
+    valid = np.ones_like(sky)
+    valid[:, :2] = 0
+    detections = [sam3_engine.Sam3Detection(prompt="sky", masks=[sky]),
+                  sam3_engine.Sam3Detection(prompt="water", masks=[water])]
+    excluded, coverage, without_sky = _semantic_exclusion(detections, 8, 8, 0, valid)
+    assert np.array_equal(excluded, valid)
+    assert coverage == {"sky": 0.75, "water": 0.5}
+    assert without_sky == 0.5
+
+
+def test_feature_sky_coverage_is_not_a_coverage_warning(tmp_path, monkeypatch):
+    project = tmp_path / "project"
+    project.mkdir()
+    _make_catalog(project, circle=False)
+    monkeypatch.setattr(sam3_engine, "Sam3Engine", _FakeEngine)
+    stage = GenerateFeatureMasks()
+    output = project / ".generate_feature_masks.tmp"
+    output.mkdir()
+    manifest = stage.execute(StageContext(
+        project_id="p", project_dir=project, stage_out_dir=output, sources=(),
+        params=stage.normalize_params({"prompt": "sky,water", "coverage_warn": 0.1}),
+        progress=ProgressReporter(lambda *_args: None),
+    ))
+    assert manifest.extra["average_dynamic_coverage"] > 0.5
+    assert manifest.extra["average_coverage_by_prompt"]["sky"] > 0.5
+    assert manifest.extra["average_coverage_without_sky"] == 0
+    assert manifest.extra["coverage_warnings"] == 0
+
+
+def test_prompt_statistics_do_not_open_seams_during_bilinear_mask_resize():
+    first = np.array([[1, 0], [1, 0]], dtype=np.uint8)
+    detections = [sam3_engine.Sam3Detection(prompt="sky", masks=[first]),
+                  sam3_engine.Sam3Detection(prompt="water", masks=[1 - first])]
+    valid = np.ones((17, 17), dtype=np.uint8)
+    excluded, _, _ = _semantic_exclusion(detections, 17, 17, 0, valid)
+    assert np.array_equal(excluded, valid)
 
 
 def test_generate_masks_combines_calibrated_fisheye_hemisphere():

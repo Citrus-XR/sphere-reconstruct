@@ -24,3 +24,42 @@ def test_common_matching_options_use_feature_matching_namespace():
         "--FeatureMatching.guided_matching",
         "1",
     ]
+
+
+def test_incremental_triangulation_options_use_mapper_namespace():
+    args = quality.mapper_extra_args(
+        {
+            "filter_max_reproj_error": 1.5,
+            "filter_min_tri_angle": 3.0,
+            "tri_create_max_angle_error": 1.0,
+            "tri_continue_max_angle_error": 1.0,
+            "tri_merge_max_reproj_error": 1.5,
+            "tri_complete_max_reproj_error": 1.5,
+            "tri_min_angle": 3.0,
+        }
+    )
+    assert args == [
+        "--Mapper.filter_max_reproj_error", "1.5",
+        "--Mapper.filter_min_tri_angle", "3",
+        "--Mapper.tri_create_max_angle_error", "1",
+        "--Mapper.tri_continue_max_angle_error", "1",
+        "--Mapper.tri_merge_max_reproj_error", "1.5",
+        "--Mapper.tri_complete_max_reproj_error", "1.5",
+        "--Mapper.tri_min_angle", "3",
+    ]
+
+
+def test_global_mapper_does_not_receive_incremental_triangulation_options():
+    args = quality.global_mapper_extra_args(
+        {
+            "random_seed": 0,
+            "filter_max_reproj_error": 1.0,
+            "filter_min_tri_angle": 5.0,
+            "tri_create_max_angle_error": 0.75,
+            "tri_continue_max_angle_error": 0.75,
+            "tri_merge_max_reproj_error": 1.0,
+            "tri_complete_max_reproj_error": 1.0,
+            "tri_min_angle": 5.0,
+        }
+    )
+    assert args == ["--GlobalMapper.random_seed", "0"]

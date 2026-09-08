@@ -1,6 +1,6 @@
 """metadata.read_footer の単体テスト.
 
-実 X5 INSV を用意せずとも, 合成した最小 inst box + トレイラで構造チェックできる.
+実 INSV を用意せずとも, 合成した最小 inst box + trailer で構造チェックできる.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ def _make_insv(inst_payload_size: int = 32, version: int = 3) -> bytes:
     inst_data = bytes(range(inst_payload_size))
     inst = _make_box(b"inst", inst_data)  # 8 + N bytes
 
-    # trailer: (protobuf/padding 適当) + 8 バイトヘッダ + 32 バイト署名
+    # trailer: metadata/padding + 8 バイト header + 32 バイト signature
     trailer_body = b"\x00" * 24  # 適当な padding
     trailer_header = struct.pack("<II", len(inst_data), version)  # inst_data_size, version
     trailer = trailer_body + trailer_header + metadata.FOOTER_SIGNATURE
@@ -85,38 +85,38 @@ def _varint(value: int) -> bytes:
     return bytes(encoded)
 
 
-def _protobuf_varint(field: int, value: int) -> bytes:
+def _wire_varint(field: int, value: int) -> bytes:
     return _varint(field << 3) + _varint(value)
 
 
-def _protobuf_bytes(field: int, value: bytes) -> bytes:
+def _wire_bytes(field: int, value: bytes) -> bytes:
     return _varint((field << 3) | 2) + _varint(len(value)) + value
 
 
 def test_parse_extra_metadata_fields_needed_for_imu_timestamps():
-    gyro_config = _protobuf_varint(1, 32) + _protobuf_varint(2, 2000)
+    gyro_config = _wire_varint(1, 32) + _wire_varint(2, 2000)
     window_crop = b"".join(
         (
-            _protobuf_varint(1, 5376),
-            _protobuf_varint(2, 5376),
-            _protobuf_varint(3, 5312),
-            _protobuf_varint(4, 5312),
+            _wire_varint(1, 5376),
+            _wire_varint(2, 5376),
+            _wire_varint(3, 5312),
+            _wire_varint(4, 5312),
         )
     )
     payload = b"".join(
         [
-            _protobuf_bytes(2, b"Insta360 X5"),
-            _protobuf_varint(24, 158_412_034_768),
+            _wire_bytes(2, b"Insta360"),
+            _wire_varint(24, 158_412_034_768),
             _varint((25 << 3) | 1) + struct.pack("<d", 21.244001388549805),
-            _protobuf_bytes(27, window_crop),
+            _wire_bytes(27, window_crop),
             _varint((28 << 3) | 1) + struct.pack("<d", 1.6),
-            _protobuf_varint(29, 1),
-            _protobuf_varint(62, 1),
-            _protobuf_bytes(65, gyro_config),
+            _wire_varint(29, 1),
+            _wire_varint(62, 1),
+            _wire_bytes(65, gyro_config),
         ]
     )
     parsed = metadata.parse_extra_metadata(payload)
-    assert parsed.camera_type == "Insta360 X5"
+    assert parsed.camera_type == "Insta360"
     assert parsed.first_frame_timestamp == 158_412_034_768
     assert parsed.rolling_shutter_time_ms == 21.244001388549805
     assert parsed.gyro_timestamp == 1.6

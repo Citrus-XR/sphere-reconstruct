@@ -1,4 +1,42 @@
 // バックエンドの API 型と fetch ヘルパ. Browser 固有の binary points parser もここに集約する.
+import type { IJsonModel } from 'flexlayout-react'
+
+export interface ViewerPreferences {
+  showPoints: boolean
+  showCams: boolean
+  pointSize: number
+  showGrid: boolean
+  showCenter: boolean
+  background: string | null
+}
+
+export interface ViewerCameraPose {
+  position: [number, number, number]
+  quaternion: [number, number, number, number]
+}
+
+export interface ConsolePreferences {
+  info: boolean
+  warn: boolean
+  error: boolean
+  debug: boolean
+  search: string
+}
+
+export interface WorkspacePreferences {
+  theme: 'auto' | 'light' | 'dark'
+  lang: 'ja' | 'zh' | 'en' | null
+  lastProjectId: string | null
+  layout: IJsonModel | null
+  compactLayout: IJsonModel | null
+  viewer: ViewerPreferences
+  console: ConsolePreferences
+}
+
+export type WorkspacePreferencesPatch = Partial<Omit<WorkspacePreferences, 'viewer' | 'console'>> & {
+  viewer?: Partial<ViewerPreferences>
+  console?: Partial<ConsolePreferences>
+}
 
 export type PipelineState =
   | 'created'
@@ -12,7 +50,9 @@ export type PipelineState =
   | 'reconstructed'
   | 'aligned'
   | 'scale_restored'
-  | 'grounded'
+  | 'scene_aligned'
+  | 'cleaned'
+  | 'densified'
   | 'exported'
 
 export type SourceRole = 'primary' | 'supplemental'
@@ -42,6 +82,16 @@ export interface SourceCreate {
   path: string
 }
 
+export interface ProjectUiState {
+  params?: Record<string, unknown>
+  reconMode?: string
+  clearOutputStages?: string[]
+  selectedStage?: string | null
+  selectedCameraId?: number | null
+  selectedFrameIndex?: number | null
+  cameraPose?: ViewerCameraPose | null
+}
+
 export interface Project {
   id: string
   name: string
@@ -50,7 +100,7 @@ export interface Project {
   sources: ProjectSource[]
   state: PipelineState
   // 工程に保存された UI 設定 (step パラメータ / モード). リロードで復元する.
-  ui_state: { params?: Record<string, unknown>; reconMode?: string } | null
+  ui_state: ProjectUiState | null
 }
 
 export interface Job {
@@ -118,7 +168,11 @@ export interface ReconstructionData {
   points_file: string
   points_stride: number
   metric_scale?: { metric?: boolean; scale_factor?: number }
-  ground_position?: { applied?: boolean; ground_y?: number }
+  scene_alignment?: {
+    applied?: boolean
+    ground?: { applied?: boolean; ground_y?: number }
+    orientation?: { applied?: boolean; yaw_deg?: number }
+  }
 }
 
 export interface ParsedPoints {
@@ -141,6 +195,11 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  getPreferences: () => req<WorkspacePreferences>('/api/preferences'),
+  patchPreferences: (patch: WorkspacePreferencesPatch, keepalive = false) =>
+    req<WorkspacePreferences>('/api/preferences', {
+      method: 'PATCH', headers: jsonHeaders, body: JSON.stringify(patch), keepalive,
+    }),
   listProjects: () => req<Project[]>('/api/projects'),
   getProject: (id: string) => req<Project>(`/api/projects/${id}`),
   createProject: (name: string) =>
@@ -181,17 +240,17 @@ export const api = {
   getMasks: (id: string, purpose: MaskPurpose) =>
     req<MasksManifest>(`/api/projects/${id}/masks/${purpose}`),
   getExportInfo: (id: string) => req<ExportInfo>(`/api/projects/${id}/export-info`),
-  putUiState: (id: string, ui: Record<string, unknown>) =>
+  patchUiState: (id: string, ui: ProjectUiState, keepalive = false) =>
     req<Project>(`/api/projects/${id}/ui-state`, {
-      method: 'PUT', headers: jsonHeaders, body: JSON.stringify({ ui }),
+      method: 'PATCH', headers: jsonHeaders, body: JSON.stringify({ ui }), keepalive,
     }),
-  getFisheyeRegion: (id: string, sourceId: string) =>
-    req<FisheyeRegion>(`/api/projects/${id}/fisheye-region?source_id=${encodeURIComponent(sourceId)}`),
-  putFisheyeRegion: (id: string, sourceId: string, region: FisheyeRegion) =>
-    req<FisheyeRegion>(`/api/projects/${id}/fisheye-region?source_id=${encodeURIComponent(sourceId)}`, {
+  getSourceRegion: (id: string, sourceId: string) =>
+    req<SourceRegion>(`/api/projects/${id}/source-region?source_id=${encodeURIComponent(sourceId)}`),
+  putSourceRegion: (id: string, sourceId: string, region: SourceRegion) =>
+    req<SourceRegion>(`/api/projects/${id}/source-region?source_id=${encodeURIComponent(sourceId)}`, {
       method: 'PUT',
       headers: jsonHeaders,
-      body: JSON.stringify(region),
+      body: JSON.stringify({ views: region.views }),
     }),
   // system / filesystem / stages.
   getSystemStats: () => req<SystemStats>('/api/system/stats'),
@@ -206,8 +265,12 @@ export const api = {
     req<{ cleared: string; invalidated: string[]; state: string }>(`/api/projects/${id}/stages/${stage}/clear`, {
       method: 'POST',
     }),
-  clearOutputs: (id: string) =>
-    req<{ cleared: string; state: string }>(`/api/projects/${id}/clear-outputs`, { method: 'POST' }),
+  clearOutputs: (id: string, stages: string[]) =>
+    req<{ requested: string[]; cleared: string[]; state: string }>(`/api/projects/${id}/clear-outputs`, {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify({ stages }),
+    }),
   deleteProject: (id: string) =>
     req<{ deleted: string }>(`/api/projects/${id}`, { method: 'DELETE' }),
 }
@@ -274,7 +337,9 @@ export interface StageStatus {
   started_at: string | null
   finished_at: string | null
   params: Record<string, unknown> | null
+  active_params: Record<string, unknown> | null
   extra: Record<string, unknown> | null
+  activity_event: EventEnvelope | null
   progress_event: EventEnvelope | null
 }
 export interface StagesStatus {
@@ -283,22 +348,22 @@ export interface StagesStatus {
   stages: StageStatus[]
 }
 
-// 魚眼の円形有効領域 (正規化 cx/cy/r, 画像幅基準)。物理的な前後名は adapter が決める。
-export interface LensCircle {
-  cx: number
-  cy: number
+export type RegionView = {
+  kind: 'circle'
+  cx: 0.5
+  cy: 0.5
   r: number
   operations: RegionOperation[]
-}
+} | { kind: 'full'; operations: RegionOperation[] }
 export interface RegionOperation {
   mode: 'add' | 'subtract'
   x: number
   y: number
   r: number
+  stroke_id: number
 }
-export interface FisheyeRegion {
-  lens0: LensCircle
-  lens1: LensCircle
+export interface SourceRegion {
+  views: Record<string, RegionView>
   saved?: boolean
   needs_review?: boolean
   invalidated?: string[]
@@ -310,6 +375,12 @@ export interface FrameSelection {
   candidates?: number
   fallback?: boolean
   reasons?: { blur: number; exposure: number; few_features: number; rolling_shutter?: number }
+  continuity_strategy?: 'quality' | 'parallax' | 'balanced'
+  maximum_gap_sec?: number
+  bridge_frames?: number
+  bridge_relaxed_sharpness?: number
+  bridge_relaxed_rolling_shutter?: number
+  unresolved_gaps?: number
 }
 
 export interface FrameInfo {
@@ -432,13 +503,25 @@ export const frameReconMap = (recon: ReconstructionData | undefined): Map<number
 // points.bin をパースする. フォーマット (backend/colmap/web_preview.py と一致):
 //   header: u32 count, u32 stride(=20)
 //   各点: 3*f32 xyz, 3*u8 rgb, 1 pad, f32 error  (= 20 bytes)
-export const fetchPoints = async (projectId: string): Promise<ParsedPoints> => {
-  const res = await fetch(`/api/projects/${projectId}/reconstruction/points`)
+export const fetchPoints = async (projectId: string, signal?: AbortSignal): Promise<ParsedPoints> => {
+  const res = await fetch(`/api/projects/${projectId}/reconstruction/points`, { signal, cache: 'no-store' })
   if (!res.ok) throw new Error(`points fetch failed: ${res.status}`)
-  const buf = await res.arrayBuffer()
+  return parsePoints(await res.arrayBuffer())
+}
+
+const srgbToLinear = (byte: number): number => {
+  const value = byte / 255
+  return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4
+}
+const POINT_COLORS = Float32Array.from({ length: 256 }, (_, byte) => srgbToLinear(byte))
+
+export const parsePoints = (buf: ArrayBuffer): ParsedPoints => {
+  if (buf.byteLength < 8) throw new Error('Invalid point cloud header')
   const dv = new DataView(buf)
   const count = dv.getUint32(0, true)
   const stride = dv.getUint32(4, true)
+  if (stride !== 20 || buf.byteLength !== 8 + count * stride)
+    throw new Error('Point cloud length or stride mismatch')
   const positions = new Float32Array(count * 3)
   const colors = new Float32Array(count * 3)
   let off = 8
@@ -446,9 +529,11 @@ export const fetchPoints = async (projectId: string): Promise<ParsedPoints> => {
     positions[i * 3] = dv.getFloat32(off, true)
     positions[i * 3 + 1] = dv.getFloat32(off + 4, true)
     positions[i * 3 + 2] = dv.getFloat32(off + 8, true)
-    colors[i * 3] = dv.getUint8(off + 12) / 255
-    colors[i * 3 + 1] = dv.getUint8(off + 13) / 255
-    colors[i * 3 + 2] = dv.getUint8(off + 14) / 255
+    if (![positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2]].every(Number.isFinite))
+      throw new Error(`Invalid point cloud position at index ${i}`)
+    colors[i * 3] = POINT_COLORS[dv.getUint8(off + 12)]
+    colors[i * 3 + 1] = POINT_COLORS[dv.getUint8(off + 13)]
+    colors[i * 3 + 2] = POINT_COLORS[dv.getUint8(off + 14)]
     off += stride
   }
   return { count, positions, colors }

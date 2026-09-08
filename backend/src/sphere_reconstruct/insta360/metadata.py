@@ -1,30 +1,4 @@
-"""Insta360 独自フッタの構造解析.
-
-実 X5 INSV (VID_20260724_021825_00_001.insv, ~916 MB) を dump した結果:
-
-- MP4 本体の直後に **"inst" box** が置かれる. これは通常の ISO BMFF box フォーマットで,
-  先頭 4 バイトが BE u32 の box size, 次の 4 バイトが type ("inst"). box 全体で
-  約 11.4 MB, EOF まで続く (トレイラは inst box 内部).
-- inst box の **末尾 40 バイト** が固定レイアウトのフッタトレイラ:
-    - 8 バイト: u32 LE `inst_box_data_size` + u32 LE `version` (X5 サンプルでは 3)
-    - 32 バイト: ASCII 16 進シグネチャ (`8db42d694ccc418790edff439fe026bf`)
-- そのすぐ手前には protobuf エンコードされた小さなメタデータ (mask ラベル名など
-  "invisibleDive", "heat_bare", "heat_protector" が観測される) と 0 パディングが並ぶ.
-
-例:
-    footer_offset       = 904941928     (mdat + moov の直後)
-    file_size           = 916377948
-    inst_box_header     = 904941928..904941936     (8 bytes: size + "inst")
-    inst_box_data       = 904941936..916377948     (11 436 012 bytes; EOF まで)
-    trailer 内部        = 916377908..916377948     (末尾 40 バイト = 8B ヘッダ + 32B シグ)
-
-各サブレコード (0x0300 IMU / offset_v3 / MEI キャリブ他) は inst box の内部に並んで
-いると推測されるが, その正確な内部レイアウトは実サンプル 1 つでは確定できない.
-そのため本モジュールは inst box を **byte 配列としてマウントするだけ** に留め,
-record レベルの解析は後続の PR で個別に足していく (offset_v3 → imu → mei_pb 順).
-
-参考: https://github.com/BenjaminHenriksson/insv-stitch (独立に再実装しているが結論は近い).
-"""
+"""INSV の ``inst`` box、record directory、timing / crop metadata を解析する。"""
 
 from __future__ import annotations
 
@@ -97,7 +71,7 @@ class InsvFooter:
     # トレイラヘッダ (シグネチャ直前 8 バイト).
     trailer_header_offset: int
     reported_inst_data_size: int  # トレイラヘッダの u32 (inst_box_data_size と一致すべき)
-    version: int  # X5 サンプルでは 3
+    version: int
 
     # ASCII シグネチャ.
     signature_offset: int
@@ -170,7 +144,7 @@ def read_footer(path: Path, footer_offset: int) -> InsvFooter:
 def read_inst_box_bytes(footer: InsvFooter) -> bytes:
     """inst box の data 部分をまるごと読む.
 
-    現状はこの生バイト列を上位モジュール (imu.py, calibration.py, protobuf.py) が
+    現状はこの生バイト列を上位モジュール (imu.py, calibration.py) が
     パースするための入り口. 11.4 MB 程度あるので必要な時だけ呼ぶこと.
     """
     with footer.path.open("rb") as f:
@@ -181,7 +155,7 @@ def read_inst_box_bytes(footer: InsvFooter) -> bytes:
 def read_trailer_bytes(footer: InsvFooter) -> bytes:
     """トレイラ 512 バイト (inst box 直後 〜 EOF) をまるごと読む.
 
-    ここには protobuf エンコードされた mask ラベル一覧が含まれる (実サンプル観測).
+    ここには record directory と固定 trailer が含まれる.
     """
     with footer.path.open("rb") as f:
         f.seek(footer.trailer_offset)
@@ -264,28 +238,28 @@ def iter_trailer_records(footer: InsvFooter):
 
 
 def read_extra_metadata(footer: InsvFooter) -> ExtraMetadata | None:
-    """record id=1 の protobuf から IMU 時刻正規化に必要な field だけを読む."""
+    """Record id=1 から IMU timing、camera type、window crop を読む."""
     for record_id, record_format, data in iter_trailer_records(footer):
         if record_id == 1:
             if record_format != 1:
-                raise ValueError(f"metadata record must be protobuf, got format={record_format}")
+                raise ValueError(f"metadata record format が不正です: {record_format}")
             return parse_extra_metadata(data)
     return None
 
 
 def parse_extra_metadata(data: bytes) -> ExtraMetadata:
-    fields = {field: value for field, _wire, value in _iter_protobuf_fields(data)}
+    fields = {field: value for field, _wire, value in _iter_metadata_fields(data)}
     camera_type = bytes(fields.get(2, b"")).decode("utf-8", "replace")
     gyro_config = fields.get(65)
     acc_range = gyro_range = None
     if isinstance(gyro_config, bytes):
-        config_fields = {field: value for field, _wire, value in _iter_protobuf_fields(gyro_config)}
+        config_fields = {field: value for field, _wire, value in _iter_metadata_fields(gyro_config)}
         acc_range = int(config_fields[1]) if 1 in config_fields else None
         gyro_range = int(config_fields[2]) if 2 in config_fields else None
     window_crop = fields.get(27)
     parsed_window_crop = None
     if isinstance(window_crop, bytes):
-        crop_fields = {field: value for field, _wire, value in _iter_protobuf_fields(window_crop)}
+        crop_fields = {field: value for field, _wire, value in _iter_metadata_fields(window_crop)}
         missing = sorted({1, 2, 3, 4} - crop_fields.keys())
         if missing:
             raise ValueError(f"window crop metadata の field が不足しています: {missing}")
@@ -308,7 +282,7 @@ def parse_extra_metadata(data: bytes) -> ExtraMetadata:
     )
 
 
-def _iter_protobuf_fields(data: bytes):
+def _iter_metadata_fields(data: bytes):
     offset = 0
     while offset < len(data):
         key, offset = _read_varint(data, offset)
@@ -318,23 +292,23 @@ def _iter_protobuf_fields(data: bytes):
             value, offset = _read_varint(data, offset)
         elif wire == 1:
             if offset + 8 > len(data):
-                raise ValueError("truncated protobuf fixed64")
+                raise ValueError("metadata fixed64 が途中で終了しました")
             value = struct.unpack_from("<d", data, offset)[0]
             offset += 8
         elif wire == 2:
             length, offset = _read_varint(data, offset)
             end = offset + length
             if end > len(data):
-                raise ValueError("truncated protobuf bytes field")
+                raise ValueError("metadata bytes field が途中で終了しました")
             value = data[offset:end]
             offset = end
         elif wire == 5:
             if offset + 4 > len(data):
-                raise ValueError("truncated protobuf fixed32")
+                raise ValueError("metadata fixed32 が途中で終了しました")
             value = struct.unpack_from("<f", data, offset)[0]
             offset += 4
         else:
-            raise ValueError(f"unsupported protobuf wire type: {wire}")
+            raise ValueError(f"未対応の metadata wire type です: {wire}")
         yield field, wire, value
 
 
@@ -348,4 +322,4 @@ def _read_varint(data: bytes, offset: int) -> tuple[int, int]:
         if byte & 0x80 == 0:
             return value, offset
         shift += 7
-    raise ValueError("invalid protobuf varint")
+    raise ValueError("metadata varint が不正です")

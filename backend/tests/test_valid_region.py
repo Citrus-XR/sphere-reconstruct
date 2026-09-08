@@ -10,6 +10,20 @@ import pytest
 from sphere_reconstruct.imaging import valid_region
 
 
+@pytest.mark.parametrize("width,height", [(200, 100), (100, 200)])
+def test_full_image_brush_is_circular_in_pixels(width, height):
+    region = {"kind": "full", "operations": [
+        {"mode": "subtract", "x": 0.5, "y": 0.5, "r": 0.1},
+    ]}
+    mask = valid_region.render_mask(region, width, height)
+    yy, xx = np.nonzero(mask == 0)
+    assert np.ptp(xx) == np.ptp(yy)
+    assert mask[0, 0] == mask[-1, -1] == 1
+    assert mask[height // 2, width // 2] == 0
+    region["operations"].append({"mode": "add", "x": 0.5, "y": 0.5, "r": 0.05})
+    assert valid_region.render_mask(region, width, height)[height // 2, width // 2] == 1
+
+
 def test_custom_region_circle_operations_apply_in_order():
     region = {
         "kind": "circle",

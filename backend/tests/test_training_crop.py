@@ -121,6 +121,7 @@ def test_jpeg_and_mask_crop_keep_planned_dimensions(tmp_path: Path):
     PilImage.new("RGB", (64, 64), (30, 60, 90)).save(image_path, format="JPEG", quality=90)
     PilImage.new("L", (64, 64), 255).save(mask_path, format="PNG")
     plan = training_crop.build_plan(_reconstruction(), _catalog())
+    assert training_crop.requires_jpegtran(plan) is True
 
     training_crop.crop_images(source_images, tmp_path / "images", plan, jpegtran)
     training_crop.crop_masks(source_masks, tmp_path / "masks", plan)
@@ -129,6 +130,23 @@ def test_jpeg_and_mask_crop_keep_planned_dimensions(tmp_path: Path):
         assert image.size == (32, 32)
     with PilImage.open(tmp_path / "masks" / "front" / "frame.jpg.png") as mask:
         assert mask.size == (32, 32)
+
+
+def test_rectified_png_crop_does_not_require_jpegtran(tmp_path: Path):
+    reconstruction = _reconstruction()
+    reconstruction.images[1].name = "front/frame.png"
+    catalog = _catalog()
+    catalog["images"][0]["name"] = "front/frame.png"
+    source = tmp_path / "source" / "front" / "frame.png"
+    source.parent.mkdir(parents=True)
+    PilImage.new("RGB", (64, 64), (30, 60, 90)).save(source, format="PNG")
+    plan = training_crop.build_plan(reconstruction, catalog)
+
+    assert training_crop.requires_jpegtran(plan) is False
+    training_crop.crop_images(tmp_path / "source", tmp_path / "destination", plan, None)
+
+    with PilImage.open(tmp_path / "destination" / "front" / "frame.png") as image:
+        assert image.size == (32, 32)
 
 
 def test_mask_crop_rejects_stale_source_dimensions(tmp_path: Path):

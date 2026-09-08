@@ -1,7 +1,7 @@
 """パイプライン全体の状態遷移.
 
 Main reconstruction branch は EXTRACTED から FEATURES_EXTRACTED -> MATCHED -> RECONSTRUCTED ->
-ALIGNED -> SCALE_RESTORED -> GROUNDED -> DENSIFIED -> EXPORTED へ進む。Feature mask は SfM branch、training mask は export branch にだけ接続し、
+ALIGNED -> SCALE_RESTORED -> SCENE_ALIGNED -> DENSIFIED -> EXPORTED へ進む。Feature mask は SfM branch、training mask は export branch にだけ接続し、
 どちらも独立して生成・破棄できる。
 
 各ステージは冪等。入力が変わった場合は consumer graph だけを transitive invalidate し、独立
@@ -26,7 +26,8 @@ class PipelineState(StrEnum):
     RECONSTRUCTED = "reconstructed"
     ALIGNED = "aligned"
     SCALE_RESTORED = "scale_restored"
-    GROUNDED = "grounded"
+    SCENE_ALIGNED = "scene_aligned"
+    CLEANED = "cleaned"
     DENSIFIED = "densified"
     EXPORTED = "exported"
 
@@ -49,9 +50,10 @@ _ORDER: dict[PipelineState, int] = {
     PipelineState.RECONSTRUCTED: 8,
     PipelineState.ALIGNED: 9,
     PipelineState.SCALE_RESTORED: 10,
-    PipelineState.GROUNDED: 11,
-    PipelineState.DENSIFIED: 12,
-    PipelineState.EXPORTED: 13,
+    PipelineState.SCENE_ALIGNED: 11,
+    PipelineState.CLEANED: 12,
+    PipelineState.DENSIFIED: 13,
+    PipelineState.EXPORTED: 14,
 }
 
 
@@ -69,7 +71,8 @@ class StageName(StrEnum):
     RECONSTRUCT = "reconstruct"
     ALIGN_RECONSTRUCTION = "align_reconstruction"
     RESTORE_METRIC_SCALE = "restore_metric_scale"
-    POSITION_GROUND = "position_ground"
+    SCENE_ALIGNMENT = "scene_alignment"
+    CLEANUP_SPARSE = "cleanup_sparse"
     DENSE_INITIALIZATION = "dense_initialization"
     EXPORT_DATASET = "export_dataset"
 
@@ -86,7 +89,8 @@ STAGE_TO_STATE: dict[StageName, PipelineState] = {
     StageName.RECONSTRUCT: PipelineState.RECONSTRUCTED,
     StageName.ALIGN_RECONSTRUCTION: PipelineState.ALIGNED,
     StageName.RESTORE_METRIC_SCALE: PipelineState.SCALE_RESTORED,
-    StageName.POSITION_GROUND: PipelineState.GROUNDED,
+    StageName.SCENE_ALIGNMENT: PipelineState.SCENE_ALIGNED,
+    StageName.CLEANUP_SPARSE: PipelineState.CLEANED,
     StageName.DENSE_INITIALIZATION: PipelineState.DENSIFIED,
     StageName.EXPORT_DATASET: PipelineState.EXPORTED,
 }
@@ -104,10 +108,22 @@ STAGE_ORDER: tuple[StageName, ...] = (
     StageName.RECONSTRUCT,
     StageName.ALIGN_RECONSTRUCTION,
     StageName.RESTORE_METRIC_SCALE,
-    StageName.POSITION_GROUND,
+    StageName.SCENE_ALIGNMENT,
+    StageName.CLEANUP_SPARSE,
     StageName.DENSE_INITIALIZATION,
     StageName.EXPORT_DATASET,
 )
+
+
+_INTERNAL_PREREQUISITES: dict[StageName, tuple[StageName, ...]] = {
+    StageName.GENERATE_FEATURE_MASKS: (StageName.RECTIFY_FISHEYE,),
+    StageName.GENERATE_TRAINING_MASKS: (StageName.RECTIFY_FISHEYE,),
+    StageName.EXTRACT_FEATURES: (StageName.RECTIFY_FISHEYE,),
+}
+
+
+def requested_stage_plan(stage: StageName) -> tuple[StageName, ...]:
+    return (*_INTERNAL_PREREQUISITES.get(stage, ()), stage)
 
 
 _STAGE_CONSUMERS: dict[StageName, tuple[StageName, ...]] = {
@@ -125,8 +141,9 @@ _STAGE_CONSUMERS: dict[StageName, tuple[StageName, ...]] = {
     StageName.MATCH_FEATURES: (StageName.RECONSTRUCT,),
     StageName.RECONSTRUCT: (StageName.ALIGN_RECONSTRUCTION,),
     StageName.ALIGN_RECONSTRUCTION: (StageName.RESTORE_METRIC_SCALE,),
-    StageName.RESTORE_METRIC_SCALE: (StageName.POSITION_GROUND,),
-    StageName.POSITION_GROUND: (StageName.DENSE_INITIALIZATION,),
+    StageName.RESTORE_METRIC_SCALE: (StageName.SCENE_ALIGNMENT,),
+    StageName.SCENE_ALIGNMENT: (StageName.CLEANUP_SPARSE,),
+    StageName.CLEANUP_SPARSE: (StageName.DENSE_INITIALIZATION, StageName.EXPORT_DATASET),
     StageName.DENSE_INITIALIZATION: (StageName.EXPORT_DATASET,),
     StageName.EXPORT_DATASET: (),
 }

@@ -66,7 +66,6 @@ def test_rolling_shutter_motion_uses_recorded_range_and_readout():
             ImuSample(1_000_000, (0.0, 0.0, 0.0), (6553.6, 0.0, 0.0)),
         ],
         timestamps_sec=[0.0, 1.0],
-        orientation="yzX",
         camera_type="Generic dual fisheye",
         is_raw=True,
         gyro_range_dps=2000,

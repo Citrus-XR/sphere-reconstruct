@@ -41,9 +41,7 @@ def matching_progress(ctx: StageContext, *, low: float, high: float):
     iteration_pattern = re.compile(r"Iteration \[(\d+)/(\d+)\]", re.I)
     batch_pattern = re.compile(r"Processing batch \[(\d+)/(\d+)\]", re.I)
     image_pattern = re.compile(r"(?:Processing|Matching) (?:image|file) \[(\d+)/(\d+)\]", re.I)
-    block_pattern = re.compile(
-        r"(?:Processing|Matching) block \[(\d+)/(\d+)\s*,\s*(\d+)/(\d+)\]", re.I
-    )
+    block_pattern = re.compile(r"(?:Processing|Matching) block \[(\d+)/(\d+)\s*,\s*(\d+)/(\d+)\]", re.I)
     state = {
         "fraction": 0.0,
         "indexing_seen": False,
@@ -88,11 +86,7 @@ def matching_progress(ctx: StageContext, *, low: float, high: float):
         batch = batch_pattern.search(line)
         if batch is not None:
             current, total = map(int, batch.groups())
-            fraction = (
-                state["iteration"]
-                - 1
-                + current / max(1, total)
-            ) / state["iteration_total"]
+            fraction = (state["iteration"] - 1 + current / max(1, total)) / state["iteration_total"]
             emit_fraction(fraction, line)
             return
         block = block_pattern.search(line)
@@ -129,9 +123,7 @@ def global_mapper_progress(ctx: StageContext, *, low: float = 0.15, high: float 
         for phase, fraction in phases:
             if phase.lower() in lowered:
                 state["fraction"] = max(state["fraction"], fraction)
-                ctx.progress.tick(
-                    progress=low + (high - low) * state["fraction"], message=phase
-                )
+                ctx.progress.tick(progress=low + (high - low) * state["fraction"], message=phase)
                 break
 
     return callback
@@ -139,26 +131,90 @@ def global_mapper_progress(ctx: StageContext, *, low: float = 0.15, high: float 
 
 def mapper_progress(
     ctx: StageContext,
-    image_count: int,
+    frame_count: int,
     *,
     low: float = 0.1,
     high: float = 0.95,
 ):
-    pattern = re.compile(r"Registering image")
-    state = {"registered": 0}
+    registration_pattern = re.compile(r"Registering image #\d+ \(num_reg_frames=(\d+)\)", re.I)
+    observation_pattern = re.compile(r"Image sees (\d+) / (\d+) points", re.I)
+    registration_failure_pattern = re.compile(r"Could not register, trying another image", re.I)
+    global_refinement_pattern = re.compile(r"Retriangulation and Global bundle adjustment", re.I)
+    mapper_success_pattern = re.compile(r"Keeping successful reconstruction", re.I)
+    state = {"registered": 0, "registration_pending": False, "global_refinement": 0, "solver_warned": False}
+
+    def commit_pending_registration() -> None:
+        if state["registration_pending"]:
+            state["registered"] = min(frame_count, state["registered"] + 1)
+            state["registration_pending"] = False
 
     def callback(line: str) -> None:
         if not line.strip():
             return
-        ctx.progress.tick(message=f"[mapper] {line}")
-        if pattern.search(line):
-            state["registered"] += 1
-            fraction = min(1.0, state["registered"] / max(1, image_count))
+        if "Linear solver failure" in line and not state["solver_warned"]:
+            state["solver_warned"] = True
+            ctx.progress.warn(
+                "Ceres rejected a linear-solver step; COLMAP is continuing. Final diagnostics will include the count.",
+                key="log.recon_solver_step_warning",
+            )
+        registration = registration_pattern.search(line)
+        if registration is not None:
+            state["registered"] = max(state["registered"], int(registration.group(1)))
+            state["registration_pending"] = True
+            fraction = min(1.0, state["registered"] / max(1, frame_count))
             ctx.progress.tick(
                 progress=low + (high - low) * fraction,
-                message=f"mapper: registered {state['registered']}/{image_count}",
+                message=f"mapper: registered frames {state['registered']}/{frame_count}",
                 key="log.recon_mapper_progress",
-                args={"done": state["registered"], "total": image_count},
+                args={"done": state["registered"], "total": frame_count},
             )
+            return
+        if registration_failure_pattern.search(line):
+            state["registration_pending"] = False
+            ctx.progress.tick(message=f"[mapper] {line}")
+            return
+        observation = observation_pattern.search(line)
+        if observation is not None:
+            visible, total = map(int, observation.groups())
+            ctx.progress.tick(
+                message=(
+                    f"registered frames {state['registered']}/{frame_count}; "
+                    f"current image sees {visible}/{total} points"
+                ),
+                key="log.recon_mapper_observations",
+                args={
+                    "done": state["registered"],
+                    "frames": frame_count,
+                    "visible": visible,
+                    "points": total,
+                },
+            )
+            return
+        if global_refinement_pattern.search(line):
+            commit_pending_registration()
+            state["global_refinement"] += 1
+            fraction = min(1.0, state["registered"] / max(1, frame_count))
+            ctx.progress.tick(
+                progress=low + (high - low) * fraction,
+                message=f"mapper: registered frames {state['registered']}/{frame_count}",
+                key="log.recon_mapper_progress",
+                args={"done": state["registered"], "total": frame_count},
+            )
+            ctx.progress.tick(
+                message=(
+                    f"global refinement {state['global_refinement']}: registered frames "
+                    f"{state['registered']}/{frame_count}"
+                ),
+                key="log.recon_global_refinement",
+                args={
+                    "pass": state["global_refinement"],
+                    "done": state["registered"],
+                    "total": frame_count,
+                },
+            )
+            return
+        if mapper_success_pattern.search(line):
+            commit_pending_registration()
+        ctx.progress.tick(message=f"[mapper] {line}")
 
     return callback

@@ -36,7 +36,7 @@ def _source(tmp_path: Path) -> SourceContext:
         id="source",
         label="Source",
         role=SourceRole.PRIMARY,
-        adapter=SourceAdapter.INSTA360_INSV,
+        adapter=SourceAdapter.INSTA360,
         media_kind=MediaKind.VIDEO,
         projection=Projection.DUAL_FISHEYE,
         path=source_path,
@@ -72,6 +72,17 @@ def _fake_paired(*_args, frame_indices, out_dir_lens0, out_dir_lens1, progress, 
     for number in range(1, len(frame_indices) + 1):
         progress(number, len(frame_indices))
     return outputs[0], outputs[1]
+
+
+def test_default_selection_uses_spatial_optical_flow_settings():
+    params = ExtractFrames().normalize_params({})
+
+    assert params["selection_mode"] == "spatial"
+    assert params["candidate_fps"] == 1.5
+    assert params["min_features"] == 50
+    assert params["target_motion"] == 2.0
+    assert params["max_temporal_gap_sec"] == 4.0
+    assert params["continuity_strategy"] == "balanced"
 
 
 def test_spatial_selection_reports_decode_scoring_and_motion(tmp_path, monkeypatch):

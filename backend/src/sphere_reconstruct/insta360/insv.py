@@ -4,7 +4,7 @@
 - MP4 のトップレベル box を安全に列挙する.
 - Insta360 フッタの開始位置を検出する.
 - 各ストリームの codec / 解像度 / 尺 / 時間ベース などの基本情報を返す.
-  (詳細な IMU / offset_v3 パースは metadata.py と imu.py に分ける)
+  (詳細な IMU / calibration パースは metadata.py と calibration.py に分ける)
 
 方針:
 - ffmpeg / ffprobe を子プロセスで呼ぶ実装は別途 imaging/ に置く. ここは

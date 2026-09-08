@@ -22,10 +22,11 @@ import {
 
 // カメラ選択時に Inspector に表示: 対応画像 + feature/training マスクの用途・重ね表示.
 export const CameraInspector = ({
-  projectId, image, sources, featureMaskRunning, trainingMaskRunning,
+  projectId, image, cameraModel, sources, featureMaskRunning, trainingMaskRunning,
 }: {
   projectId: string
   image: ReconstructionImage
+  cameraModel: string
   sources: ProjectSource[]
   featureMaskRunning: boolean
   trainingMaskRunning: boolean
@@ -72,7 +73,8 @@ export const CameraInspector = ({
           onSelect={setMaskPurpose} />} />
       {parsed && originalUrl ? (
         <CapturePreview originalUrl={originalUrl} maskUrl={maskUrl}
-          view={view} onViewChange={setView} alt={image.name} />
+          view={view} onViewChange={setView} alt={image.name}
+          circular={cameraModel.includes('FISHEYE')} />
       ) : (
         <div className="hint">{t('noCamImage')}</div>
       )}

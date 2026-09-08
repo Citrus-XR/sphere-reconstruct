@@ -6,7 +6,7 @@ import json
 import os
 import shutil
 from collections.abc import Callable
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
 from PIL import Image as PilImage
@@ -47,6 +47,11 @@ class InputSpec:
     refine_rig: bool
     multiple_models: bool
 
+    @property
+    def frame_count(self) -> int:
+        """COLMAP の frame counter と同じ単位の capture 数を返す。"""
+        return len({(str(image["source_id"]), int(image["capture_index"])) for image in self.images})
+
     def write(self, path: Path) -> None:
         path.write_text(json.dumps(asdict(self), ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -57,6 +62,27 @@ class InputSpec:
             raise ValueError(f"unsupported input spec version: {data.get('version')}")
         data["feature_batches"] = [FeatureBatch(**batch) for batch in data["feature_batches"]]
         return cls(**data)
+
+
+def hydrate_timestamps(project_dir: Path, spec: InputSpec) -> InputSpec:
+    """Fill the timestamp field omitted by legacy feature workspaces.
+
+    Timestamp-less image collections intentionally retain ``None``. Only a missing
+    key identifies an InputSpec written before timestamps became part of the schema.
+    """
+    if all("timestamp_sec" in image for image in spec.images):
+        return spec
+    catalog = prepared_images.load_catalog(project_dir)
+    timestamps = {
+        str(image["name"]): image.get("timestamp_sec") for image in catalog["images"]
+    }
+    images = [
+        image
+        if "timestamp_sec" in image
+        else {**image, "timestamp_sec": timestamps.get(str(image["name"]))}
+        for image in spec.images
+    ]
+    return replace(spec, images=images)
 
 
 def build(
@@ -82,6 +108,7 @@ def build(
     materialize_masks = use_feature_masks or any(
         image.get("valid_mask_path") is not None
         or image["valid_region"]["kind"] != "full"
+        or bool(image["valid_region"].get("operations"))
         for image in catalog["images"]
     )
     for image_number, image in enumerate(catalog["images"], 1):
@@ -158,6 +185,7 @@ def build(
             "source_id": image["source_id"],
             "source_role": image["source_role"],
             "capture_index": image["capture_index"],
+            "timestamp_sec": image.get("timestamp_sec"),
             "sensor_id": image["sensor_id"],
         }
         for image in catalog["images"]

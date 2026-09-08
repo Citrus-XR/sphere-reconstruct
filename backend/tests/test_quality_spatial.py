@@ -115,3 +115,65 @@ def test_select_spatial_max_frames_cap():
     assert len(res.selected_indices) <= 3
     assert res.selected_indices[0] == 0
     assert res.selected_indices[-1] == 19
+
+
+def test_select_spatial_bridges_quality_rejection_gaps():
+    cands = [
+        _cand(0, 0, 100.0),
+        _cand(1, 1_000_000, 5.0),
+        _cand(2, 2_000_000, 5.0),
+        _cand(3, 3_000_000, 5.0),
+        _cand(4, 4_000_000, 100.0),
+    ]
+
+    result = sampling.select_spatial(
+        cands,
+        lambda first, second: float(second - first),
+        sampling.SpatialConfig(
+            min_sharpness=10.0,
+            target_motion=1.0,
+            max_temporal_gap_sec=1.5,
+        ),
+    )
+
+    assert result.selected_indices == [0, 1, 2, 3, 4]
+    assert result.bridge_frames == 3
+    assert result.bridge_relaxed_sharpness == 3
+    assert result.maximum_gap_sec <= 1.5
+    assert result.unresolved_gaps == 0
+
+
+def test_select_spatial_balanced_bridge_prioritizes_parallax_then_quality():
+    cands = [
+        _cand(0, 0, 100.0),
+        _cand(1, 1_100_000, 9.0),
+        _cand(2, 1_400_000, 1.0),
+        _cand(3, 3_000_000, 100.0),
+    ]
+
+    def motion(first, second):
+        return {(0, 1): 0.1, (0, 2): 1.0}.get((first, second), float(second - first))
+
+    quality = sampling.select_spatial(
+        cands,
+        motion,
+        sampling.SpatialConfig(
+            min_sharpness=10.0,
+            target_motion=1.0,
+            max_temporal_gap_sec=2.0,
+            continuity_strategy="quality",
+        ),
+    )
+    balanced = sampling.select_spatial(
+        cands,
+        motion,
+        sampling.SpatialConfig(
+            min_sharpness=10.0,
+            target_motion=1.0,
+            max_temporal_gap_sec=2.0,
+            continuity_strategy="balanced",
+        ),
+    )
+
+    assert 1 in quality.selected_indices
+    assert 2 in balanced.selected_indices

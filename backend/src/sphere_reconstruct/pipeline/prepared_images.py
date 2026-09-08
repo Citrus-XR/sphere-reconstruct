@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from .errors import LocalizedError
+
 DIRECTORY = "rectify_fisheye"
 
 
@@ -19,5 +21,8 @@ def rig_config_path(project_dir: Path) -> Path:
 def load_catalog(project_dir: Path) -> dict:
     path = catalog_path(project_dir)
     if not path.is_file():
-        raise RuntimeError("rectify_fisheye を先に実行してください")
+        raise LocalizedError(
+            "error.rectify_required",
+            "Internal fisheye normalization must run before this step",
+        )
     return json.loads(path.read_text(encoding="utf-8"))

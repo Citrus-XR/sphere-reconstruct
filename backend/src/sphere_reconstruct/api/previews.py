@@ -9,12 +9,10 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Literal
 
 from fastapi import APIRouter, HTTPException
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field
 
 from ..domain import project as project_domain
 from ..domain.mask_artifact import (
@@ -25,11 +23,12 @@ from ..domain.mask_artifact import (
     stage_for,
 )
 from ..domain.pipeline_state import StageName
-from ..imaging import fisheye_region
+from ..imaging import source_region
 from ..infrastructure.database import get_db
 from ..infrastructure.filesystem import PathNotAllowedError, ensure_within
 from ..pipeline import prepared_images
-from ..pipeline.invalidation import derive_pipeline_state, invalidate_from
+from ..pipeline.invalidation import ArtifactBusyError, derive_pipeline_state, invalidate_from
+from .project_access import MutableProject
 
 router = APIRouter(tags=["previews"])
 
@@ -89,7 +88,9 @@ async def list_frames(project_id: str) -> dict:
     }
 
 
-@router.get("/api/projects/{project_id}/frames/{index}/image", response_class=FileResponse, response_model=None)
+@router.get(
+    "/api/projects/{project_id}/frames/{index}/image", response_class=FileResponse, response_model=None
+)
 async def frame_image(project_id: str, index: int, lens: int = 0):
     """抽出フレーム (fisheye) を返す. INSV は lens0/lens1."""
     project_dir = await _project_dir(project_id)
@@ -200,77 +201,57 @@ async def export_info(project_id: str) -> dict:
     }
 
 
-class RegionOperationBody(BaseModel):
-    mode: Literal["add", "subtract"]
-    x: float = Field(ge=0.0, le=1.0)
-    y: float = Field(ge=0.0, le=1.0)
-    r: float = Field(ge=0.002, le=0.5)
-
-
-class LensRegionBody(BaseModel):
-    cx: float = 0.5
-    cy: float = 0.5
-    r: float = Field(ge=0.01, le=0.75)
-    operations: list[RegionOperationBody] = Field(default_factory=list, max_length=2048)
-
-
-class FisheyeRegion(BaseModel):
-    lens0: LensRegionBody
-    lens1: LensRegionBody
-
-
-@router.get("/api/projects/{project_id}/fisheye-region")
-async def get_fisheye_region(project_id: str, source_id: str) -> dict:
-    """魚眼有効領域の保存値を返す。基準円中心は固定し、sensor ごとの brush 操作も含む。
-
-    saved: UI から source ごとに保存済みか (fisheye_regions.json に key が存在するか).
-    有効領域の設定を必須にするため, フロントはこのフラグでゲートする.
-    """
-    project_dir = await _project_dir(project_id)
-    document_path = fisheye_region.region_path(project_dir)
-    document = json.loads(document_path.read_text(encoding="utf-8")) if document_path.exists() else {}
-    source_document = (document.get("sources") or {}).get(source_id)
-    saved = isinstance(source_document, dict)
-    needs_review = bool(
-        saved and source_document.get("_coordinate_version") != fisheye_region.REGION_VERSION
-    )
-    region = fisheye_region.load_region(project_dir, source_id)
-    return {**region, "saved": saved, "detected": not saved, "needs_review": needs_review}
-
-
-@router.put("/api/projects/{project_id}/fisheye-region")
-async def put_fisheye_region(project_id: str, region: FisheyeRegion, source_id: str) -> dict:
-    """魚眼有効領域を保存する. 検証して正規化した内容を返す."""
-    db = get_db()
-    project = await project_domain.get_project(db, project_id)
+async def _region_source(project_id: str, source_id: str):
+    project = await project_domain.get_project(get_db(), project_id)
     if project is None:
         raise HTTPException(status_code=404, detail="project not found")
-    running = await (
-        await db.conn.execute(
-            "SELECT 1 FROM job WHERE project_id=? AND status IN ('queued', 'running') LIMIT 1",
-            (project_id,),
-        )
-    ).fetchone()
-    if running is not None:
-        raise HTTPException(status_code=409, detail="project has a running job")
+    source = next((item for item in project.sources if item.id == source_id), None)
+    if source is None:
+        raise HTTPException(status_code=404, detail="source not found in project")
+    return project, source
+
+
+@router.get("/api/projects/{project_id}/source-region")
+async def get_source_region(project_id: str, source_id: str) -> dict:
+    project, source = await _region_source(project_id, source_id)
+    region = source_region.load_region(project.workspace_dir, source_id, source.projection)
+    return {**region, **source_region.region_status(project.workspace_dir, source_id)}
+
+
+@router.put("/api/projects/{project_id}/source-region")
+async def put_source_region(
+    project_id: str, region: source_region.SourceRegion, source_id: str, project: MutableProject
+) -> dict:
+    """Source の projection に合う領域を保存し、変更時は画像準備以降を無効化する。"""
+    db = get_db()
+    source = next((item for item in project.sources if item.id == source_id), None)
+    if source is None:
+        raise HTTPException(status_code=404, detail="source not found in project")
+    try:
+        validated = source_region.validate_region(region.model_dump(), source.projection)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
     project_dir = project.workspace_dir
     project_dir.mkdir(parents=True, exist_ok=True)
-    previous = fisheye_region.load_region(project_dir, source_id)
-    saved = fisheye_region.save_region(project_dir, source_id, region.model_dump())
+    previous = source_region.load_region(project_dir, source_id, source.projection)
     invalidated = []
-    if saved != previous:
-        invalidated = await run_in_threadpool(
-            invalidate_from,
-            project_dir,
-            StageName.PREPARE_IMAGES,
-            include_self=True,
-        )
+    if validated != previous:
+        try:
+            invalidated = await run_in_threadpool(
+                invalidate_from,
+                project_dir,
+                StageName.PREPARE_IMAGES,
+                include_self=True,
+            )
+        except ArtifactBusyError as error:
+            raise HTTPException(status_code=423, detail=str(error)) from error
         state = derive_pipeline_state(project_dir)
         await db.conn.execute(
             "UPDATE project SET state=?, updated_at=datetime('now') WHERE id=?",
             (state.value, project_id),
         )
         await db.conn.commit()
+    saved = source_region.save_region(project_dir, source_id, source.projection, validated)
     return {
         **saved,
         "saved": True,
@@ -316,7 +297,20 @@ async def source_info(project_id: str) -> dict:
                 }
             )
         else:
-            source_records.append({"id": source.id, "duration_sec": None})
+            width, height, image_count = await run_in_threadpool(
+                _image_source_dimensions,
+                source.filesystem_path,
+            )
+            source_records.append(
+                {
+                    "id": source.id,
+                    "duration_sec": None,
+                    "fps": None,
+                    "width": width,
+                    "height": height,
+                    "nb_frames": image_count,
+                }
+            )
     primary = p.primary_source
     primary_info = next((record for record in source_records if primary and record["id"] == primary.id), {})
     return {
@@ -324,6 +318,18 @@ async def source_info(project_id: str) -> dict:
         "sources": source_records,
         "duration_sec_total": sum(record.get("duration_sec") or 0.0 for record in source_records),
     }
+
+
+def _image_source_dimensions(path: Path) -> tuple[int, int, int]:
+    from PIL import Image  # noqa: PLC0415
+
+    extensions = {".jpg", ".jpeg", ".png", ".webp", ".tif", ".tiff"}
+    images = sorted(item for item in path.rglob("*") if item.is_file() and item.suffix.lower() in extensions)
+    if not images:
+        raise RuntimeError(f"image source に対応画像がありません: {path}")
+    with Image.open(images[0]) as image:
+        width, height = image.size
+    return width, height, len(images)
 
 
 @router.get("/api/projects/{project_id}/reconstruction", response_class=FileResponse, response_model=None)
@@ -345,7 +351,14 @@ async def reconstruction_points(project_id: str):
 
 
 def _latest_transform_preview(project_dir: Path, filename: str) -> Path:
-    for stage in ("dense_initialization", "position_ground", "restore_metric_scale", "align_reconstruction"):
+    for stage in (
+        "dense_initialization",
+        "cleanup_sparse",
+        "scene_alignment",
+        "restore_metric_scale",
+        "align_reconstruction",
+        "reconstruct",
+    ):
         path = project_dir / stage / "preview" / filename
         if path.is_file():
             return path

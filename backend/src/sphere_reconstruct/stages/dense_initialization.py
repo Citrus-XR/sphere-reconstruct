@@ -14,15 +14,22 @@ from ..pipeline.manifest import register
 from ..pipeline.stage import Stage, StageContext, new_manifest
 from . import similarity_transform
 
+_ROMAV2_SETTING = {
+    "turbo": "turbo",
+    "fast": "fast",
+    "base": "base",
+    "high": "precise",
+}
+
 
 @register
 class DenseInitialization(Stage):
     name = StageName.DENSE_INITIALIZATION
-    impl_version = "1.0"
+    impl_version = "1.2"
 
     def normalize_params(self, raw: dict) -> dict:
         quality = str(raw.get("quality", "turbo")).lower()
-        if quality not in {"turbo", "fast", "base", "high"}:
+        if quality not in _ROMAV2_SETTING:
             raise ValueError(f"unsupported RoMaV2 quality: {quality}")
         return {
             "enabled": bool(raw.get("enabled", False)),
@@ -42,10 +49,10 @@ class DenseInitialization(Stage):
 
     def collect_inputs(self, ctx: StageContext) -> list[FileRef]:
         candidates = [
-            ctx.project_dir / "manifests" / "position_ground.json",
+            ctx.project_dir / "manifests" / "cleanup_sparse.json",
             ctx.project_dir / "manifests" / "extract_features.json",
             prepared_images.catalog_path(ctx.project_dir),
-            *(ctx.project_dir / "position_ground" / "sparse" / "0").glob("*"),
+            *(ctx.project_dir / "cleanup_sparse" / "sparse" / "0").glob("*"),
         ]
         return similarity_transform.input_refs(ctx, candidates)
 
@@ -53,10 +60,10 @@ class DenseInitialization(Stage):
         manifest = new_manifest(self.name, self.impl_version)
         manifest.inputs = ctx.inputs_for(self)
         manifest.params = ctx.params
-        input_model = ctx.project_dir / "position_ground" / "sparse" / "0"
+        input_model = ctx.project_dir / "cleanup_sparse" / "sparse" / "0"
         output_model = ctx.stage_out_dir / "sparse" / "0"
         if not (input_model / "cameras.bin").is_file():
-            raise RuntimeError("position_ground must run before dense initialization")
+            raise RuntimeError("cleanup_sparse must run before dense initialization")
 
         if not ctx.params["enabled"]:
             shutil.copytree(input_model, output_model)
@@ -79,7 +86,7 @@ class DenseInitialization(Stage):
             catalog = prepared_images.load_catalog(ctx.project_dir)
             from ..dense_init.matcher import RomaV2Matcher  # noqa: PLC0415
 
-            matcher = RomaV2Matcher(setting=ctx.params["quality"], seed=ctx.params["seed"])
+            matcher = RomaV2Matcher(setting=_ROMAV2_SETTING[ctx.params["quality"]], seed=ctx.params["seed"])
             try:
                 dense_result = densify_reconstruction(
                     reconstruction,
@@ -99,9 +106,9 @@ class DenseInitialization(Stage):
                         use_feature_masks=ctx.params["use_feature_masks"],
                         seed=ctx.params["seed"],
                     ),
-                    progress=lambda current, total: ctx.progress.info(
-                        f"dense matching {current}/{total}",
-                        progress=0.08 + 0.82 * current / max(total, 1),
+                    progress=lambda current, total: ctx.progress.tick(
+                        0.08 + 0.82 * current / max(total, 1),
+                        message=f"dense matching {current}/{total}",
                         key="log.dense_pairs_progress",
                         args={"cur": current, "tot": total},
                     ),

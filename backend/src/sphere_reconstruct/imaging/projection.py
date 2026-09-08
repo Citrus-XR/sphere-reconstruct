@@ -1,19 +1,7 @@
-"""MEI (Mei-Rives) 拡張歪みモデルの投影 / 逆投影。
+"""Sensor-local unified omnidirectional projection の数値核。
 
-参考: PIPELINE.md (insv-stitch) の MEI 説明を独立に実装 + サンプル観測.
-
-方針:
-- 「目標 pinhole 画素 -> 目標射線 -> 物理镜头座標系 -> MEI 投影 -> 一回 backward
-  remap」で最終画素を得る. fisheye を先に等距柱状 (ERP) に展開してから再投影する
-  複数段パイプは避ける.
-- 単体テストはリファレンス解像度と抽出解像度が違っても成立するように, 抜きだし
-  時のスケールを常に明示引数で渡す.
-
-このモジュールは numpy 依存. cv2 は使わず, 画像 remap は
-`imaging/rendering.py` に分離する. 数値核だけをここに置く.
-
-入力校正は adapter が sensor-local 画像座標へ正規化済みでなければならない。container
-内の合成画布、crop、sensor 順序などの規約をこの数値核へ持ち込まない。
+Adapter は container canvas、crop、sensor order を正規化してから本 module へ渡す。RGB は
+target ray から source pixel への一回の backward remap で変換し、途中 ERP は作らない。
 """
 
 from __future__ import annotations
@@ -23,7 +11,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from ..domain.camera_system import MeiIntrinsics
+from ..domain.camera_system import OmniDistortionModel, OmniIntrinsics
 
 
 @dataclass(frozen=True)
@@ -40,13 +28,13 @@ class ColmapFisheyeApproximation:
 
 
 def approximate_opencv_fisheye(
-    intr: MeiIntrinsics,
+    intr: OmniIntrinsics,
     *,
     maximum_theta_rad: float = math.pi / 2,
     theta_samples: int = 120,
     azimuth_samples: int = 96,
 ) -> ColmapFisheyeApproximation:
-    """MEI を non-radial 項のない互換性重視の OPENCV_FISHEYE へ近似する。"""
+    """Unified omnidirectional projection を OPENCV_FISHEYE へ近似する。"""
     if not 0 < maximum_theta_rad <= math.pi / 2:
         raise ValueError("fisheye approximation は forward hemisphere 内でなければなりません")
     theta_values = np.linspace(1e-4, maximum_theta_rad, theta_samples)
@@ -60,9 +48,9 @@ def approximate_opencv_fisheye(
         ),
         axis=-1,
     )
-    projected, _valid = project_mei(rays.reshape(-1, 3), intr)
+    projected, _valid = project_omni(rays.reshape(-1, 3), intr)
     if not np.all(np.isfinite(projected)):
-        raise ValueError("MEI calibration が non-finite な forward ray を生成しました")
+        raise ValueError("omnidirectional calibration が non-finite ray を生成しました")
     u = projected[:, 0].reshape(theta.shape)
     v = projected[:, 1].reshape(theta.shape)
     powers = np.stack([theta**power for power in (1, 3, 5, 7, 9)], axis=-1)
@@ -104,13 +92,13 @@ def approximate_opencv_fisheye(
 
 
 def approximate_thin_prism_fisheye(
-    intr: MeiIntrinsics,
+    intr: OmniIntrinsics,
     *,
     maximum_theta_rad: float = math.pi / 2,
     theta_samples: int = 120,
     azimuth_samples: int = 96,
 ) -> ColmapFisheyeApproximation:
-    """MEI calibration を COLMAP THIN_PRISM_FISHEYE へ近似する。"""
+    """Unified omnidirectional calibration を COLMAP THIN_PRISM_FISHEYE へ近似する。"""
     # COLMAP の perspective fisheye ray は FOV <= 180° の時だけ正しく、常に rz > 0 を返す。
     # https://github.com/colmap/colmap/blob/a0d785fba74b2664f31edc4a29026a8b27c00f67/src/colmap/sensor/models.h#L290-L347
     if not 0 < maximum_theta_rad <= math.pi / 2:
@@ -126,9 +114,9 @@ def approximate_thin_prism_fisheye(
         ),
         axis=-1,
     )
-    projected, _valid = project_mei(rays.reshape(-1, 3), intr)
+    projected, _valid = project_omni(rays.reshape(-1, 3), intr)
     if not np.all(np.isfinite(projected)):
-        raise ValueError("MEI calibration produced non-finite forward-hemisphere coordinates")
+        raise ValueError("omnidirectional calibration が non-finite 座標を生成しました")
     u = projected[:, 0].reshape(theta.shape)
     v = projected[:, 1].reshape(theta.shape)
     powers = np.stack([theta**power for power in (1, 3, 5, 7, 9)], axis=-1)
@@ -312,14 +300,14 @@ def _lichtfeld_thin_prism_prediction(
 
 
 # -----------------------------------------------------------------------------
-# MEI 投影 / 歪み補正
+# Unified omnidirectional 投影 / 歪み補正
 # -----------------------------------------------------------------------------
 
 
-def project_mei(rays: np.ndarray, intr: MeiIntrinsics) -> tuple[np.ndarray, np.ndarray]:
+def project_omni(rays: np.ndarray, intr: OmniIntrinsics) -> tuple[np.ndarray, np.ndarray]:
     """3D 射線 (N,3) -> 画素座標 (N,2). 有効フラグ (N,) も返す.
 
-    有効フラグ = 「MEI 前方射影 (Z + xi > 0)」and 「画素座標が画像内」.
+    有効フラグ = 「unified projection の分母が正」and「画素座標が画像内」.
     """
     if rays.ndim != 2 or rays.shape[1] != 3:
         raise ValueError(f"rays must be (N,3), got {rays.shape}")
@@ -350,23 +338,13 @@ def project_mei(rays: np.ndarray, intr: MeiIntrinsics) -> tuple[np.ndarray, np.n
     return uv, valid
 
 
-def unproject_mei(pixels: np.ndarray, intr: MeiIntrinsics) -> tuple[np.ndarray, np.ndarray]:
-    """Sensor-local pixel を MEI camera ray へ戻す。"""
+def unproject_omni(pixels: np.ndarray, intr: OmniIntrinsics) -> tuple[np.ndarray, np.ndarray]:
+    """Sensor-local pixel を camera ray へ戻す。"""
     pixels = np.asarray(pixels, dtype=np.float64).reshape((-1, 2))
     distorted = np.column_stack(
         ((pixels[:, 0] - intr.cx) / intr.fx, (pixels[:, 1] - intr.cy) / intr.fy)
     )
-    normalized = distorted.copy()
-    maximum_radius = 1.0 / intr.xi
-    _clip_planar_radius(normalized, maximum_radius)
-    for _ in range(20):
-        applied_x, applied_y = _apply_distortion(
-            normalized[:, 0],
-            normalized[:, 1],
-            intr,
-        )
-        normalized += distorted - np.column_stack((applied_x, applied_y))
-        _clip_planar_radius(normalized, maximum_radius)
+    normalized = _invert_distortion(distorted, intr)
     applied_x, applied_y = _apply_distortion(normalized[:, 0], normalized[:, 1], intr)
     inversion_error = np.linalg.norm(
         np.column_stack((applied_x, applied_y)) - distorted,
@@ -405,17 +383,151 @@ def unproject_mei(pixels: np.ndarray, intr: MeiIntrinsics) -> tuple[np.ndarray, 
     return rays, valid
 
 
-def _apply_distortion(x: np.ndarray, y: np.ndarray, intr: MeiIntrinsics) -> tuple[np.ndarray, np.ndarray]:
+def _apply_distortion(x: np.ndarray, y: np.ndarray, intr: OmniIntrinsics) -> tuple[np.ndarray, np.ndarray]:
+    distorted_x, distorted_y, _j00, _j01, _j10, _j11 = _distortion_with_jacobian(x, y, intr)
+    return distorted_x, distorted_y
+
+
+def _distortion_with_jacobian(
+    x: np.ndarray,
+    y: np.ndarray,
+    intr: OmniIntrinsics,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     r2 = x * x + y * y
+    dr2_dx = 2.0 * x
+    dr2_dy = 2.0 * y
+    if intr.distortion_model == OmniDistortionModel.RADTAN:
+        k1, k2, k3, p1, p2 = intr.distortion_parameters
+        r4 = r2 * r2
+        radial = 1.0 + r2 * (k1 + r2 * (k2 + r2 * k3))
+        radial_derivative = k1 + r2 * (2.0 * k2 + 3.0 * k3 * r2)
+        radial_dx = radial_derivative * dr2_dx
+        radial_dy = radial_derivative * dr2_dy
+        distorted_x = x * radial + 2.0 * p1 * x * y + p2 * (r2 + 2.0 * x * x)
+        distorted_y = y * radial + p1 * (r2 + 2.0 * y * y) + 2.0 * p2 * x * y
+        j00 = radial + x * radial_dx + 2.0 * p1 * y + 6.0 * p2 * x
+        j01 = x * radial_dy + 2.0 * p1 * x + 2.0 * p2 * y
+        j10 = y * radial_dx + 2.0 * p1 * x + 2.0 * p2 * y
+        j11 = radial + y * radial_dy + 6.0 * p1 * y + 2.0 * p2 * x
+        return distorted_x, distorted_y, j00, j01, j10, j11
+
+    coefficients = intr.distortion_parameters
     r4 = r2 * r2
-    r6 = r4 * r2
-    radial = 1.0 + intr.k1 * r2 + intr.k2 * r4 + intr.k3 * r6
-    # OpenCV 系 tangential: p1, p2 の順で:
-    #   dx = 2*p1*x*y + p2*(r2 + 2*x^2)
-    #   dy = p1*(r2 + 2*y^2) + 2*p2*x*y
-    dx = 2.0 * intr.p1 * x * y + intr.p2 * (r2 + 2.0 * x * x)
-    dy = intr.p1 * (r2 + 2.0 * y * y) + 2.0 * intr.p2 * x * y
-    return x * radial + dx, y * radial + dy
+    radial = 1.0 + r2 * (
+        coefficients[0]
+        + r2
+        * (
+            coefficients[1]
+            + r2
+            * (
+                coefficients[2]
+                + r2 * (coefficients[3] + r2 * coefficients[4])
+            )
+        )
+    )
+    radial_derivative = (
+        coefficients[0]
+        + r2
+        * (
+            2.0 * coefficients[1]
+            + r2
+            * (
+                3.0 * coefficients[2]
+                + r2 * (4.0 * coefficients[3] + 5.0 * coefficients[4] * r2)
+            )
+        )
+    )
+    radial_dx = radial_derivative * dr2_dx
+    radial_dy = radial_derivative * dr2_dy
+    a = coefficients[5] + coefficients[7] * r2
+    b = coefficients[6] + coefficients[8] * r2
+    a_dx, a_dy = coefficients[7] * dr2_dx, coefficients[7] * dr2_dy
+    b_dx, b_dy = coefficients[8] * dr2_dx, coefficients[8] * dr2_dy
+    s1, s3, s2, s4 = coefficients[9], coefficients[10], coefficients[11], coefficients[12]
+    distorted_x = (
+        x * radial
+        + (r2 + 2.0 * x * x) * a
+        + 2.0 * x * y * b
+        + s1 * r2
+        + s2 * r4
+    )
+    distorted_y = (
+        y * radial
+        + 2.0 * x * y * a
+        + (r2 + 2.0 * y * y) * b
+        + s3 * r2
+        + s4 * r4
+    )
+    j00 = (
+        radial
+        + x * radial_dx
+        + 6.0 * x * a
+        + (r2 + 2.0 * x * x) * a_dx
+        + 2.0 * y * b
+        + 2.0 * x * y * b_dx
+        + s1 * dr2_dx
+        + 2.0 * s2 * r2 * dr2_dx
+    )
+    j01 = (
+        x * radial_dy
+        + 2.0 * y * a
+        + (r2 + 2.0 * x * x) * a_dy
+        + 2.0 * x * b
+        + 2.0 * x * y * b_dy
+        + s1 * dr2_dy
+        + 2.0 * s2 * r2 * dr2_dy
+    )
+    j10 = (
+        y * radial_dx
+        + 2.0 * y * a
+        + 2.0 * x * y * a_dx
+        + dr2_dx * b
+        + (r2 + 2.0 * y * y) * b_dx
+        + s3 * dr2_dx
+        + 2.0 * s4 * r2 * dr2_dx
+    )
+    j11 = (
+        radial
+        + y * radial_dy
+        + 2.0 * x * a
+        + 2.0 * x * y * a_dy
+        + (dr2_dy + 4.0 * y) * b
+        + (r2 + 2.0 * y * y) * b_dy
+        + s3 * dr2_dy
+        + 2.0 * s4 * r2 * dr2_dy
+    )
+    return distorted_x, distorted_y, j00, j01, j10, j11
+
+
+def _invert_distortion(distorted: np.ndarray, intr: OmniIntrinsics) -> np.ndarray:
+    estimate = distorted.copy()
+    maximum_radius = 1.0 / intr.xi
+    _clip_planar_radius(estimate, maximum_radius)
+    for _ in range(20):
+        x, y = estimate[:, 0], estimate[:, 1]
+        applied_x, applied_y, j00, j01, j10, j11 = _distortion_with_jacobian(x, y, intr)
+        residual_x = applied_x - distorted[:, 0]
+        residual_y = applied_y - distorted[:, 1]
+        determinant = j00 * j11 - j01 * j10
+        safe = np.abs(determinant) > 1e-12
+        delta_x = np.divide(
+            residual_x * j11 - residual_y * j01,
+            determinant,
+            out=np.zeros_like(residual_x),
+            where=safe,
+        )
+        delta_y = np.divide(
+            j00 * residual_y - j10 * residual_x,
+            determinant,
+            out=np.zeros_like(residual_y),
+            where=safe,
+        )
+        delta = np.column_stack((delta_x, delta_y))
+        step_length = np.linalg.norm(delta, axis=1)
+        delta *= np.minimum(1.0, 0.1 / np.maximum(step_length, 1e-12))[:, None]
+        estimate -= delta
+        _clip_planar_radius(estimate, maximum_radius)
+    return estimate
 
 
 def _clip_planar_radius(points: np.ndarray, maximum_radius: float) -> None:

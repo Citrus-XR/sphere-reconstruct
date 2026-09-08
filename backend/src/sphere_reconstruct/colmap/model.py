@@ -100,6 +100,7 @@ class Reconstruction:
         mean_track = sum(track_lengths) / len(track_lengths) if track_lengths else 0.0
         sorted_errors = sorted(errs)
         sorted_tracks = sorted(track_lengths)
+        exact_black_points = sum(point.rgb == (0, 0, 0) for point in self.points3D.values())
         result = {
             "num_cameras": len(self.cameras),
             "num_images": len(self.images),
@@ -109,7 +110,11 @@ class Reconstruction:
             "p95_reprojection_error": _percentile(sorted_errors, 0.95),
             "mean_track_length": mean_track,
             "median_track_length": _percentile(sorted_tracks, 0.5),
+            "two_observation_points": track_lengths.count(2),
+            "two_observation_point_ratio": track_lengths.count(2) / max(1, len(track_lengths)),
             "num_observations": sum(track_lengths),
+            "exact_black_points": exact_black_points,
+            "exact_black_point_ratio": exact_black_points / max(1, len(self.points3D)),
         }
         if self.images:
             centers = [image.camera_center for image in self.images.values()]

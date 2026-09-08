@@ -1,4 +1,4 @@
-"""Camera model と physical image circle の共通 valid-region geometry。"""
+"""Camera model、基準円、全画像 brush の共通 valid-region geometry。"""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ def cache_key(region: dict, width: int, height: int) -> str:
 def render_mask(region: dict, width: int, height: int) -> np.ndarray:
     """Valid pixel を 1 とする uint8 mask を返す。"""
     _validate_dimensions(width, height)
-    if region.get("kind") == "full":
+    if region.get("kind") == "full" and not region.get("operations"):
         return np.ones((height, width), dtype=np.uint8)
     mask = np.empty((height, width), dtype=np.uint8)
     for start, block in _mask_blocks(region, width, height):
@@ -34,7 +34,7 @@ def render_mask(region: dict, width: int, height: int) -> np.ndarray:
 def bounding_box(region: dict, width: int, height: int) -> tuple[float, float, float, float]:
     """Valid pixel を包含する最小の pixel-edge bounds を返す。"""
     _validate_dimensions(width, height)
-    if region.get("kind") == "full":
+    if region.get("kind") == "full" and not region.get("operations"):
         return 0.0, 0.0, float(width), float(height)
 
     minimum_x = width
@@ -59,6 +59,15 @@ def _mask_blocks(region: dict, width: int, height: int) -> Iterator[tuple[int, n
     kind = region.get("kind")
     block_rows = max(1, _BLOCK_WORKING_BYTES // max(1, width * 96))
     pixel_x = np.arange(width, dtype=np.float64)
+
+    if kind == "full":
+        for start in range(0, height, block_rows):
+            end = min(height, start + block_rows)
+            block = np.ones((end - start, width), dtype=bool)
+            yield start, _apply_operations(
+                block, region.get("operations", []), pixel_x, start, end, width, height
+            ).astype(np.uint8)
+        return
 
     if kind == "circle":
         circle_x_squared, circle_y_squared, circle_radius_squared = _circle_terms(

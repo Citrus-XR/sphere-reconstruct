@@ -4,10 +4,18 @@ import json
 import math
 from pathlib import Path
 
+import numpy as np
+import pytest
 from PIL import Image
 
+from sphere_reconstruct.domain.camera_system import OmniDistortionModel
+from sphere_reconstruct.imaging import source_region, valid_region
 from sphere_reconstruct.insta360 import camera_system
-from sphere_reconstruct.insta360.calibration import CalibSource, DualLensCalibration, MeiLensCalibration
+from sphere_reconstruct.insta360.calibration import (
+    CalibSource,
+    DualLensCalibration,
+    OmniLensCalibration,
+)
 from sphere_reconstruct.insta360.metadata import WindowCropInfo
 from sphere_reconstruct.pipeline.stage import ProgressReporter, StageContext
 from sphere_reconstruct.stages.prepare_images import PrepareImages
@@ -18,11 +26,8 @@ def _valid_dual_fisheye_calibration() -> dict:
         "xi": 2.0,
         "tx": 0.0,
         "ty": 0.0,
-        "k1": 0.183,
-        "k2": 2.06,
-        "k3": -3.27,
-        "p1": 0.0,
-        "p2": 0.0,
+        "distortion_model": OmniDistortionModel.RADTAN,
+        "distortion_parameters": (0.183, 2.06, -3.27, 0.0, 0.0),
         "ref_image_width": 10752,
         "ref_image_height": 5376,
         "lens_flags": 113,
@@ -117,6 +122,102 @@ def test_perspective_exif_orientation_and_focal_are_normalized(tmp_path):
         assert normalized.getexif().get(274) is None
 
 
+def test_phone_exclusion_reaches_feature_and_export_masks_without_sam(tmp_path):
+    from sphere_reconstruct.colmap import input_workspace
+    from sphere_reconstruct.stages.export_dataset import _copy_masks
+
+    project = tmp_path / "project"
+    project.mkdir()
+    photo = project / "phone.jpg"
+    image = Image.new("RGB", (120, 80), (20, 40, 60))
+    exif = Image.Exif()
+    exif[274] = 6
+    image.save(photo, exif=exif)
+    source = {
+        "id": "phone", "label": "Phone", "role": "primary", "adapter": "generic_images",
+        "media_kind": "images", "projection": "perspective", "kind": "perspective_images",
+        "width": None, "height": None, "count": 1,
+        "frames": [{"index": 0, "source_id": "phone", "source_index": 0, "timestamp_sec": None,
+                    "image_source": str(photo)}],
+    }
+    _write_documents(project, sources=[source])
+    region = source_region.default_region("perspective")
+    region["views"]["main"]["operations"] = [
+        {"mode": "subtract", "x": 0.75, "y": 0.25, "r": 0.1, "stroke_id": 1},
+    ]
+    source_region.save_region(project, "phone", "perspective", region)
+    output = project / ".prepare_images.tmp"
+    output.mkdir()
+    stage = PrepareImages()
+    context = StageContext(project_id="project", project_dir=project, stage_out_dir=output,
+                           params=stage.normalize_params({}), sources=(),
+                           progress=ProgressReporter(lambda *_args: None))
+    stage.execute(context)
+    record = json.loads((output / "image_catalog.json").read_text())["images"][0]
+    assert (record["width"], record["height"]) == (80, 120)
+    mask = valid_region.render_mask(record["valid_region"], 80, 120)
+    assert mask[30, 60] == 0
+    assert mask[90, 20] == mask[0, 0] == 1
+    output.rename(project / "rectify_fisheye")
+    catalog_path = project / "rectify_fisheye" / "image_catalog.json"
+    catalog = json.loads(catalog_path.read_text())
+    for item in catalog["images"]:
+        item["path"] = item["path"].replace("prepare_images", "rectify_fisheye")
+    catalog_path.write_text(json.dumps(catalog))
+    spec = input_workspace.build(project, project / "extract_features", use_feature_masks=False)
+    assert spec.mask_path is not None
+    with Image.open(project / "extract_features" / "masks" / (record["name"] + ".png")) as generated:
+        assert generated.getpixel((60, 30)) == 0
+    count, sizes = _copy_masks(project, None, project / "export" / "masks", {record["name"]},
+                               {record["name"]: (80, 120)})
+    assert count == 1 and sizes[record["name"]] == (80, 120)
+    with Image.open(project / "export" / "masks" / (record["name"] + ".png")) as exported:
+        assert exported.getpixel((60, 30)) == 0
+        assert exported.getpixel((0, 0)) == 255
+
+
+@pytest.mark.parametrize("projection_name", ["dual_fisheye", "equirectangular"])
+def test_source_region_is_remapped_with_pinhole_views(tmp_path, projection_name):
+    project = tmp_path / "project"
+    project.mkdir()
+    image = project / "source.jpg"
+    width, height = (100, 100) if projection_name == "dual_fisheye" else (200, 100)
+    Image.new("RGB", (width, height), (80, 80, 80)).save(image)
+    frame = {"index": 0, "source_id": "primary", "source_index": 0, "timestamp_sec": 0.0}
+    frame.update({"lens0": "source.jpg", "lens1": "source.jpg"} if projection_name == "dual_fisheye"
+                 else {"image": "source.jpg"})
+    source = {"id": "primary", "label": "360", "role": "primary", "adapter": "insta360",
+              "media_kind": "video", "projection": projection_name, "kind": "insv_dual",
+              "width": width, "height": height, "count": 1, "frames": [frame]}
+    if projection_name == "dual_fisheye":
+        source["calibration"] = _valid_dual_fisheye_calibration()
+    _write_documents(project, sources=[source])
+    region = source_region.default_region(projection_name)
+    for view in region["views"].values():
+        view["operations"] = [{"mode": "subtract", "x": 0.5, "y": 0.5, "r": 0.12, "stroke_id": 1}]
+    stage = PrepareImages()
+    masks_by_run = []
+    for run, current in enumerate((source_region.default_region(projection_name), region)):
+        source_region.save_region(project, "primary", projection_name, current)
+        output = project / f"output{run}"
+        output.mkdir()
+        context = StageContext(project_id="project", project_dir=project, stage_out_dir=output,
+                               params=stage.normalize_params({"reconstruction_mode": "pinhole_rig", "size": 32}),
+                               sources=(), progress=ProgressReporter(lambda *_args: None))
+        stage.execute(context)
+        catalog = json.loads((output / "image_catalog.json").read_text())
+        masks = []
+        for record in catalog["images"]:
+            with Image.open(project / record["valid_mask_path"]) as mask:
+                masks.append(np.asarray(mask).copy())
+        masks_by_run.append(masks)
+    assert len(masks_by_run[0]) == len(masks_by_run[1])
+    assert all(np.all(mask <= original) for original, mask in zip(*masks_by_run, strict=True))
+    assert sum(np.count_nonzero(mask) for mask in masks_by_run[1]) < sum(
+        np.count_nonzero(mask) for mask in masks_by_run[0]
+    )
+
+
 def test_native_fisheye_and_phone_create_separate_camera_groups(tmp_path):
     project = tmp_path / "project"
     extract = project / "extract_frames"
@@ -133,14 +234,14 @@ def test_native_fisheye_and_phone_create_separate_camera_groups(tmp_path):
                 "id": "primary",
                 "label": "360",
                 "role": "primary",
-                "adapter": "insta360_insv",
+                "adapter": "insta360",
                 "media_kind": "video",
                 "projection": "dual_fisheye",
                 "kind": "insv_dual",
                 "width": 100,
                 "height": 100,
                 "count": 1,
-                "offset_v3": _valid_dual_fisheye_calibration(),
+                "calibration": _valid_dual_fisheye_calibration(),
                 "frames": [
                     {
                         "index": 0,
@@ -232,13 +333,16 @@ def _write_documents(project, *, sources):
     for source in sources:
         inspection = {key: value for key, value in source.items() if key != "frames"}
         if source["projection"] == "dual_fisheye":
-            calibration = source.get("offset_v3", {"valid": False})
-            inspection["offset_v3"] = calibration
+            calibration = source.get("calibration", {"valid": False})
+            inspection["calibration"] = calibration
             if calibration.get("valid"):
-                system = camera_system.from_offset_v3(
+                system = camera_system.from_calibration(
                     DualLensCalibration(
-                        source=CalibSource.OFFSET_V3,
-                        lenses=[MeiLensCalibration(**lens) for lens in calibration["lenses"]],
+                        source=CalibSource.OFFSET,
+                        version=3,
+                        lenses=tuple(
+                            OmniLensCalibration(**lens) for lens in calibration["lenses"]
+                        ),
                     ),
                     window_crop=WindowCropInfo(5376, 5376, 5312, 5312),
                     rolling_shutter_readout_ms=21.244001,
@@ -249,7 +353,7 @@ def _write_documents(project, *, sources):
                 path.write_text(json.dumps(system.to_dict()))
                 inspection["camera_system_path"] = relative
         inspections.append(inspection)
-    (inspect / "sources.json").write_text(json.dumps({"version": 3, "sources": inspections}))
+    (inspect / "sources.json").write_text(json.dumps({"version": 4, "sources": inspections}))
     (extract / "manifest_frames.json").write_text(
         json.dumps(
             {

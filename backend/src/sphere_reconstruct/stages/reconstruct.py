@@ -7,13 +7,16 @@
 from __future__ import annotations
 
 import json
+import math
 import shutil
+import sqlite3
 from pathlib import Path
 
 from ..colmap import model as colmap_model
 from ..colmap import quality as colmap_quality
 from ..colmap import runner as colmap_runner
 from ..colmap import trajectory_quality
+from ..colmap.solver_diagnostics import read_solver_diagnostics
 from ..colmap.input_workspace import InputSpec
 from ..domain.artifacts import FileRef, StageManifest
 from ..domain.pipeline_state import StageName
@@ -22,22 +25,46 @@ from ..infrastructure.filesystem import sha256_file
 from ..pipeline.manifest import register
 from ..pipeline.stage import Stage, StageContext, new_manifest
 from ..settings import get_settings
+from . import similarity_transform
 from .colmap_progress import global_mapper_progress, hidden_log, mapper_progress
 
 
 @register
 class Reconstruct(Stage):
     name = StageName.RECONSTRUCT
-    impl_version = "2.5"
+    impl_version = "2.9"
 
     def normalize_params(self, raw: dict) -> dict:
-        mapper = str(raw.get("mapper", "global")).lower()
+        mapper = str(raw.get("mapper", "incremental")).lower()
         if mapper not in {"incremental", "global"}:
             raise ValueError(f"unsupported mapper: {mapper}")
         ba_use_gpu = bool(raw.get("ba_use_gpu", False))
         max_adjacent_step_ratio = float(raw.get("max_adjacent_step_ratio", 10.0))
         if max_adjacent_step_ratio != 0.0 and max_adjacent_step_ratio <= 1.0:
             raise ValueError("max_adjacent_step_ratio must be zero or greater than one")
+        triangulation_defaults = {
+            "filter_max_reproj_error": 4.0,
+            "filter_min_tri_angle": 1.5,
+            "tri_create_max_angle_error": 2.0,
+            "tri_continue_max_angle_error": 2.0,
+            "tri_merge_max_reproj_error": 4.0,
+            "tri_complete_max_reproj_error": 4.0,
+            "tri_min_angle": 1.5,
+        }
+        triangulation_params = {
+            key: float(raw.get(key, default))
+            for key, default in triangulation_defaults.items()
+        }
+        invalid_triangulation = [
+            key
+            for key, value in triangulation_params.items()
+            if not math.isfinite(value) or value < 0
+        ]
+        if invalid_triangulation:
+            raise ValueError(
+                "triangulation parameters must be finite and non-negative: "
+                + ", ".join(invalid_triangulation)
+            )
         return {
             "mapper": mapper,
             "view_graph_calibration": bool(raw.get("view_graph_calibration", mapper == "global")),
@@ -49,8 +76,7 @@ class Reconstruct(Stage):
             "init_image_id1": int(raw.get("init_image_id1", 0)),
             "init_image_id2": int(raw.get("init_image_id2", 0)),
             "abs_pose_max_error": float(raw.get("abs_pose_max_error", 0.0)),
-            "filter_max_reproj_error": float(raw.get("filter_max_reproj_error", 0.0)),
-            "filter_min_tri_angle": float(raw.get("filter_min_tri_angle", 0.0)),
+            **triangulation_params,
             "ba_local_max_num_iterations": int(raw.get("ba_local_max_num_iterations", 0)),
             "ba_global_max_num_iterations": int(raw.get("ba_global_max_num_iterations", 0)),
             "min_model_size": int(raw.get("min_model_size", 0)),
@@ -58,6 +84,7 @@ class Reconstruct(Stage):
             "min_points3D": int(raw.get("min_points3D", 100)),
             "max_adjacent_step_ratio": max_adjacent_step_ratio,
             "incremental_fallback": bool(raw.get("incremental_fallback", True)),
+            "max_preview_points": int(raw.get("max_preview_points", 500_000)),
         }
 
     def collect_inputs(self, ctx: StageContext) -> list[FileRef]:
@@ -99,17 +126,19 @@ class Reconstruct(Stage):
         image_path = ctx.project_dir / "extract_features" / spec.image_path
         mapper = ctx.params["mapper"]
         effective_mapper = mapper
+        video_data = any(source.media_kind == MediaKind.VIDEO for source in ctx.sources)
         require_trajectory_continuity = bool(
             ctx.primary_source is not None and ctx.primary_source.media_kind == MediaKind.VIDEO
         )
+        primary_initialization: dict | None = None
         apply_view_graph_calibration = bool(
             mapper == "global" and ctx.params["view_graph_calibration"] and spec.refine_intrinsics
         )
         ctx.progress.info(
-            f"sparse reconstruction: mapper={mapper}, images={spec.image_count}",
+            f"sparse reconstruction: mapper={mapper}, images={spec.image_count}, frames={spec.frame_count}",
             progress=0.05,
             key="log.recon_start",
-            args={"mapper": mapper, "images": spec.image_count},
+            args={"mapper": mapper, "images": spec.image_count, "frames": spec.frame_count},
         )
 
         if mapper == "global":
@@ -167,6 +196,9 @@ class Reconstruct(Stage):
                 shutil.copy2(source_database, fallback_database)
                 fallback_sparse = ctx.stage_out_dir / "incremental_fallback_sparse"
                 fallback_sparse.mkdir()
+                fallback_initialization = _requested_primary_initialization(
+                    fallback_database, spec, ctx.params
+                )
                 colmap_runner.mapper(
                     colmap_bin,
                     database_path=fallback_database,
@@ -175,9 +207,13 @@ class Reconstruct(Stage):
                     refine_intrinsics=spec.refine_intrinsics,
                     refine_rig=spec.refine_rig,
                     multiple_models=spec.multiple_models,
-                    extra_args=_incremental_args(ctx.params),
+                    extra_args=_incremental_args(
+                        ctx.params,
+                        fallback_initialization,
+                        video_data=video_data,
+                    ),
                     log_path=logs_dir / "incremental_fallback.log",
-                    on_line=mapper_progress(ctx, spec.image_count, low=0.76, high=0.9),
+                    on_line=mapper_progress(ctx, spec.frame_count, low=0.76, high=0.9),
                 )
                 fallback_model, fallback_summary = _select_largest_model(
                     fallback_sparse,
@@ -211,11 +247,13 @@ class Reconstruct(Stage):
                     shutil.copy2(fallback_database, database_path)
                     model_dir, summary = canonical, fallback_summary
                     effective_mapper = "incremental_fallback"
+                    primary_initialization = fallback_initialization
                     shutil.rmtree(fallback_sparse)
                     fallback_database.unlink()
             if summary is None or model_dir is None:
                 raise global_error or RuntimeError("Global and Incremental Mapper produced no model")
         else:
+            primary_initialization = _requested_primary_initialization(database_path, spec, ctx.params)
             colmap_runner.mapper(
                 colmap_bin,
                 database_path=database_path,
@@ -224,9 +262,13 @@ class Reconstruct(Stage):
                 refine_intrinsics=spec.refine_intrinsics,
                 refine_rig=spec.refine_rig,
                 multiple_models=spec.multiple_models,
-                extra_args=_incremental_args(ctx.params),
+                extra_args=_incremental_args(
+                    ctx.params,
+                    primary_initialization,
+                    video_data=video_data,
+                ),
                 log_path=logs_dir / "mapper.log",
-                on_line=mapper_progress(ctx, spec.image_count, low=0.12, high=0.9),
+                on_line=mapper_progress(ctx, spec.frame_count, low=0.12, high=0.9),
             )
             model_dir, summary = _select_largest_model(
                 sparse_dir,
@@ -234,6 +276,27 @@ class Reconstruct(Stage):
                 max_step_ratio=_evaluation_step_ratio(ctx.params),
             )
             mapper_attempts = []
+        if effective_mapper in {"incremental", "incremental_fallback"}:
+            color_summary, color_completion = _complete_incremental_point_colors(
+                ctx,
+                colmap_bin=colmap_bin,
+                image_path=image_path,
+                model_dir=model_dir,
+                logs_dir=logs_dir,
+                before_summary=summary,
+            )
+            summary.update(color_summary)
+        else:
+            color_completion = {
+                "applied": False,
+                "reason": "global_mapper_extracts_final_colors",
+                "exact_black_points_before": summary["exact_black_points"],
+                "exact_black_points_after": summary["exact_black_points"],
+                "resolved_points": 0,
+            }
+        summary["point_color_completion"] = color_completion
+        if primary_initialization is not None:
+            summary["primary_initialization"] = primary_initialization
         ctx.progress.tick(0.92, message="mapper complete", key="log.recon_mapper_done")
         primary = summary["source_registration"][spec.primary_source_id]
         summary["registered_ratio"] = primary["registered"] / max(1, primary["total"])
@@ -253,11 +316,32 @@ class Reconstruct(Stage):
             effective_mapper == "global" and ctx.params["global_positioning_use_gpu"]
         )
         summary["mapper_attempts"] = mapper_attempts
+        summary["solver_diagnostics"] = read_solver_diagnostics(logs_dir)
+        failed_steps = summary["solver_diagnostics"]["linear_solver_failed_steps"]
+        if failed_steps or summary["solver_diagnostics"]["bundle_adjustment_failures"]:
+            ctx.progress.warn(
+                f"COLMAP returned a model after {failed_steps} failed linear-solver steps; inspect the solver diagnostics",
+                key="log.recon_solver_diagnostics",
+                args={"count": failed_steps, "terminated": summary["solver_diagnostics"]["bundle_adjustment_failures"]},
+            )
         _validate_summary(
             summary,
             ctx.params,
             require_trajectory_continuity=require_trajectory_continuity,
         )
+        ctx.progress.info(
+            "building sparse reconstruction preview",
+            progress=0.94,
+            key="log.recon_preview",
+        )
+        preview = similarity_transform.write_preview(
+            ctx,
+            colmap_model.read_model(model_dir),
+            metadata_key="reconstruction",
+            metadata=summary,
+            max_points=ctx.params["max_preview_points"],
+        )
+        summary["preview_points"] = preview.num_points_written
         summary_path = ctx.stage_out_dir / "model_summary.json"
         summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -265,6 +349,10 @@ class Reconstruct(Stage):
         for path in model_dir.iterdir():
             if path.is_file():
                 outputs.append(_file_ref(path, ctx))
+        outputs.extend(
+            _file_ref(ctx.stage_out_dir / "preview" / name, ctx)
+            for name in ("reconstruction.json", "points.bin")
+        )
         manifest.outputs = outputs
         manifest.extra = summary
         ctx.progress.info(
@@ -282,13 +370,153 @@ class Reconstruct(Stage):
         return manifest
 
 
-def _incremental_args(params: dict) -> list[str]:
-    args = ["--Mapper.random_seed", str(params["random_seed"]), *colmap_quality.mapper_extra_args(params)]
-    if params["init_image_id1"] > 0:
-        args += ["--Mapper.init_image_id1", str(params["init_image_id1"])]
-    if params["init_image_id2"] > 0:
-        args += ["--Mapper.init_image_id2", str(params["init_image_id2"])]
+def _requested_primary_initialization(
+    database_path: Path, spec: InputSpec, params: dict
+) -> dict | None:
+    """Validate an optional user-selected primary-source initialization pair.
+
+    Capture order measures time, not baseline or parallax. In the default path
+    COLMAP therefore chooses its own geometrically verified initial pair.
+    """
+    requested = (int(params["init_image_id1"]), int(params["init_image_id2"]))
+    if (requested[0] > 0) != (requested[1] > 0):
+        raise ValueError("init_image_id1 and init_image_id2 must be set together")
+    if requested[0] == 0:
+        return None
+
+    images_by_name = {str(image["name"]): image for image in spec.images}
+    with sqlite3.connect(database_path) as connection:
+        id_to_image = {
+            int(image_id): images_by_name[name]
+            for image_id, name in connection.execute("SELECT image_id, name FROM images")
+            if name in images_by_name
+        }
+
+        primary_ids = {
+            image_id
+            for image_id, image in id_to_image.items()
+            if image["source_id"] == spec.primary_source_id
+        }
+    if requested[0] not in primary_ids or requested[1] not in primary_ids:
+        raise ValueError(
+            "initial image IDs must both belong to the primary source; "
+            "supplemental sources cannot establish the reconstruction trajectory"
+        )
+    return {
+        "mode": "user_selected_primary_pair",
+        "image_ids": list(requested),
+        "inliers": None,
+    }
+
+
+def _incremental_args(
+    params: dict,
+    initialization: dict | None = None,
+    *,
+    video_data: bool = False,
+) -> list[str]:
+    args = [
+        "--Mapper.random_seed",
+        str(params["random_seed"]),
+        "--Mapper.extract_colors",
+        "0",
+        *colmap_quality.mapper_extra_args(params),
+    ]
+    if initialization is not None:
+        first_id, second_id = initialization["image_ids"]
+        args += ["--Mapper.init_image_id1", str(first_id)]
+        args += ["--Mapper.init_image_id2", str(second_id)]
+        args += ["--Mapper.init_num_trials", "1"]
+    if video_data:
+        # Match COLMAP's automatic video schedule:
+        # https://github.com/colmap/colmap/blob/a0d785fba74b2664f31edc4a29026a8b27c00f67/src/colmap/controllers/option_manager.cc#L100-L105
+        args += [
+            "--Mapper.ba_global_frames_ratio",
+            "1.4",
+            "--Mapper.ba_global_points_ratio",
+            "1.4",
+        ]
     return args
+
+
+def _complete_incremental_point_colors(
+    ctx: StageContext,
+    *,
+    colmap_bin: str,
+    image_path: Path,
+    model_dir: Path,
+    logs_dir: Path,
+    before_summary: dict,
+) -> tuple[dict, dict]:
+    ctx.progress.info(
+        "extracting final colors for all sparse points",
+        progress=0.9,
+        key="log.recon_color_start",
+        args={"points": before_summary["num_points3D"]},
+    )
+    colored_dir = model_dir.parent / ".color-extractor"
+    colmap_runner.color_extractor(
+        colmap_bin,
+        input_path=model_dir,
+        image_path=image_path,
+        output_path=colored_dir,
+        num_threads=-1,
+        log_path=logs_dir / "color_extractor.log",
+        on_line=hidden_log(ctx, "color-extractor"),
+    )
+    colored_reconstruction = colmap_model.read_model(colored_dir)
+    after_summary = colored_reconstruction.summary()
+    _validate_color_extraction_geometry(before_summary, after_summary)
+
+    # color_extractor は model 全体を書き直すが、LFStudio は images.bin の格納順へ test_every を
+    # 適用する。Camera / validation ordering を変えず RGB だけ補完するため points3D.bin だけを採用する。
+    # https://github.com/MrNeRF/LichtFeld-Studio/blob/d8c50c6a3e2273cb74130a6e9023de8d068af52d/src/training/training_setup.cpp#L493-L500
+    points_path = model_dir / "points3D.bin"
+    backup_points_path = model_dir / ".points3D-before-color-extractor.bin"
+    points_path.rename(backup_points_path)
+    (colored_dir / "points3D.bin").replace(points_path)
+    shutil.rmtree(colored_dir)
+    backup_points_path.unlink()
+
+    before_black = int(before_summary["exact_black_points"])
+    after_black = int(after_summary["exact_black_points"])
+    result = {
+        "applied": True,
+        "exact_black_points_before": before_black,
+        "exact_black_points_after": after_black,
+        "resolved_points": max(0, before_black - after_black),
+    }
+    ctx.progress.tick(
+        0.915,
+        message=f"final point colors complete: black {before_black}->{after_black}",
+        key="log.recon_color_done",
+        args={"before": before_black, "after": after_black},
+    )
+    return after_summary, result
+
+
+def _validate_color_extraction_geometry(before: dict, after: dict) -> None:
+    for key in ("num_cameras", "num_images", "num_points3D", "num_observations"):
+        if before[key] != after[key]:
+            raise RuntimeError(
+                f"color extraction changed reconstruction geometry: {key} {before[key]} -> {after[key]}"
+            )
+    for key in (
+        "mean_reprojection_error",
+        "median_reprojection_error",
+        "p95_reprojection_error",
+        "mean_track_length",
+        "median_track_length",
+        "camera_trajectory_diameter",
+    ):
+        if (
+            key in before
+            and key in after
+            and not math.isclose(float(before[key]), float(after[key]), rel_tol=1e-12, abs_tol=1e-12)
+        ):
+            raise RuntimeError(
+                f"color extraction changed reconstruction geometry: {key} {before[key]} -> {after[key]}"
+            )
 
 
 def _run_global_mapper_with_retries(
@@ -480,9 +708,7 @@ def _trajectory_passes(
     require_trajectory_continuity: bool,
 ) -> bool:
     return bool(
-        not require_trajectory_continuity
-        or params["max_adjacent_step_ratio"] <= 0
-        or trajectory["passed"]
+        not require_trajectory_continuity or params["max_adjacent_step_ratio"] <= 0 or trajectory["passed"]
     )
 
 

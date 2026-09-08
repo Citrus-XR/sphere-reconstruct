@@ -480,6 +480,35 @@ def global_mapper(
     return run_command(colmap_bin, args, log_path=log_path, on_line=on_line)
 
 
+def color_extractor(
+    colmap_bin: str,
+    *,
+    input_path: Path,
+    image_path: Path,
+    output_path: Path,
+    num_threads: int = -1,
+    log_path: Path | None = None,
+    on_line: Callable[[str], None] | None = None,
+) -> CommandResult:
+    output_path.mkdir(parents=True, exist_ok=False)
+    return run_command(
+        colmap_bin,
+        [
+            "color_extractor",
+            "--input_path",
+            str(input_path),
+            "--image_path",
+            str(image_path),
+            "--output_path",
+            str(output_path),
+            "--num_threads",
+            str(num_threads),
+        ],
+        log_path=log_path,
+        on_line=on_line,
+    )
+
+
 def model_transformer(
     colmap_bin: str,
     *,

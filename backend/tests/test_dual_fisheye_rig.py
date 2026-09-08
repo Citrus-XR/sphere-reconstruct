@@ -1,4 +1,4 @@
-"""offset_v3 から generic dual-fisheye rig 外参を生成する。"""
+"""Versioned calibration から generic dual-fisheye rig 外参を生成する。"""
 
 from __future__ import annotations
 
@@ -8,18 +8,23 @@ import pytest
 from sphere_reconstruct.colmap import calibrated_rig
 from sphere_reconstruct.domain.camera_system import (
     CalibratedCameraSystem,
+    OmniDistortionModel,
     ScanDirection,
     SensorExtrinsic,
     ShutterType,
     TimestampReference,
 )
 from sphere_reconstruct.insta360 import camera_system
-from sphere_reconstruct.insta360.calibration import CalibSource, DualLensCalibration, MeiLensCalibration
+from sphere_reconstruct.insta360.calibration import (
+    CalibSource,
+    DualLensCalibration,
+    OmniLensCalibration,
+)
 from sphere_reconstruct.insta360.metadata import WindowCropInfo
 
 
 def _lens(yaw, pitch, roll, tx, ty, tz):
-    return MeiLensCalibration(
+    return OmniLensCalibration(
         xi=2.0,
         fx=4200.0,
         fy=4200.0,
@@ -31,19 +36,23 @@ def _lens(yaw, pitch, roll, tx, ty, tz):
         tx=tx,
         ty=ty,
         tz=tz,
+        distortion_model=OmniDistortionModel.RADTAN,
+        distortion_parameters=(0.1, 0.01, -0.01, 0.0, 0.0),
         ref_image_width=10752,
         ref_image_height=5376,
+        lens_flags=113,
     )
 
 
-def test_offset_v3_uses_full_relative_rotation_and_translation():
-    system = camera_system.from_offset_v3(
+def test_calibration_uses_full_relative_rotation_and_translation():
+    system = camera_system.from_calibration(
         DualLensCalibration(
-            source=CalibSource.OFFSET_V3,
-            lenses=[
-            _lens(0.615, 0.016, 89.937, 0.0, 0.0, 0.0),
-            _lens(-0.718, 0.211, 89.840, -0.000048, 0.000131, -0.032273),
-            ],
+            source=CalibSource.OFFSET,
+            version=3,
+            lenses=(
+                _lens(0.615, 0.016, 89.937, 0.0, 0.0, 0.0),
+                _lens(-0.718, 0.211, 89.840, -0.000048, 0.000131, -0.032273),
+            ),
         ),
         window_crop=WindowCropInfo(5376, 5376, 5312, 5312),
         rolling_shutter_readout_ms=21.244001,
@@ -99,13 +108,14 @@ def test_camera_system_rejects_non_unit_rig_quaternion():
 
 
 def test_camera_system_rejects_implicit_coordinate_conventions():
-    system = camera_system.from_offset_v3(
+    system = camera_system.from_calibration(
         DualLensCalibration(
-            source=CalibSource.OFFSET_V3,
-            lenses=[
+            source=CalibSource.OFFSET,
+            version=3,
+            lenses=(
                 _lens(0.615, 0.016, 89.937, 0.0, 0.0, 0.0),
                 _lens(-0.718, 0.211, 89.840, -0.000048, 0.000131, -0.032273),
-            ],
+            ),
         ),
         window_crop=WindowCropInfo(5376, 5376, 5312, 5312),
         rolling_shutter_readout_ms=21.244001,

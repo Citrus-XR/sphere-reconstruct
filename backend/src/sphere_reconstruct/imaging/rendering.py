@@ -14,11 +14,11 @@ from pathlib import Path
 
 import numpy as np
 
-from ..domain.camera_system import MeiIntrinsics
+from ..domain.camera_system import OmniIntrinsics
 from .projection import (
     PinholeView,
     pinhole_backproject,
-    project_mei,
+    project_omni,
     yaw_pitch_rotation,
 )
 
@@ -39,7 +39,7 @@ class RenderStats:
 
 def build_remap(
     view: PinholeView,
-    src_intr: MeiIntrinsics,
+    src_intr: OmniIntrinsics,
     *,
     extra_rotation: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -59,7 +59,7 @@ def build_remap(
 
     rays_lens = rays_rig @ extra_rotation.T if extra_rotation is not None else rays_rig
 
-    uv, valid = project_mei(rays_lens, src_intr)
+    uv, valid = project_omni(rays_lens, src_intr)
     map_x = uv[:, 0].reshape(height, width).astype(np.float32)
     map_y = uv[:, 1].reshape(height, width).astype(np.float32)
     valid_mask = valid.reshape(height, width)
@@ -72,7 +72,7 @@ def build_remap(
 def render_pinhole(
     src_image_path: Path,
     view: PinholeView,
-    src_intr: MeiIntrinsics,
+    src_intr: OmniIntrinsics,
     *,
     extra_rotation: np.ndarray | None = None,
 ) -> tuple[np.ndarray, RenderStats]:
@@ -119,6 +119,16 @@ def render_perspective_from_equirect(
         raise FileNotFoundError(f"cannot read {src_image_path}")
     src_h, src_w = src.shape[:2]
 
+    map_x, map_y, _valid = build_equirect_remap(view, src_w, src_h)
+    dst = cv2.remap(src, map_x, map_y, interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_WRAP)
+    stats = RenderStats(valid_ratio=1.0, src_size=(src_w, src_h), dst_size=(view.width, view.height))
+    return dst, stats
+
+
+def build_equirect_remap(
+    view: PinholeView, src_w: int, src_h: int
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+
     rays = pinhole_backproject(view)  # (H, W, 3), +X 右 +Y 下 +Z 前
     h, w, _ = rays.shape
     view_rotation = yaw_pitch_rotation(view.yaw_deg, view.pitch_deg)
@@ -133,9 +143,7 @@ def render_perspective_from_equirect(
     # BORDER_WRAP は u/v 両方に効くため, v を先に範囲内へ収めて縦の巻き込みを防ぐ.
     map_x = np.mod(u, src_w).reshape(h, w).astype(np.float32)
     map_y = np.clip(v, 0.0, src_h - 1.0).reshape(h, w).astype(np.float32)
-    dst = cv2.remap(src, map_x, map_y, interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_WRAP)
-    stats = RenderStats(valid_ratio=1.0, src_size=(src_w, src_h), dst_size=(view.width, view.height))
-    return dst, stats
+    return map_x, map_y, np.ones((h, w), dtype=bool)
 
 
 def write_jpeg(dst: np.ndarray, out_path: Path, quality: int = 92) -> None:

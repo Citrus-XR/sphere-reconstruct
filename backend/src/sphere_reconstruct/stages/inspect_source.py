@@ -22,7 +22,6 @@ from ..insta360 import camera_system as insv_camera_system
 from ..insta360 import imu as insv_imu
 from ..insta360 import insv
 from ..insta360 import metadata as insv_metadata
-from ..insta360 import protobuf as pb
 from ..pipeline.manifest import register
 from ..pipeline.source_inputs import IMAGE_EXTENSIONS, collect_source_inputs
 from ..pipeline.stage import ProgressSpan, Stage, StageContext, new_manifest
@@ -31,7 +30,7 @@ from ..pipeline.stage import ProgressSpan, Stage, StageContext, new_manifest
 @register
 class InspectSource(Stage):
     name = StageName.INSPECT_SOURCE
-    impl_version = "3.1"
+    impl_version = "4.0"
 
     def collect_inputs(self, ctx: StageContext) -> list[FileRef]:
         return collect_source_inputs(
@@ -69,7 +68,7 @@ class InspectSource(Stage):
             )
             source_out = out_dir / "sources" / source.id
             source_out.mkdir(parents=True, exist_ok=True)
-            if source.adapter == SourceAdapter.INSTA360_INSV:
+            if source.adapter == SourceAdapter.INSTA360:
                 summary = self._inspect_insv(source.path, source_out, ctx, source_span)
             elif source.media_kind == MediaKind.VIDEO:
                 summary = self._inspect_video(source.path, ctx, source_span)
@@ -89,7 +88,7 @@ class InspectSource(Stage):
 
         summary_path = out_dir / "sources.json"
         summary_path.write_text(
-            json.dumps({"version": 3, "sources": summaries}, ensure_ascii=False, indent=2),
+            json.dumps({"version": 4, "sources": summaries}, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
         camera_system_paths = sorted(out_dir.glob("sources/*/camera_system.json"))
@@ -135,11 +134,10 @@ class InspectSource(Stage):
             "footer_offset": layout.footer_offset,
             "footer_size": layout.footer_size,
             "footer": None,
-            "offset_v3": None,
+            "calibration": None,
             "rolling_shutter": None,
             "window_crop": None,
             "gravity": None,
-            "pb": None,
             "calibration_source": None,
             "camera_system_path": None,
         }
@@ -165,32 +163,38 @@ class InspectSource(Stage):
                     "signature_valid": view.signature_valid,
                 }
 
-                # inst box を丸ごと読んで offset_v3 ASCII 校正文字列を拾う。
                 ctx.progress.info(
-                    "parsing offset_v3 (ascii)",
+                    "parsing versioned Insta360 calibration",
                     progress=progress_span.value(0.55),
-                    key="log.inspect_parse_offset_v3",
+                    key="log.inspect_parse_calibration",
                 )
                 inst_bytes = insv_metadata.read_inst_box_bytes(view)
                 cands = calib.find_ascii_calibrations(inst_bytes)
-                chosen = calib.pick_offset_v3(cands)
+                chosen = calib.pick_calibration(cands)
                 if chosen is not None:
-                    parsed = calib.parse_offset_v3_ascii(chosen)
-                    summary["offset_v3"] = {
+                    parsed = calib.parse_ascii_calibration(chosen)
+                    summary["calibration"] = {
                         "found": True,
                         "candidate_count": len(cands),
+                        "available_versions": sorted(
+                            {candidate.version for candidate in cands if candidate.version > 0}
+                        ),
                         "chosen_inst_offset": chosen.inst_offset,
                         "chosen_items": len(chosen.values),
+                        "version": parsed.version,
                         "valid": parsed.is_valid(),
                         "calibration_id": parsed.raw.get("calibration_id"),
                         "lenses": [lens.to_dict() for lens in parsed.lenses] if parsed.is_valid() else [],
-                        "text": chosen.text,
                     }
                     if parsed.is_valid():
                         parsed_calibration = parsed
-                        summary["calibration_source"] = "offset_v3"
+                        summary["calibration_source"] = f"insta360_offset_v{parsed.version}"
                 else:
-                    summary["offset_v3"] = {"found": False}
+                    versions = sorted({candidate.version for candidate in cands if candidate.version > 0})
+                    raise RuntimeError(
+                        "INSV に対応可能な calibration がありません: "
+                        f"available versions={versions or 'none'}"
+                    )
 
                 extra_metadata = insv_metadata.read_extra_metadata(view)
                 if extra_metadata is not None and extra_metadata.rolling_shutter_time_ms > 0.0:
@@ -241,25 +245,11 @@ class InspectSource(Stage):
                     args={"error": str(e)},
                 )
 
-        ctx.progress.info(
-            "looking for external .insv.pb",
-            progress=progress_span.value(0.7),
-            key="log.inspect_look_pb",
-        )
-        pb_path = pb.find_pb_for(path)
-        if pb_path is not None:
-            probe = pb.probe(pb_path)
-            summary["pb"] = {
-                "path": str(pb_path),
-                "size": probe.size,
-                "parsed": False,
-            }
-
         if parsed_calibration is not None:
             readout = float(
                 (summary.get("rolling_shutter") or {}).get("readout_time_ms", 0.0)
             )
-            system = insv_camera_system.from_offset_v3(
+            system = insv_camera_system.from_calibration(
                 parsed_calibration,
                 window_crop=extra_metadata.window_crop if extra_metadata is not None else None,
                 rolling_shutter_readout_ms=readout if readout > 0.0 else None,

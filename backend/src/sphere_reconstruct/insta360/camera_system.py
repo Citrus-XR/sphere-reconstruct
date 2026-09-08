@@ -10,34 +10,34 @@ from ..domain.camera_system import (
     CalibratedCameraSystem,
     CalibratedSensor,
     CalibrationImageTransform,
-    MeiIntrinsics,
+    OmniIntrinsics,
     ScanDirection,
     SensorExtrinsic,
     ShutterCalibration,
     ShutterType,
     TimestampReference,
 )
-from .calibration import DualLensCalibration, MeiLensCalibration
+from .calibration import DualLensCalibration, OmniLensCalibration
 from .metadata import WindowCropInfo
 
 
-def from_offset_v3(
+def from_calibration(
     calibration: DualLensCalibration,
     *,
     window_crop: WindowCropInfo | None,
     rolling_shutter_readout_ms: float | None,
 ) -> CalibratedCameraSystem:
-    """offset_v3 固有の画布・軸規約を正規化する。"""
+    """Versioned offset 固有の合成画布と軸規約を canonical contract へ正規化する。"""
     if not calibration.is_valid() or len(calibration.lenses) != 2:
-        raise ValueError("offset_v3 には有効な 2 sensor 校正が必要です")
+        raise ValueError("Insta360 offset には有効な 2 sensor calibration が必要です")
     reference_widths = {lens.ref_image_width for lens in calibration.lenses}
     reference_heights = {lens.ref_image_height for lens in calibration.lenses}
     if len(reference_widths) != 1 or len(reference_heights) != 1:
-        raise ValueError("offset_v3 の sensor 間で参照サイズが一致しません")
+        raise ValueError("Insta360 offset の sensor 間で参照サイズが一致しません")
     combined_width = reference_widths.pop()
     sensor_height = reference_heights.pop()
     if combined_width <= 0 or sensor_height <= 0 or combined_width % 2:
-        raise ValueError(f"offset_v3 の参照画布サイズが不正です: {combined_width}x{sensor_height}")
+        raise ValueError(f"Insta360 offset の参照画布サイズが不正です: {combined_width}x{sensor_height}")
     sensor_width = combined_width // 2
     if window_crop is None:
         image_transform = CalibrationImageTransform.identity(sensor_width, sensor_height)
@@ -47,7 +47,7 @@ def from_offset_v3(
             or window_crop.source_height != sensor_height
         ):
             raise ValueError(
-                "window crop の入力 size が offset_v3 の sensor-local reference と一致しません: "
+                "window crop の入力 size が calibration の sensor-local reference と一致しません: "
                 f"{window_crop.source_width}x{window_crop.source_height} != "
                 f"{sensor_width}x{sensor_height}"
             )
@@ -64,7 +64,7 @@ def from_offset_v3(
         CalibratedSensor(
             id=f"lens{index}",
             image_key=f"lens{index}",
-            intrinsics=MeiIntrinsics(
+            intrinsics=OmniIntrinsics(
                 width=image_transform.crop_width,
                 height=image_transform.crop_height,
                 xi=lens.xi,
@@ -72,11 +72,8 @@ def from_offset_v3(
                 fy=lens.fy,
                 cx=lens.cx - index * sensor_width - image_transform.crop_x,
                 cy=lens.cy - image_transform.crop_y,
-                k1=lens.k1,
-                k2=lens.k2,
-                k3=lens.k3,
-                p1=lens.p1,
-                p2=lens.p2,
+                distortion_model=lens.distortion_model,
+                distortion_parameters=lens.distortion_parameters,
             ),
             calibration_image_transform=image_transform,
             cam_from_rig=extrinsics[f"lens{index}"],
@@ -94,14 +91,14 @@ def from_offset_v3(
         for index, lens in enumerate(calibration.lenses)
     )
     return CalibratedCameraSystem(
-        calibration_source=calibration.source.value,
+        calibration_source=f"{calibration.source.value}_v{calibration.version}",
         reference_sensor_id="lens0",
         sensors=sensors,
     )
 
 
-def _sensor_extrinsics(lenses: list[MeiLensCalibration]) -> dict[str, SensorExtrinsic]:
-    rotations = [_offset_v3_rotation(lens, index) for index, lens in enumerate(lenses)]
+def _sensor_extrinsics(lenses: tuple[OmniLensCalibration, OmniLensCalibration]) -> dict[str, SensorExtrinsic]:
+    rotations = [_offset_rotation(lens, index) for index, lens in enumerate(lenses)]
     translations = [np.asarray((lens.tx, lens.ty, lens.tz), dtype=np.float64) for lens in lenses]
     secondary_rotation = rotations[1] @ rotations[0].T
     secondary_translation = translations[1] - secondary_rotation @ translations[0]
@@ -114,8 +111,8 @@ def _sensor_extrinsics(lenses: list[MeiLensCalibration]) -> dict[str, SensorExtr
     }
 
 
-def _offset_v3_rotation(lens: MeiLensCalibration, lens_index: int) -> np.ndarray:
-    # offset_v3 の軸順と lens0 反転は公開実装と実データの相対外参で相互検証している。
+def _offset_rotation(lens: OmniLensCalibration, lens_index: int) -> np.ndarray:
+    # Dual-lens offset の軸順では lens0 だけ optical frame を Z 軸まわりに反転する。
     # https://github.com/kya8/slate/blob/3c6658644265304b975d3dad9afd7b69592260af/src/slate/extra/insta360_tf.cpp#L48-L79
     rotation = (
         _axis_rotation("y", math.pi / 2.0 + math.radians(lens.pitch))

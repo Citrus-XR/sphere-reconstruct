@@ -98,7 +98,10 @@ def _jpegtran_check() -> dict:
     check = _binary_check(get_settings().binaries.jpegtran, "jpegtran", ["-version"])
     check["optional"] = True
     if not check["ok"]:
-        check["message"] = "jpegtran not found; lossless fisheye training crop is unavailable"
+        check["message"] = (
+            "jpegtran not found; legacy JPEG MCU crop is unavailable "
+            "(rectified PNG pixel crop remains available)"
+        )
     return check
 
 
@@ -137,6 +140,7 @@ def _colmap_check() -> dict:
     bundle_adjustment = _bundle_adjustment_capabilities(Path(binary))
     capabilities = {
         "global_mapper": "global_mapper" in commands["output"],
+        "color_extractor": "color_extractor" in commands["output"],
         "aliked": "--AlikedExtraction.max_num_features" in features["output"],
         "aliked_bruteforce": "--AlikedMatching.brute_force" in matchers["output"],
         "aliked_lightglue": "--AlikedMatching.lightglue" in matchers["output"],
@@ -147,7 +151,7 @@ def _colmap_check() -> dict:
         "onnx_cuda_runtime": bundle_adjustment["onnx_cuda"],
     }
     ok = version["returncode"] == 0 and all(
-        capabilities[name] for name in ("global_mapper", "aliked", "equirectangular")
+        capabilities[name] for name in ("global_mapper", "color_extractor", "aliked", "equirectangular")
     )
     return {
         "ok": ok,
@@ -248,12 +252,7 @@ def _sam3_check() -> dict:
 def _romav2_check() -> dict:
     package_present = importlib.util.find_spec("romav2") is not None
     model = (
-        Path(__file__).resolve().parents[3]
-        / ".runtime"
-        / "torch"
-        / "hub"
-        / "checkpoints"
-        / "romav2.0.1.pt"
+        Path(__file__).resolve().parents[3] / ".runtime" / "torch" / "hub" / "checkpoints" / "romav2.0.1.pt"
     )
     model_ready = model.is_file() and model.stat().st_size == 1_095_883_548
     return {

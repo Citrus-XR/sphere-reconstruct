@@ -63,3 +63,35 @@ def test_global_positioning_gpu_is_independent_from_ceres_gpu(tmp_path: Path, mo
     args = captured["args"]
     assert args[args.index("--GlobalMapper.ba_ceres_use_gpu") + 1] == "0"
     assert args[args.index("--GlobalMapper.gp_use_gpu") + 1] == "1"
+
+
+def test_color_extractor_writes_a_separate_model_with_all_cpu_threads(tmp_path: Path, monkeypatch):
+    captured = {}
+
+    def fake_run_command(_binary, args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return object()
+
+    monkeypatch.setattr(runner, "run_command", fake_run_command)
+    output = tmp_path / "colored"
+
+    runner.color_extractor(
+        "colmap",
+        input_path=tmp_path / "sparse" / "0",
+        image_path=tmp_path / "images",
+        output_path=output,
+    )
+
+    assert output.is_dir()
+    assert captured["args"] == [
+        "color_extractor",
+        "--input_path",
+        str(tmp_path / "sparse" / "0"),
+        "--image_path",
+        str(tmp_path / "images"),
+        "--output_path",
+        str(output),
+        "--num_threads",
+        "-1",
+    ]

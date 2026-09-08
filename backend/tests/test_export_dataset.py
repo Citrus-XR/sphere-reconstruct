@@ -16,7 +16,14 @@ from sphere_reconstruct.pipeline.stage import ProgressReporter, StageContext
 from sphere_reconstruct.stages.export_dataset import ExportDataset
 
 
-def _write_model(model_dir: Path, *, model_id: int = 5, width: int = 64, height: int = 64) -> None:
+def _write_model(
+    model_dir: Path,
+    *,
+    model_id: int = 5,
+    width: int = 64,
+    height: int = 64,
+    image_name: str = "front/frame_000000.jpg",
+) -> None:
     parameter_counts = {5: 8, 12: 4}
     model_dir.mkdir(parents=True)
     with (model_dir / "cameras.bin").open("wb") as file:
@@ -27,7 +34,7 @@ def _write_model(model_dir: Path, *, model_id: int = 5, width: int = 64, height:
     with (model_dir / "images.bin").open("wb") as file:
         file.write(struct.pack("<Q", 1))
         file.write(struct.pack("<idddddddi", 1, 1, 0, 0, 0, 1, 2, 3, 1))
-        file.write(b"front/frame_000000.jpg\x00")
+        file.write(image_name.encode() + b"\x00")
         file.write(struct.pack("<Q", 0))
     with (model_dir / "points3D.bin").open("wb") as file:
         file.write(struct.pack("<Q", 0))
@@ -72,21 +79,24 @@ def _write_stationary_rig_model(model_dir: Path) -> None:
 
 
 def _write_preview(project: Path) -> None:
-    preview = project / "position_ground" / "preview"
+    preview = project / "scene_alignment" / "preview"
     preview.mkdir(parents=True)
     (preview / "reconstruction.json").write_text("{}")
     (preview / "points.bin").write_bytes(b"points")
     scale = project / "restore_metric_scale" / "scale_restoration.json"
     scale.parent.mkdir(parents=True)
     scale.write_text(json.dumps({"metric": True, "scale_factor": 1.0}))
-    (project / "position_ground" / "ground_position.json").write_text(
-        json.dumps({"applied": True, "ground_y": 0.0})
+    (project / "scene_alignment" / "scene_alignment.json").write_text(
+        json.dumps({"applied": True, "ground": {"applied": True, "ground_y": 0.0}})
     )
 
 
 def _write_rgb(path: Path, size: tuple[int, int] = (64, 64)) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    Image.new("RGB", size, (40, 80, 120)).save(path, format="JPEG")
+    Image.new("RGB", size, (40, 80, 120)).save(
+        path,
+        format="PNG" if path.suffix.lower() == ".png" else "JPEG",
+    )
 
 
 def _write_mask(path: Path, size: tuple[int, int] = (64, 64), value: int = 255) -> None:
@@ -134,10 +144,10 @@ def _write_mask_artifact(
 def _execute(project: Path, raw_params: dict | None = None) -> Path:
     output = project / ".export_dataset.tmp"
     output.mkdir()
-    dense_model = project / "dense_initialization" / "sparse" / "0"
-    if not dense_model.exists():
-        shutil.copytree(project / "position_ground" / "sparse" / "0", dense_model)
-    reconstruction = colmap_model.read_model(dense_model)
+    model_dir = project / "dense_initialization" / "sparse" / "0"
+    if not model_dir.exists():
+        model_dir = project / "scene_alignment" / "sparse" / "0"
+    reconstruction = colmap_model.read_model(model_dir)
     names = [image.name for image in reconstruction.images.values()]
     spec = InputSpec(
         version=3,
@@ -203,7 +213,7 @@ def _execute(project: Path, raw_params: dict | None = None) -> Path:
 
 def test_export_root_is_directly_loadable_by_lf_studio(tmp_path: Path):
     project = tmp_path / "project"
-    _write_model(project / "position_ground" / "sparse" / "0")
+    _write_model(project / "scene_alignment" / "sparse" / "0")
     _write_preview(project)
     image = project / "extract_features" / "images" / "front" / "frame_000000.jpg"
     _write_rgb(image)
@@ -224,6 +234,7 @@ def test_export_root_is_directly_loadable_by_lf_studio(tmp_path: Path):
     assert export_manifest["validation"]["unique_camera_centers"] == 1
     assert export_manifest["validation"]["matched_mask_count"] == 1
     assert export_manifest["mask_source"] == "training"
+    assert export_manifest["model_source"] == "scene_alignment"
     with Image.open(output / "masks" / "front" / "frame_000000.jpg.png") as exported_mask:
         assert exported_mask.getpixel((0, 0)) == 192
 
@@ -242,11 +253,32 @@ def test_export_root_is_directly_loadable_by_lf_studio(tmp_path: Path):
     assert config["ppisp_use_controller"] is False
 
 
+def test_export_prefers_dense_model_and_preview_when_available(tmp_path: Path):
+    project = tmp_path / "project"
+    _write_model(project / "scene_alignment" / "sparse" / "0")
+    _write_model(project / "dense_initialization" / "sparse" / "0")
+    _write_preview(project)
+    dense_preview = project / "dense_initialization" / "preview"
+    dense_preview.mkdir(parents=True)
+    (dense_preview / "reconstruction.json").write_text('{"source":"dense"}')
+    (dense_preview / "points.bin").write_bytes(b"dense-points")
+    image = project / "extract_features" / "images" / "front" / "frame_000000.jpg"
+    _write_rgb(image)
+    _write_mask_artifact(project, "feature")
+    _write_mask_artifact(project, "training")
+
+    output = _execute(project)
+    export_manifest = json.loads((output / "export_manifest.json").read_text())
+
+    assert export_manifest["model_source"] == "dense_initialization"
+    assert (output / "preview" / "points.bin").read_bytes() == b"dense-points"
+
+
 def test_export_losslessly_crops_fisheye_training_dataset(tmp_path: Path):
     if shutil.which("jpegtran") is None:
         pytest.skip("jpegtran is not installed on this test host")
     project = tmp_path / "project"
-    _write_model(project / "position_ground" / "sparse" / "0")
+    _write_model(project / "scene_alignment" / "sparse" / "0")
     _write_preview(project)
     image_name = "front/frame_000000.jpg"
     _write_rgb(project / "extract_features" / "images" / image_name)
@@ -279,10 +311,92 @@ def test_export_losslessly_crops_fisheye_training_dataset(tmp_path: Path):
     assert manifest["training_crop"]["lossless"] is True
 
 
+def test_export_crops_rectified_png_without_jpegtran(tmp_path: Path, monkeypatch):
+    from sphere_reconstruct.stages import export_dataset as module
+
+    project = tmp_path / "project"
+    image_name = "front/frame_000000.png"
+    _write_model(project / "scene_alignment" / "sparse" / "0", image_name=image_name)
+    _write_preview(project)
+    _write_rgb(project / "extract_features" / "images" / image_name)
+    _write_mask_artifact(project, "training", image_name=image_name)
+    catalog_path = project / "rectify_fisheye" / "image_catalog.json"
+    catalog_path.parent.mkdir(parents=True)
+    catalog_path.write_text(
+        json.dumps(
+            {
+                "images": [
+                    {
+                        "name": image_name,
+                        "width": 64,
+                        "height": 64,
+                        "valid_region": {"kind": "circle", "cx": 0.5, "cy": 0.5, "r": 0.25},
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(module.training_crop, "resolve_jpegtran", lambda _explicit: None)
+
+    output = _execute(project)
+
+    with Image.open(output / "images" / image_name) as image:
+        assert image.size == (32, 32)
+        assert image.format == "PNG"
+    manifest = json.loads((output / "export_manifest.json").read_text())
+    assert manifest["training_crop"]["enabled"] is True
+    assert "skipped_reason" not in manifest["training_crop"]
+
+
+def test_export_does_not_decode_materialized_dataset_twice(tmp_path: Path, monkeypatch):
+    from sphere_reconstruct.stages import export_dataset as module
+
+    project = tmp_path / "project"
+    image_name = "front/frame_000000.png"
+    _write_model(project / "scene_alignment" / "sparse" / "0", image_name=image_name)
+    _write_preview(project)
+    _write_rgb(project / "extract_features" / "images" / image_name)
+    _write_mask_artifact(project, "training", image_name=image_name)
+    catalog_path = project / "rectify_fisheye" / "image_catalog.json"
+    catalog_path.parent.mkdir(parents=True)
+    catalog_path.write_text(
+        json.dumps(
+            {
+                "images": [
+                    {
+                        "name": image_name,
+                        "width": 64,
+                        "height": 64,
+                        "valid_region": {"kind": "circle", "cx": 0.5, "cy": 0.5, "r": 0.25},
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    real_open = module.PilImage.open
+    reopened_outputs: list[Path] = []
+
+    def track_open(path, *args, **kwargs):
+        candidate = Path(path)
+        if ".export_dataset.tmp" in candidate.parts:
+            reopened_outputs.append(candidate)
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(module.PilImage, "open", track_open)
+
+    output = _execute(project)
+
+    assert (output / "images" / image_name).is_file()
+    assert (output / "masks" / f"{image_name}.png").is_file()
+    assert reopened_outputs == []
+
+
 @pytest.mark.parametrize("failure", ["corrupt", "wrong_size"])
 def test_export_rejects_invalid_registered_image(tmp_path: Path, failure: str):
     project = tmp_path / "project"
-    _write_model(project / "position_ground" / "sparse" / "0")
+    _write_model(project / "scene_alignment" / "sparse" / "0")
     _write_preview(project)
     image = project / "extract_features" / "images" / "front" / "frame_000000.jpg"
     image.parent.mkdir(parents=True)
@@ -305,7 +419,7 @@ def test_export_rejects_invalid_registered_image(tmp_path: Path, failure: str):
 @pytest.mark.parametrize("failure", ["corrupt", "wrong_size"])
 def test_export_rejects_invalid_registered_mask(tmp_path: Path, failure: str):
     project = tmp_path / "project"
-    _write_model(project / "position_ground" / "sparse" / "0")
+    _write_model(project / "scene_alignment" / "sparse" / "0")
     _write_preview(project)
     _write_rgb(project / "extract_features" / "images" / "front" / "frame_000000.jpg")
     _write_mask_artifact(
@@ -328,7 +442,7 @@ def test_export_rejects_invalid_registered_mask(tmp_path: Path, failure: str):
 
 def test_export_rejects_camera_model_unsupported_by_lf_studio(tmp_path: Path):
     project = tmp_path / "project"
-    _write_model(project / "position_ground" / "sparse" / "0", model_id=12)
+    _write_model(project / "scene_alignment" / "sparse" / "0", model_id=12)
     _write_preview(project)
     _write_rgb(project / "extract_features" / "images" / "front" / "frame_000000.jpg")
 
@@ -345,7 +459,7 @@ def test_export_rejects_camera_model_unsupported_by_lf_studio(tmp_path: Path):
 
 def test_export_rejects_selected_mask_channel_missing_registered_images(tmp_path: Path):
     project = tmp_path / "project"
-    _write_model(project / "position_ground" / "sparse" / "0")
+    _write_model(project / "scene_alignment" / "sparse" / "0")
     _write_preview(project)
     _write_rgb(project / "extract_features" / "images" / "front" / "frame_000000.jpg")
     _write_mask_artifact(project, "training", image_name="unrelated.jpg")
@@ -371,7 +485,7 @@ def test_export_uses_one_resolved_mask_channel(
     expected_value: int | None,
 ):
     project = tmp_path / "project"
-    _write_model(project / "position_ground" / "sparse" / "0")
+    _write_model(project / "scene_alignment" / "sparse" / "0")
     _write_preview(project)
     _write_rgb(project / "extract_features" / "images" / "front" / "frame_000000.jpg")
     _write_mask_artifact(project, "feature", value=64)
@@ -396,7 +510,7 @@ def test_export_uses_one_resolved_mask_channel(
 
 def test_export_keeps_physical_fisheye_mask_when_both_sam_steps_are_disabled(tmp_path: Path):
     project = tmp_path / "project"
-    _write_model(project / "position_ground" / "sparse" / "0")
+    _write_model(project / "scene_alignment" / "sparse" / "0")
     _write_preview(project)
     _write_rgb(project / "extract_features" / "images" / "front" / "frame_000000.jpg")
     catalog = {
@@ -427,7 +541,7 @@ def test_export_keeps_physical_fisheye_mask_when_both_sam_steps_are_disabled(tmp
 
 def test_stationary_rig_is_detected_from_reference_sensor_trajectory(tmp_path: Path):
     project = tmp_path / "project"
-    _write_stationary_rig_model(project / "position_ground" / "sparse" / "0")
+    _write_stationary_rig_model(project / "scene_alignment" / "sparse" / "0")
     _write_preview(project)
     for lens in ("front", "back"):
         for index in range(2):
