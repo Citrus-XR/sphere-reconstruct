@@ -147,6 +147,8 @@ Incremental Mapper の `Retriangulation and Global bundle adjustment` は複数�
 
 Video source では COLMAP の `ModifyForVideoData()` と同じ `ba_global_frames_ratio=1.4` / `ba_global_points_ratio=1.4` を使う。final global BA は省略せず、成長ごとの中間 global BA だけを減らす。これは low-texture 画像を削る設定ではなく、同じ観測グラフに対する mapper の実行 schedule である。
 
+[Native dual-fisheye 安定性の実測](fisheye-stability.md)では、同じ観測 database に対して厳格 preset、local BA 12 近傍、一般 preset を比較している。全画像登録と warning 数だけでは点群品質や metric scale の正しさを判定できない。
+
 ### Incremental Mapper の三角測量設定
 
 Inspector の `Reconstruct > Incremental Mapper > COLMAP Advanced` で、三角測量の品質ゲートをプリセットまたは個別値で指定できる。これらは `--Mapper.*` オプションであり、Global Mapper には適用されない。値の単位は再投影誤差が pixel、角度が degree である。空欄または `0` を個別入力した項目は、その項目の COLMAP 既定値へ委譲する。

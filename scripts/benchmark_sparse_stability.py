@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend" / "src"))
 
 from sphere_reconstruct.colmap import model, runner, trajectory_quality
 from sphere_reconstruct.colmap.input_workspace import InputSpec
+from sphere_reconstruct.colmap.solver_diagnostics import read_solver_diagnostics
 from sphere_reconstruct.stages.reconstruct import _incremental_args
 
 
@@ -77,9 +78,7 @@ def main() -> None:
         except Exception as error:
             result["error"] = repr(error)
         result["elapsed_seconds"] = time.monotonic() - started
-        log_path = destination / "mapper.log"
-        result["linear_solver_failures"] = (
-            log_path.read_text(encoding="utf-8").count("Linear solver failure") if log_path.is_file() else None)
+        result["solver_diagnostics"] = read_solver_diagnostics(destination)
         (destination / "result.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
         results.append(result)
         (args.output / "results.json").write_text(json.dumps(results, indent=2), encoding="utf-8")
