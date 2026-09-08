@@ -82,3 +82,41 @@ Rig の inlier threshold は集約した frame pair に適用され、その後 
 Reconstruct は棄却された solver step と実際の BA 終了失敗を別々に表示する。Matching は threshold 以上／未満の pair 数を併記し、点群統計は二観測点の割合を明示する。Feature SAM3 の coverage は sky を含む semantic exclusion として表示し、prompt 別と sky 以外の面積を新しい実行で保存する。Feature coverage warning の判定では sky を除き、実際の mask pixel は変更しない。
 
 既存成果物と manifest は書き換えていない。過去に保存していない prompt 別面積を推定値で補完せず、新しい詳細統計は対応 Stage の次回実行で生成する。新しい機種固有 crop 値、cross-sensor edge の一律削除、local BA 近傍数の既定変更は導入していない。
+
+## 弱テクスチャの追加診断
+
+Production SIFT model の各 observation 周辺で 9×9 Sobel gradient の平均を計算し、点の最大観測角、track 長、最近接 camera 距離と比較した。これは texture の proxy であり、surface material の分類ではない。
+
+- 弱い texture の下位 20% は 22,184 点で、texture proxy の中央値 41.37、track 長中央値 3。
+- 強い texture の上位 20% は同数で、texture proxy の中央値 227.90、track 長中央値 6。
+- 弱い texture かつ最大観測角 8° 未満は 6,673 点。角度中央値 6.40°、track 長中央値 2、点 error P95 0.728 px。
+- 弱い texture の下位 20% に限定して `track <3` かつ角度 `<8°` を組み合わせると 3,527 点、全体では 11,786 点が候補になる。
+- 全体の角度中央値は 10.85°。5° の深度条件数はおよそ `1/sin(5°)=11.5` 倍で、reprojection error が小さくても depth は不安定になり得る。
+
+このため、`max_reprojection_error` だけで空中点を除外するのは不十分である。全点に `min_track_length=3` を適用するだけでも 29,548 点を失い、近景の細部を壊す可能性がある。実用的な候補は、遠景または弱 texture の点に対してだけ、`track >= 3`、十分な triangulation angle、異なる時刻への分散、複数 view の reprojection consistency を組み合わせる方法である。今はその判定を production cleanup に自動追加していない。
+
+### ALIKED + LightGlue の対照
+
+SIFT の代替として、同じ native dual-fisheye workspace で ALIKED N16ROT + LightGlue を 2048 px / 4096 keypoints、sequential overlap 4、同じ strict Mapper 設定で実行した。LightGlue が guided matching をサポートしないため guided は無効、ALIKED 経路には vocab-tree loop closure がない。
+
+| 指標 | SIFT production | ALIKED isolated run |
+|---|---:|---:|
+| Registered images | 552 | 552 |
+| Points | 110,919 | 39,020 |
+| Mean reprojection error | 0.423510 px | 0.412708 px |
+| P95 reprojection error | 0.661389 px | 0.678751 px |
+| Mean track length | 8.4100 | 6.5448 |
+| Median track length | 4 | 3 |
+| Two-observation ratio | 26.64% | 34.61% |
+| Trajectory diameter | 54.8382 | 40.4602 |
+
+ALIKED 没有增加弱纹理的多视图约束，反而减少了点和 track 支持。由于其提取分辨率和 pairing contract 与 production SIFT 不完全相同，这只是当前配置的淘汰证据，不是对模型家族的普遍结论。
+
+## 可行的解决顺序
+
+1. 抽帧以真实 camera-center 平移和视差为条件，保留相邻帧的重叠；单纯增加同一位置的旋转帧不能恢复深度。
+2. 固定已经验证过的 intrinsics / rig，继续使用 SIFT + DSP + guided + loop closure 作为当前主轨迹基线。
+3. 对道路、墙面等已知近似平面，使用高 track / 高视差点估计 dominant plane，把低支持点作为平面残差和跨时间一致性的候选清理对象。这个应当先做只读 A/B，不能把单目深度直接写回 COLMAP。
+4. DA3、UniDAC、RoMa 只能作为 soft veto、置信权重或候选深度；未经多视图重投影验证的单目 depth 不能替代 triangulation。
+
+COLMAP 官方 tutorial 明确指出白墙、空桌面等弱纹理表面本身缺少可追踪约束，并要求视点有真实平移；官方 FAQ 对弱纹理 dense MVS 提到提高分辨率和 PatchMatch window，但那不适用于当前 sparse SfM。相关说明见 [COLMAP tutorial](https://github.com/colmap/colmap/blob/a0d785fba74b2664f31edc4a29026a8b27c00f67/doc/tutorial.rst#L125-L147)、[FAQ feature extraction](https://github.com/colmap/colmap/blob/a0d785fba74b2664f31edc4a29026a8b27c00f67/doc/faq.rst#L43-L53)、[低纹理运动限制](https://github.com/colmap/colmap/issues/830#issuecomment-602847248)。
