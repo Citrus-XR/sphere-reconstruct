@@ -8,6 +8,7 @@ ffmpeg / ffprobe が PATH にないとスキップする.
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -132,6 +133,34 @@ def test_selection_expression_compresses_arithmetic_runs():
     expression = ffmpeg._selection_expression([0, 6, 12, 18, 25, 31, 37])
     assert "between(n\\,0\\,18)*not(mod(n-0\\,6))" in expression
     assert "between(n\\,25\\,37)*not(mod(n-25\\,6))" in expression
+
+
+def test_long_irregular_selection_preserves_frame_indices():
+    indices = [3 * index + index % 2 for index in range(223)]
+    expression = ffmpeg._selection_expression(indices)
+    assert len(expression) < 3000
+    result = subprocess.run(
+        [
+            "ffmpeg",
+            "-nostdin",
+            "-hide_banner",
+            "-f",
+            "lavfi",
+            "-i",
+            f"color=size=16x16:rate=1:duration={indices[-1] + 1}",
+            "-vf",
+            f"select={expression},showinfo",
+            "-f",
+            "null",
+            "-",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=30,
+    )
+    selected = [int(pts) for pts in re.findall(r"\bn:\s*\d+\s+pts:\s*(\d+)", result.stderr)]
+    assert selected == indices
 
 
 def test_large_temporal_context_is_split_into_bounded_filter_expressions():

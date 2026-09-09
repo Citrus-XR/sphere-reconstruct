@@ -253,6 +253,8 @@ Sparse reconstruction の未指定値は厳格 preset（filter / merge / complet
 
 Frame extraction の default は Spatial optical flow。Candidate quality gate の後、前回採用 frame からの optical-flow motion を使って間隔を決める。Frame hierarchy の右端は Laplacian variance による sharpness score。Spatial sharpness threshold は 0–2000、抽出済み primary frames の lower 20% から一度 auto-fill し、その後の手動変更を上書きしない。Float field は editing 中の `.5` を保持し、blur / Enter で `0.5` へ canonicalize する。
 
+FFmpeg の frame-index 選択は、等間隔部分を圧縮し、残りの条件を平衡な加算式にまとめてから文字数で分割する。通常動画と dual-lens は同じ生成処理を使う。文字数だけの制限では、不規則な候補列が式木の深さ上限を超え、十分な空きメモリがあっても `Cannot allocate memory` で停止するためである。選択する frame index と順序は維持する。
+
 Spatial optical flow は quality gate が長い時間空洞を作らないよう、最大 bridge 間隔（default 4 秒）も持つ。露出不良または最小 feature 数未満の frame は bridge に使わない。sharpness / rolling-shutter だけで除外された候補は、通常選択では除外を維持し、空洞を埋める時だけ再評価する。
 
 - 視差 + 鮮鋭度: target motion の帯域で十分な視差を持つ候補から最も鮮鋭な frame を選ぶ。default。

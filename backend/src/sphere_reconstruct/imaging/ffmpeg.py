@@ -379,7 +379,7 @@ def extract_frames_sequential(
 
 
 def _selection_chunks(indices: list[int], max_expression_chars: int = 3000) -> list[list[int]]:
-    """FFmpeg expression parser の arena 上限を超えない選択 chunk に再帰分割する."""
+    """平衡化済みの選択式を、指定した文字数以下の chunk に再帰分割する."""
     if len(_selection_expression(indices)) <= max_expression_chars or len(indices) == 1:
         return [indices]
     middle = len(indices) // 2
@@ -585,7 +585,18 @@ def _selection_expression(indices: Sequence[int]) -> str:
                 continue
         terms.append(f"eq(n\\,{indices[start]})")
         start += 1
-    return "+".join(terms)
+    if not terms:
+        return ""
+
+    # FFmpeg は式木の深さ超過も ENOMEM として返すため、加算を平衡化する。
+    # https://github.com/FFmpeg/FFmpeg/blob/80eb9e99b9/libavutil/eval.c#L551
+    def balanced_sum(first: int, last: int) -> str:
+        if last - first == 1:
+            return terms[first]
+        middle = (first + last) // 2
+        return f"({balanced_sum(first, middle)}+{balanced_sum(middle, last)})"
+
+    return balanced_sum(0, len(terms))
 
 
 def extract_paired_frames(

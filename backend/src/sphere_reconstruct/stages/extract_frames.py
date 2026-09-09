@@ -60,7 +60,7 @@ class _CandidateFrameCache:
 @register
 class ExtractFrames(Stage):
     name = StageName.EXTRACT_FRAMES
-    impl_version = "4.1"
+    impl_version = "4.2"
 
     def collect_inputs(self, ctx: StageContext) -> list[FileRef]:
         return collect_source_inputs(
