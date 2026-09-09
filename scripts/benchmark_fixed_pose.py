@@ -12,6 +12,7 @@ import subprocess
 import sys
 import time
 import traceback
+from contextlib import closing
 from pathlib import Path
 
 import numpy as np
@@ -45,9 +46,9 @@ def filter_graph(source: Path, destination: Path, records: dict, centers: dict,
                  validation_names: set[str], minimum_baseline: float) -> dict:
     if destination.exists():
         raise FileExistsError(destination)
-    with readonly_database(source) as original, sqlite3.connect(destination) as target:
+    with closing(readonly_database(source)) as original, closing(sqlite3.connect(destination)) as target:
         original.backup(target)
-    with sqlite3.connect(destination) as db:
+    with closing(sqlite3.connect(destination)) as db:
         names = dict(db.execute("SELECT image_id, name FROM images"))
         pairs = db.execute("SELECT pair_id, rows FROM two_view_geometries WHERE rows > 0").fetchall()
         removed = []

@@ -6,6 +6,7 @@ import json
 import sqlite3
 import subprocess
 import sys
+from contextlib import closing
 from pathlib import Path
 
 import numpy as np
@@ -68,7 +69,7 @@ def test_graph_filter_keeps_source_and_excludes_validation(tmp_path):
     pairs = [(1 * benchmark.MAX_IMAGE_ID + 2, 40),
              (1 * benchmark.MAX_IMAGE_ID + 3, 30),
              (1 * benchmark.MAX_IMAGE_ID + 4, 20)]
-    with sqlite3.connect(source) as db:
+    with closing(sqlite3.connect(source)) as db, db:
         db.execute("CREATE TABLE images (image_id INTEGER PRIMARY KEY, name TEXT)")
         db.execute("CREATE TABLE matches (pair_id INTEGER PRIMARY KEY, rows INTEGER)")
         db.execute("CREATE TABLE two_view_geometries (pair_id INTEGER PRIMARY KEY, rows INTEGER)")
@@ -84,9 +85,11 @@ def test_graph_filter_keeps_source_and_excludes_validation(tmp_path):
     assert result["short_baseline_pairs"] == 1
     assert result["retained_pairs"] == 1
     assert result["retained_matches"] == 30
-    with sqlite3.connect(destination) as db:
+    with closing(sqlite3.connect(destination)) as db:
         assert db.execute("SELECT pair_id FROM matches").fetchall() == [(pairs[1][0],)]
         assert db.execute("SELECT pair_id FROM two_view_geometries").fetchall() == [(pairs[1][0],)]
+    destination.rename(tmp_path / "released.db")
+    source.rename(tmp_path / "released-source.db")
 
 
 def test_supplement_preserves_base_and_remaps_bidirectional_tracks(tmp_path):

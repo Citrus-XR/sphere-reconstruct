@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 import numpy as np
@@ -51,7 +52,7 @@ def main():
     parser.add_argument("--spec", type=Path, required=True)
     args = parser.parse_args()
     records = {item["name"]: item for item in json.loads(args.spec.read_text(encoding="utf-8"))["images"]}
-    with sqlite3.connect(args.database.resolve().as_uri() + "?mode=ro", uri=True) as database:
+    with closing(sqlite3.connect(args.database.resolve().as_uri() + "?mode=ro", uri=True)) as database:
         names = dict(database.execute("SELECT image_id, name FROM images"))
     groups = {}
     for image_id, name in names.items():

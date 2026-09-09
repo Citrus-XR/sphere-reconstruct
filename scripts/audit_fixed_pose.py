@@ -9,6 +9,7 @@ import json
 import sqlite3
 import sys
 from collections import Counter
+from contextlib import closing
 from pathlib import Path
 
 import numpy as np
@@ -150,7 +151,7 @@ def temporal_audit(reconstruction, records, sample_points):
 
 
 def load_links(database, records, validation_names):
-    with sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True) as db:
+    with closing(sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True)) as db:
         names = dict(db.execute("SELECT image_id, name FROM images"))
         capture_codes = {key: number for number, key in enumerate(sorted({
             (record["source_id"], record["capture_index"]) for record in records.values()}))}
