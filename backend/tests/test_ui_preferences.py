@@ -8,6 +8,7 @@ import pytest
 
 from sphere_reconstruct.api import preferences, projects
 from sphere_reconstruct.domain.project import create_project, get_project, patch_ui_state
+from sphere_reconstruct.domain.ui_state_migration import migrate_cleanup_settings
 from sphere_reconstruct.infrastructure.database import Database
 from sphere_reconstruct.main import app
 
@@ -92,3 +93,23 @@ async def test_project_patch_preserves_params_metadata_and_other_panels(ui_clien
         "cameraPose": {"position": [1, 2, 3], "quaternion": [0, 0, 0, 0]},
     }})).status_code == 422
     assert (await client.patch("/api/projects/missing/ui-state", json={"ui": {}})).status_code == 404
+
+
+async def test_cleanup_migration_preserves_saved_reconstruction_and_new_values(ui_client):
+    _, database = ui_client
+    project = await create_project(database, "Cleanup migration")
+    params = {
+        "cleanupFarDistanceRatio": .8, "cleanupFarMinAngle": 3, "cleanupMaxReprojection": 0,
+        "cleanupMinTrackLength": 4, "cleanupSparseEnabled": False, "cleanupRelativeError": .03,
+        "filterMaxReprojError": 4, "colmapTriangulationPreset": "default", "targetMotion": 8,
+    }
+    await patch_ui_state(database, project.id, {"params": params, "selectedStage": "cleanup_sparse"})
+    assert await migrate_cleanup_settings(database) == 1
+    assert await migrate_cleanup_settings(database) == 0
+    saved = (await get_project(database, project.id)).metadata["ui"]
+    assert saved["selectedStage"] == "cleanup_sparse"
+    assert saved["params"] == {
+        "cleanupSparseEnabled": False, "cleanupRelativeError": .03, "cleanupPixelSigma": 1,
+        "cleanupMaxCrossError": 2, "filterMaxReprojError": 4,
+        "targetMotion": 8,
+    }

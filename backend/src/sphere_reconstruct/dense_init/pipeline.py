@@ -14,7 +14,8 @@ from PIL import Image
 from ..colmap.model import Camera, ImagePoint2D, Point3D, Reconstruction
 from ..colmap.model import Image as ColmapImage
 from ..imaging import fisheye_camera
-from .geometry import image_rays_world, pixels_to_camera_rays, project_world_points, triangulate_rays
+from ..imaging.camera_geometry import pixels_to_camera_rays
+from .geometry import image_rays_world, project_world_points, triangulate_rays
 from .matcher import DenseMatches
 
 

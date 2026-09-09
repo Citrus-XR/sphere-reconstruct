@@ -19,6 +19,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .api import events, jobs, preferences, previews, projects, stages, system
 from .api import settings as settings_api
+from .domain.ui_state_migration import migrate_cleanup_settings
 from .imaging.source_region import migrate_source_regions
 from .infrastructure.database import close_db, init_db
 from .infrastructure.filesystem import PathNotAllowedError, ensure_within
@@ -34,6 +35,9 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
 
     db_path = workspace_root() / "state.db"
     db = await init_db(db_path)
+    migrated = await migrate_cleanup_settings(db)
+    if migrated:
+        logger.info("Migrated full-track cleanup settings for %d projects", migrated)
     for project_dir in (workspace_root() / "projects").glob("*"):
         if project_dir.is_dir():
             capped = migrate_source_regions(project_dir)

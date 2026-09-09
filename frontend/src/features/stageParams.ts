@@ -46,6 +46,12 @@ export const COLMAP_TRIANGULATION_PRESETS: Record<Exclude<ColmapTriangulationPre
   },
 }
 
+export const triangulationPresetForValues = (values: ColmapTriangulationValues): ColmapTriangulationPreset => (
+  (Object.entries(COLMAP_TRIANGULATION_PRESETS) as [Exclude<ColmapTriangulationPreset, 'custom'>, ColmapTriangulationValues][])
+    .find(([, preset]) => (Object.keys(preset) as (keyof ColmapTriangulationValues)[])
+      .every(key => values[key] === preset[key]))?.[0] ?? 'custom'
+)
+
 const RECON_MODES_BY_PROJECTION: Record<Projection, readonly ReconMode[]> = {
   dual_fisheye: ['native_fisheye', 'pinhole_rig'],
   equirectangular: ['equirectangular', 'pinhole_rig'],
@@ -118,7 +124,6 @@ export interface StageParams {
   initImageId1: number
   initImageId2: number
   absPoseMaxError: number
-  colmapTriangulationPreset: ColmapTriangulationPreset
   filterMaxReprojError: number
   filterMinTriAngle: number
   triCreateMaxAngleError: number
@@ -135,10 +140,9 @@ export interface StageParams {
   metricScaleMethod: 'auto' | 'rig' | 'none'
   sceneAlignmentMethod: 'auto' | 'required' | 'none'
   cleanupSparseEnabled: boolean
-  cleanupFarDistanceRatio: number
-  cleanupFarMinAngle: number
-  cleanupMaxReprojection: number
-  cleanupMinTrackLength: number
+  cleanupRelativeError: number
+  cleanupPixelSigma: number
+  cleanupMaxCrossError: number
   denseEnabled: boolean
   denseQuality: 'turbo' | 'fast' | 'base' | 'high'
   denseReferenceFraction: number
@@ -236,8 +240,7 @@ export const DEFAULT_PARAMS: StageParams = {
   initImageId1: 0,
   initImageId2: 0,
   absPoseMaxError: 0,
-  colmapTriangulationPreset: 'default',
-  ...COLMAP_TRIANGULATION_PRESETS.default,
+  ...COLMAP_TRIANGULATION_PRESETS.strict,
   baLocalIters: 25,
   baGlobalIters: 100,
   minModelSize: 0,
@@ -247,10 +250,9 @@ export const DEFAULT_PARAMS: StageParams = {
   metricScaleMethod: 'auto',
   sceneAlignmentMethod: 'auto',
   cleanupSparseEnabled: true,
-  cleanupFarDistanceRatio: 0.3,
-  cleanupFarMinAngle: 2,
-  cleanupMaxReprojection: 0,
-  cleanupMinTrackLength: 2,
+  cleanupRelativeError: 0.02,
+  cleanupPixelSigma: 1,
+  cleanupMaxCrossError: 2,
   denseEnabled: false,
   denseQuality: 'turbo',
   denseReferenceFraction: 0.25,
@@ -380,10 +382,9 @@ export const paramsForStage = (
     case 'cleanup_sparse':
       return {
         enabled: params.cleanupSparseEnabled,
-        far_distance_ratio: params.cleanupFarDistanceRatio,
-        far_min_triangulation_deg: params.cleanupFarMinAngle,
-        max_reprojection_error: params.cleanupMaxReprojection,
-        min_track_length: params.cleanupMinTrackLength,
+        relative_error: params.cleanupRelativeError,
+        pixel_sigma: params.cleanupPixelSigma,
+        max_cross_error: params.cleanupMaxCrossError,
       }
     case 'dense_initialization':
       return {

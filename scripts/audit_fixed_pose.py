@@ -17,6 +17,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend" / "src"))
 
 from sphere_reconstruct.colmap import model
+from sphere_reconstruct.colmap.point_stability import geometry, triangulate_rays
 from sphere_reconstruct.imaging.fisheye_camera import (
     camera_rays_to_pixels,
     pixels_to_camera_rays,
@@ -42,41 +43,10 @@ def quantiles(values):
     return dict(zip(("p50", "p90", "p95", "p99", "max"), np.percentile(values, [50, 90, 95, 99, 100]).tolist())) if len(values) else None
 
 
-def triangulate_rays(centers, directions):
-    centers, directions = np.asarray(centers), np.asarray(directions)
-    origin = centers.mean(axis=0)
-    offsets = centers - origin
-    projection = np.eye(3)[None] - directions[:, :, None] * directions[:, None, :]
-    weights = np.ones(len(centers))
-    for _ in range(4):
-        matrix = np.einsum("n,nij->ij", weights, projection)
-        eigenvalues = np.linalg.eigvalsh(matrix)
-        if eigenvalues[0] <= eigenvalues[-1] * 1e-10:
-            return None
-        rhs = np.einsum("n,nij,nj->i", weights, projection, offsets)
-        point = np.linalg.solve(matrix, rhs)
-        distances = np.linalg.norm(point - offsets, axis=1)
-        if np.any(distances <= 1e-12):
-            return None
-        weights = 1.0 / np.square(distances)
-        weights /= weights.max()
-    result = point + origin
-    if np.any(np.sum((result - centers) * directions, axis=1) <= 0):
-        return None
-    return result
-
-
 def max_angle(directions):
     # 反対向きの ray も退化するため角度を 90 度で折り返す。
     # https://github.com/colmap/colmap/blob/a0d785fba74b2664f31edc4a29026a8b27c00f67/src/colmap/geometry/triangulation.cc#L217-L225
     return float(np.degrees(np.arccos(np.min(np.clip(np.abs(directions @ directions.T), 0, 1)))))
-
-
-def geometry(reconstruction):
-    return {image.image_id: {"image": image, "rotation": np.asarray(model.qvec_to_rotation(image.qvec)),
-                             "center": np.asarray(image.camera_center),
-                             "camera": reconstruction.cameras[image.camera_id]}
-            for image in reconstruction.images.values()}
 
 
 def reprojection(point, views, observations):

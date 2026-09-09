@@ -1,6 +1,6 @@
 import { expect, test, type Page } from '@playwright/test'
 import path from 'node:path'
-import { DEFAULT_PARAMS, paramsForStage, type ReconMode } from '../src/features/stageParams'
+import { COLMAP_TRIANGULATION_PRESETS, DEFAULT_PARAMS, paramsForStage, type ReconMode } from '../src/features/stageParams'
 import { type ProjectSource, type SourceRegion } from '../src/api/client'
 import { mergeUiPatch } from '../src/ui/persistence'
 import type { RootState } from '@react-three/fiber'
@@ -1404,16 +1404,82 @@ test('feature and training masks are independent steps with distinct defaults', 
   expect(mock.unexpectedRequests).toEqual([])
 })
 
-test('sparse cleanup exposes conservative far-and-low-parallax defaults', async ({ page }) => {
+test('sparse cleanup exposes full-track defaults and persists percent edits as ratios', async ({ page }) => {
   const mock = await installUiMock(page)
   await page.goto('/')
   await page.getByRole('button', { name: /Sparse noise cleanup/ }).click()
 
-  await expect(page.getByRole('checkbox', { name: 'Enable conditional sparse cleanup' })).toBeChecked()
-  await expect(page.getByRole('slider', { name: 'Far threshold / camera-path span' })).toHaveValue('0.3')
-  await expect(page.getByRole('slider', { name: 'Minimum triangulation angle for far points' }))
+  await expect(page.getByRole('checkbox', { name: 'Enable full-track sparse cleanup' })).toBeChecked()
+  const relativeError = page.getByRole('spinbutton', { name: 'Relative position error limit % (default 2)' })
+  await expect(relativeError).toHaveValue('2')
+  await expect(page.getByRole('spinbutton', { name: 'Pixel noise σ px (default 1)' })).toHaveValue('1')
+  await expect(page.getByRole('spinbutton', { name: 'Reprojection error P95 px (default 2)' }))
     .toHaveValue('2')
-  await expect(page.getByText('Distance alone never removes a point.', { exact: false })).toBeVisible()
+  await expect(page.getByText('Both lenses from the same source and capture form one group.', { exact: false })).toBeVisible()
+  await expect(page.getByText('Uncertainty assumes correct camera poses and calibration;', { exact: false })).toBeVisible()
+
+  await relativeError.fill('1.5')
+  await relativeError.press('Tab')
+  await expect.poll(() => (mock.uiStateUpdates.at(-1)?.ui.params as Record<string, unknown>)?.cleanupRelativeError)
+    .toBe(0.015)
+  await relativeError.fill('0')
+  await relativeError.press('Tab')
+  await expect(relativeError).toHaveValue('1.5')
+
+  await page.getByRole('button', { name: 'Regenerate', exact: true }).click()
+  await expect.poll(() => mock.reruns.length).toBe(1)
+  expect(mock.reruns[0].body.params_by_stage.cleanup_sparse).toEqual({
+    enabled: true, relative_error: 0.015, pixel_sigma: 1, max_cross_error: 2,
+  })
+  await page.reload()
+  await page.getByRole('button', { name: /Sparse noise cleanup/ }).click()
+  await expect(relativeError).toHaveValue('1.5')
+  expect(mock.unexpectedRequests).toEqual([])
+})
+
+test('new reconstruction settings use strict while an explicit COLMAP preset survives reload', async ({ page }) => {
+  const mock = await installUiMock(page)
+  await page.goto('/')
+  await page.getByRole('button', { name: /Sparse reconstruction/ }).click()
+  await page.getByText('Advanced COLMAP', { exact: false }).click()
+
+  const preset = page.getByRole('combobox', { name: 'Triangulation preset' })
+  await expect(preset).toHaveValue('strict')
+  await expect(page.getByRole('spinbutton', { name: 'filter_max_reproj_error (app default 1.0 px)' }))
+    .toHaveValue('1')
+  await preset.selectOption('default')
+  await expect.poll(() => (mock.uiStateUpdates.at(-1)?.ui.params as Record<string, unknown>)?.filterMaxReprojError)
+    .toBe(4)
+  await page.reload()
+  await page.getByRole('button', { name: /Sparse reconstruction/ }).click()
+  await page.getByText('Advanced COLMAP', { exact: false }).click()
+  await expect(preset).toHaveValue('default')
+  await expect(page.getByRole('spinbutton', { name: 'filter_max_reproj_error (app default 1.0 px)' }))
+    .toHaveValue('4')
+  await page.getByRole('button', { name: 'Regenerate', exact: true }).click()
+  await expect.poll(() => mock.reruns.length).toBe(1)
+  expect(mock.reruns[0].body.params_by_stage.reconstruct).toMatchObject({
+    filter_max_reproj_error: 4, filter_min_tri_angle: 1.5, tri_min_angle: 1.5,
+  })
+  expect(mock.unexpectedRequests).toEqual([])
+})
+
+test('existing custom reconstruction settings retain their values when defaults change', async ({ page }) => {
+  const mock = await installUiMock(page, {
+    savedUiStates: {
+      p1: { params: {
+        ...COLMAP_TRIANGULATION_PRESETS.standard,
+        colmapTriangulationPreset: 'custom', filterMaxReprojError: 1.75,
+      } },
+    },
+  })
+  await page.goto('/')
+  await page.getByRole('button', { name: /Sparse reconstruction/ }).click()
+  await page.getByText('Advanced COLMAP', { exact: false }).click()
+  await expect(page.getByRole('combobox', { name: 'Triangulation preset' })).toHaveValue('custom')
+  await expect(page.getByRole('spinbutton', { name: 'filter_max_reproj_error (app default 1.0 px)' }))
+    .toHaveValue('1.75')
+  await expect(page.getByRole('spinbutton', { name: 'tri_min_angle (app default 5.0°)' })).toHaveValue('3')
   expect(mock.unexpectedRequests).toEqual([])
 })
 

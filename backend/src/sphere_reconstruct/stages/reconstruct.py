@@ -16,8 +16,8 @@ from ..colmap import model as colmap_model
 from ..colmap import quality as colmap_quality
 from ..colmap import runner as colmap_runner
 from ..colmap import trajectory_quality
-from ..colmap.solver_diagnostics import read_solver_diagnostics
 from ..colmap.input_workspace import InputSpec
+from ..colmap.solver_diagnostics import read_solver_diagnostics
 from ..domain.artifacts import FileRef, StageManifest
 from ..domain.pipeline_state import StageName
 from ..domain.source import MediaKind
@@ -32,7 +32,7 @@ from .colmap_progress import global_mapper_progress, hidden_log, mapper_progress
 @register
 class Reconstruct(Stage):
     name = StageName.RECONSTRUCT
-    impl_version = "2.9"
+    impl_version = "2.10"
 
     def normalize_params(self, raw: dict) -> dict:
         mapper = str(raw.get("mapper", "incremental")).lower()
@@ -43,13 +43,13 @@ class Reconstruct(Stage):
         if max_adjacent_step_ratio != 0.0 and max_adjacent_step_ratio <= 1.0:
             raise ValueError("max_adjacent_step_ratio must be zero or greater than one")
         triangulation_defaults = {
-            "filter_max_reproj_error": 4.0,
-            "filter_min_tri_angle": 1.5,
-            "tri_create_max_angle_error": 2.0,
-            "tri_continue_max_angle_error": 2.0,
-            "tri_merge_max_reproj_error": 4.0,
-            "tri_complete_max_reproj_error": 4.0,
-            "tri_min_angle": 1.5,
+            "filter_max_reproj_error": 1.0,
+            "filter_min_tri_angle": 5.0,
+            "tri_create_max_angle_error": 0.75,
+            "tri_continue_max_angle_error": 0.75,
+            "tri_merge_max_reproj_error": 1.0,
+            "tri_complete_max_reproj_error": 1.0,
+            "tri_min_angle": 5.0,
         }
         triangulation_params = {
             key: float(raw.get(key, default))

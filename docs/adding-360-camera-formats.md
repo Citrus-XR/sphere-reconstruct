@@ -351,7 +351,7 @@ Requirements:
 - [ ] both SAM Steps
 - [ ] feature / matching
 - [ ] both mapper choices and warning behavior
-- [ ] conditional sparse cleanup preserves near points and well-constrained far points
+- [ ] Full-track cleanup が camera model、capture grouping、相対不確実性を検証し、保持点と camera 座標を変えない
 - [ ] gravity / metric / scene-coordinate alignment
 - [ ] export loader smoke
 

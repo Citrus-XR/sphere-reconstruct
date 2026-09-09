@@ -145,7 +145,7 @@ inspect_source
 | Gravity | world rotation | IMU と trajectory の time alignment |
 | Metric | similarity scale | observable physical evidence が必要 |
 | Scene alignment | yaw rotation + Y translation | orthogonal wall confidence と local ground confidence を記録 |
-| Sparse cleanup | conditional point filtering | far + low-parallax の組合せだけを除去 |
+| Sparse cleanup | full-track stability filtering | 全観測の不確実性と capture 留保予測で不安定点を除去 |
 | Dense seed | optional RoMaV2 points | default off |
 | Export | LFStudio-loadable folder | output root は一つだけ表示 |
 
@@ -247,7 +247,9 @@ Large continuous source では verified pair 数と correspondence 数を確認�
 
 Reconstruction 統計は二観測点の数・割合、および solver 診断を含む。`Linear solver failure` は Ceres が棄却した試行 step であり、BA 全体の終了失敗とは区別する。`Bundle adjustment failed:` は別件数として記録する。CLI が成功終了しても途中の診断を消さない。二観測点は冗長性が低いが、実際の三角角・残差を満たした点まで一律に飛点と判定しない。
 
-Sparse cleanup は距離だけで遠景を削除しない。Default は camera trajectory diameter の 30% より遠く、かつ track 内の全 camera pair が triangulation angle 2° 未満の point だけを除去する。Near point は angle filter の対象外。Parktest production run では 1,194,572 点中、97.884m より遠い candidate 82,675 点を検査し、weak subset 7,963 点（0.67%）だけを除去した。Well-constrained far point は保持対象。Cleanup は独立 Step / preview / statistics を持ち、clear すると scene-aligned model と A/B 比較できる。
+Sparse reconstruction の未指定値は厳格 preset（filter / merge / complete 1 px、filter / triangulation angle 5°、create / continue 0.75°）を使う。保存済みの明示値は保持し、Inspector から COLMAP 既定値・一般・厳格を選択できる。
+
+[Sparse cleanup](docs/strict-sparse-cleanup.md) は全 track の位置不確実性と capture 単位の留保予測で既存点を評価する。既定は最低 3 capture、pixel noise 仮定 1 px、相対誤差 2%、原 point / 留保予測の再投影 P95 2 px・最大 4 px。同一 capture の二眼は一組にまとめ、通常写真・phone video の perspective camera と native fisheye は自身の camera model で処理する。保持点と camera の座標は変えず、道路に平面を仮定しない。TestO2 では 110,919 点から 55,034 点を保持し、厳格 split 版の大きな欠損を抑えた。Mixed 実素材の画質改善と最終 Gaussian の完全な浮遊点除去は未実証。Cleanup は独立 Step / preview / statistics を持ち、clear すると scene-aligned model と比較できる。
 
 Frame extraction の default は Spatial optical flow。Candidate quality gate の後、前回採用 frame からの optical-flow motion を使って間隔を決める。Frame hierarchy の右端は Laplacian variance による sharpness score。Spatial sharpness threshold は 0–2000、抽出済み primary frames の lower 20% から一度 auto-fill し、その後の手動変更を上書きしない。Float field は editing 中の `.5` を保持し、blur / Enter で `0.5` へ canonicalize する。
 

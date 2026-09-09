@@ -1,12 +1,24 @@
-# Native fisheye の sparse cleanup 比較
+# Full-track sparse cleanup と native fisheye 比較
 
-この実験は既存 COLMAP 点群のうち、観測支持と位置の安定性を検証できた点だけを残す。既存点の座標・色・camera pose・intrinsics は変更せず、不合格点とその observation association を除去する。新しい点の補完、ERP 化、単眼 depth、道路の平面拘束は使わない。
+正式な `cleanup_sparse` Step は既存 COLMAP 点群のうち、全 track の観測支持と位置の安定性を検証できた点だけを残す。既存点の座標・色・camera pose・intrinsics は変更せず、不合格点とその observation association を除去する。新しい点の補完、ERP 化、単眼 depth、道路の平面拘束は使わない。
 
-[固定 pose 補完実験](fixed-pose-triangulation.md) では予測 coverage が増えても目視で大きな改善がなかった。全既存点を対象とした厳格 cleanup は浮遊点を減らした一方、大きな欠損が生じ、LFStudio が遅いという報告があった。このため、元 model・厳格版・full-track 版を比較する。Production cleanup の default は変更せず、削除数や coverage 単独で最適解とは判定しない。
+[固定 pose 補完実験](fixed-pose-triangulation.md) では予測 coverage が増えても目視で大きな改善がなかった。全既存点を対象とした split cleanup は浮遊点を減らした一方、大きな欠損が生じ、LFStudio が遅いという報告があった。元 model・split・full-track の LFStudio 比較と利用者の目視評価を踏まえ、full-track を正式 Step に採用した。削除数や coverage 単独で最適解とは判定しない。
+
+## 正式 Step の設定と対象
+
+`scene_alignment/sparse/0` と `extract_features/input_spec.json` を入力にし、後者の `(source_id, capture_index)` で独立 capture を識別する。異なる source の同じ frame 番号は別 capture。同一 capture の二眼や virtual views はまとめて留保し、source 間の撮影開始時刻や固定相対 pose を仮定しない。異なる camera は自身の intrinsics、distortion、pose で直接投影する。
+
+既定は有効、相対誤差 `relative_error=0.02`、pixel noise の仮定 `pixel_sigma=1`、reprojection P95 上限 `max_cross_error=2 px`（最大値は 4 px）。Inspector では相対誤差を百分率で編集する。最低 3 capture は固定条件。全 parameter は正の有限値とし、全点が不合格なら空 model を publish せず失敗を報告する。無効時は元 model を通す。
+
+対応 camera は `OPENCV_FISHEYE`、`THIN_PRISM_FISHEYE`、`PINHOLE`、`SIMPLE_PINHOLE`、`SIMPLE_RADIAL`、`RADIAL`。通常の写真・phone video を含む mixed input にも同じ計算を適用できる。Mixed の合成幾何テストはあるが、以下の実素材比較は TestO2 の二眼 fisheye のみであり、mixed の画質改善を実証したものではない。ERP など未対応 model は明示的に失敗するため、当該 workflow では cleanup を無効にする。
+
+`cleanup_sparse/point_assessment.npz` に point ID、metric column、判定理由を記録し、`cleanup_sparse.json` と manifest に理由別件数と observation がゼロの画像数を保存する。Camera、rig、frame、保持 point の XYZ / RGB / track を保持し、scene-aligned model から直接 export できる。判定実装は Backend の `colmap/point_stability.py` に集約し、比較 CLI も共有する。旧 distance / angle filter は重ねて適用しない。
+
+旧 cleanup の UI 編集値は起動時に server DB で新設定へ移行する。保存済み enable 状態や他 Step の数値は保持する。Triangulation preset 名は七つの実値から導出し、別保存されていた名称は DB から除去する。以前の実行 manifest と成果物は当時の記録として保持し、再実行時は実装 version `2.0` と新 parameter / input hash により旧 cache を採用しない。再実行するまで既存 export / training の内容は変わらない。Sparse reconstruction の未指定値は [厳格 preset](setup-gpu.md#incremental-mapper-の三角測量設定) になり、明示的に保存した各値は上書きしない。
 
 ## Split policy の判定条件
 
-TestO2 の native `OPENCV_FISHEYE` を対象とする。Script は `OPENCV_FISHEYE` / `THIN_PRISM_FISHEYE` を明示的に受け付け、pinhole / ERP を含む入力は計算前に拒否する。混合 pinhole 入力に対する実証は今回の範囲外である。
+以下の比較は TestO2 の native `OPENCV_FISHEYE` を対象とする。比較 CLI `export_strict_sparse.py` は `OPENCV_FISHEYE` / `THIN_PRISM_FISHEYE` に対象を限定する。正式 Step の mixed 対応範囲とは区別する。
 
 1. Point が少なくとも四つの capture に観測されること。同一 source・同時刻の二眼は一つの capture と数える。
 2. Capture を前後半と交互の二通りで分け、各 half の観測だけから ray triangulation を行うこと。退化した half や camera 後方へ出る結果は除去する。複数の非同期 fisheye source にまたがる track は、時刻を比較せず capture center の主軸順で分ける。
@@ -16,7 +28,7 @@ TestO2 の native `OPENCV_FISHEYE` を対象とする。Script は `OPENCV_FISHE
 
 Pixel の Jacobian は native fisheye projection の中央差分で計算する。固定 camera pose / intrinsics、独立等方 Gaussian noise `sigma=1 px` の仮定で、`sigma² (JᵀJ)⁻¹` を位置 covariance とする。3D の 95% ellipsoid の最大半径は `sqrt(chi²(3, 0.95)) × sigma / smallest_singular_value(J)`、係数は約 2.79548。この半径を元 point の median range で正規化し、四つの half 推定すべてが budget 以下であることを求める。
 
-2% は比較用の許容値、1 px は測定ノイズの仮定であり、機種固有の calibration 値や実世界の精度保証ではない。Pose / calibration の系統誤差、相関する測定誤差、繰り返し模様の一貫した誤対応は、この条件付き評価を通過する可能性がある。
+2% は採用した許容値、1 px は測定ノイズの仮定であり、機種固有の calibration 値や実世界の精度保証ではない。Pose / calibration の系統誤差、相関する測定誤差、繰り返し模様の一貫した誤対応は、この条件付き評価を通過する可能性がある。
 
 ## Full-track policy
 
@@ -80,7 +92,7 @@ Full track は Split より欄干や植生の輪郭を保持し、8 視点平均
 
 延長群は iteration 16,000 に 19,072 点、16,200 に 20,030 点を追加し、15,000 以降にも増加することをログで確認した。最終的に 100 万点へ到達し、Split より平均 PSNR が 0.309 dB 改善した。ただし所要時間は約 6.70 分、peak CUDA は 1,218 MiB 増え、描写は Full track に達しない。近景路面の大きなぼけや斑状の描写も残った。厳格 cleanup 後の成長制限は損失の一因だが、成長期間だけの延長を一般的な修復設定として採用する根拠はない。
 
-今回の候補は、初期点を約半分に減らしつつ Original に近い描写を維持した Full track とする。これは初期点削減と coverage の比較上の妥協案であり、最終浮遊点の完全除去や低 texture 面の正しい深度を実証したものではない。Production default の変更や LFS source の変更は行わない。
+初期点を約半分に減らしつつ Original に近い描写を維持し、利用者の目視で最も良好と評価された Full track を正式 cleanup に採用する。これは初期点削減と coverage の比較上の妥協案であり、最終浮遊点の完全除去や低 texture 面の正しい深度を実証したものではない。LFS source と training defaults は変更しない。
 
 成長期間の根拠: [default](https://github.com/MrNeRF/LichtFeld-Studio/blob/395c7f31/src/core/include/core/parameters.hpp#L225)、[新規増加の条件](https://github.com/MrNeRF/LichtFeld-Studio/blob/395c7f31/src/training/strategies/mrnf.cpp#L1972)、[strategy defaults の JSON 読込](https://github.com/MrNeRF/LichtFeld-Studio/blob/395c7f31/src/core/parameters.cpp#L703)。この追加比較は標準三群とは異なる schedule であり、別群として扱う。
 

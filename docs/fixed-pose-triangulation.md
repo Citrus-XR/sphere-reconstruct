@@ -1,6 +1,6 @@
 # 固定 pose 再三角化と独立観測の検証
 
-2026-09-09 の TestO2 では、固定 pose 再三角化と安定候補の補完後も、利用者の目視比較で大きな改善は認められなかった。留保画像で 2 px 以内に投影できる予測は 25–42% 増えたが、既存 camera poses と verified matches を条件とする coverage の増加であり、浮遊点や誤った深度の解決を示さない。今回の補完版は品質改善策として production に採用せず、元 dataset と既定設定を維持する。
+2026-09-09 の TestO2 では、固定 pose 再三角化と安定候補の補完後も、利用者の目視比較で大きな改善は認められなかった。留保画像で 2 px 以内に投影できる予測は 25–42% 増えたが、既存 camera poses と verified matches を条件とする coverage の増加であり、浮遊点や誤った深度の解決を示さない。この補完版は production に採用しない。現在の正式 Step は別途比較した [full-track cleanup](strict-sparse-cleanup.md) を採用し、既存点の検証と除去だけを行う。
 
 ## 対象と比較の境界
 

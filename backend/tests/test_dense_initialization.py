@@ -8,13 +8,13 @@ from PIL import Image
 
 from sphere_reconstruct.colmap.model import Camera, Point3D, Reconstruction
 from sphere_reconstruct.colmap.model import Image as ColmapImage
-from sphere_reconstruct.dense_init.geometry import (
-    camera_rays_to_pixels,
-    pixels_to_camera_rays,
-    triangulate_rays,
-)
+from sphere_reconstruct.dense_init.geometry import triangulate_rays
 from sphere_reconstruct.dense_init.matcher import DenseMatches
 from sphere_reconstruct.dense_init.pipeline import DenseInitializationConfig, densify_reconstruction
+from sphere_reconstruct.imaging.camera_geometry import (
+    camera_rays_to_pixels,
+    pixels_to_camera_rays,
+)
 from sphere_reconstruct.stages.dense_initialization import _ROMAV2_SETTING, DenseInitialization
 
 

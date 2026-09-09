@@ -151,9 +151,9 @@ Video source では COLMAP の `ModifyForVideoData()` と同じ `ba_global_frame
 
 ### Incremental Mapper の三角測量設定
 
-Inspector の `Reconstruct > Incremental Mapper > COLMAP Advanced` で、三角測量の品質ゲートをプリセットまたは個別値で指定できる。これらは `--Mapper.*` オプションであり、Global Mapper には適用されない。値の単位は再投影誤差が pixel、角度が degree である。空欄または `0` を個別入力した項目は、その項目の COLMAP 既定値へ委譲する。
+Inspector の `Reconstruct > Incremental Mapper > COLMAP Advanced` で、三角測量の品質ゲートをプリセットまたは個別値で指定できる。新規 UI 設定と API の省略 parameter は厳格 preset を使用し、保存済みの明示値は保持する。これらは `--Mapper.*` オプションであり、Global Mapper には適用されない。値の単位は再投影誤差が pixel、角度が degree である。空欄または `0` を個別入力した項目は、その項目の COLMAP 既定値へ委譲する。
 
-| 設定 | 既定 (COLMAP 4.1.1) | 一般 | 厳格 |
+| 設定 | COLMAP 4.1.1 既定値 | 一般 | 厳格（アプリ既定） |
 |---|---:|---:|---:|
 | `filter_max_reproj_error` | 4.0 px | 1.5 px | 1.0 px |
 | `filter_min_tri_angle` | 1.5° | 3.0° | 5.0° |
@@ -163,7 +163,7 @@ Inspector の `Reconstruct > Incremental Mapper > COLMAP Advanced` で、三角�
 | `tri_complete_max_reproj_error` | 4.0 px | 1.5 px | 1.0 px |
 | `tri_min_angle` | 1.5° | 3.0° | 5.0° |
 
-既定は登録数と遠景の coverage を優先する。一般は低視差・高残差の点を減らしながら接続を保ち、厳格は不安定な点をさらに除外する代わりに登録数と遠距離点が減る可能性がある。プリセットを選択すると 7 項目が同時に設定され、個別値を編集すると `カスタム` に切り替わる。Global Mapper を選択している間はこの Incremental 専用設定を表示しない。
+COLMAP 既定値は登録数と遠景の coverage を優先する。一般は低視差・高残差の点を減らしながら接続を保ち、厳格は不安定な点をさらに除外する代わりに登録数と遠距離点が減る可能性がある。プリセットを選択すると 7 項目が同時に設定され、個別値を編集すると `カスタム` に切り替わる。Global Mapper を選択している間はこの Incremental 専用設定を表示しない。
 
 ## GLOMAP and fisheye
 
@@ -225,7 +225,7 @@ uv run scripts/install_romav2.py
 
 Dense initialization は optional、default off。Native rays、certainty、mask、parallax、ray gap、reprojection、voxel dedupe を通した point だけを追加する。魚眼 view を含む場合だけ、depth seed は光軸から 85° 以内に制限し、有効候補の certainty 下位 8% を除外する。これは魚眼の物理有効領域や SfM mask を変更しない。
 
-Scene coordinate alignment は metric scale の成否から独立して実行する。Ground は最大 100,000 sample、Manhattan yaw は最大 20,000 sample / 2,048 candidate line へ固定し、point count が増えても推定計算量を増やさない。Gravity-aligned model の primary camera path 下方から最も近い dominant horizontal plane を Y=0 へ移し、十分な vertical / horizontal support、scene 内交点、10° 以下の orthogonality residual を持つ wall pair がある場合だけ yaw を揃える。その後に conditional sparse cleanup を実行する。Camera path からの距離 threshold と track 内最大 triangulation angle を AND 条件にし、近景や十分な baseline を持つ遠景を保持する。Default は trajectory diameter 30%、far angle 2°、reprojection / track-length additional filter は実質 off。Cleanup output があれば Dense / Export が読み、clear すれば Scene-aligned preview へ戻る。
+Scene coordinate alignment は metric scale の成否から独立して実行する。Ground は最大 100,000 sample、Manhattan yaw は最大 20,000 sample / 2,048 candidate line へ固定し、point count が増えても推定計算量を増やさない。Gravity-aligned model の primary camera path 下方から最も近い dominant horizontal plane を Y=0 へ移し、十分な vertical / horizontal support、scene 内交点、10° 以下の orthogonality residual を持つ wall pair がある場合だけ yaw を揃える。その後に [full-track sparse cleanup](strict-sparse-cleanup.md) を実行する。最低 3 capture、全 track の条件付き不確実性半径と再三角化位置差 2%、原 point と capture 留保予測の reprojection P95 2 px / 最大 4 px を使う。Pixel noise の仮定は 1 px。同一 capture の二眼を一緒に留保し、異なる source は非同期でも各 camera model で扱う。距離だけの削除や道路への平面拘束はしない。Cleanup output があれば Dense / Export が読み、clear すれば Scene-aligned preview へ戻る。
 
 UI `High` は package API に存在しない文字列を直接渡さず、RoMaV2 `precise` setting（800 / 1280 px、bidirectional）へ変換する。Supported runtime setting は `turbo / fast / base / precise`。Unknown setting は model load 前に validation error とする。
 

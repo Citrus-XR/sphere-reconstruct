@@ -14,6 +14,8 @@ import {
   paramsForStage,
   QUALITY_PRESETS,
   reconModesForProjection,
+  triangulationPresetForValues,
+  type ColmapTriangulationPreset,
   type ReconMode,
   type StageParams,
 } from './stageParams'
@@ -146,12 +148,8 @@ export const StageSettings = ({
   const enabledSources = sources.filter(source => source.enabled)
   const hasVideoSources = enabledSources.some(source => source.media_kind === 'video')
   const imageSourcesOnly = enabledSources.length > 0 && !hasVideoSources
-  const setTriangulationPreset = (preset: StageParams['colmapTriangulationPreset']) => {
-    if (preset === 'custom') {
-      setParams({ colmapTriangulationPreset: preset })
-      return
-    }
-    setParams({ colmapTriangulationPreset: preset, ...COLMAP_TRIANGULATION_PRESETS[preset] })
+  const setTriangulationPreset = (preset: ColmapTriangulationPreset) => {
+    if (preset !== 'custom') setParams(COLMAP_TRIANGULATION_PRESETS[preset])
   }
   return (
     <div>
@@ -577,8 +575,9 @@ export const StageSettings = ({
                 <NumField label={t('f_absPoseMaxError')} value={params.absPoseMaxError} step={0.5} onChange={value => setParams({ absPoseMaxError: value })} />
                 <div className="ctl">
                   <label>{t('lbl_triangulationPreset')}</label>
-                  <select className="input" value={params.colmapTriangulationPreset}
-                    onChange={event => setTriangulationPreset(event.target.value as StageParams['colmapTriangulationPreset'])}>
+                  <select className="input" value={triangulationPresetForValues(params)}
+                    aria-label={t('lbl_triangulationPreset')}
+                    onChange={event => setTriangulationPreset(event.target.value as ColmapTriangulationPreset)}>
                     <option value="default">{t('triangulationPresetDefault')}</option>
                     <option value="standard">{t('triangulationPresetStandard')}</option>
                     <option value="strict">{t('triangulationPresetStrict')}</option>
@@ -587,19 +586,19 @@ export const StageSettings = ({
                   <div className="hint">{t('hint_triangulationPreset')}</div>
                 </div>
                 <NumField label={t('f_filterMaxReproj')} hint={t('hint_filterMaxReproj')} value={params.filterMaxReprojError} step={0.25}
-                  onChange={value => setParams({ filterMaxReprojError: value, colmapTriangulationPreset: 'custom' })} />
+                  onChange={value => setParams({ filterMaxReprojError: value })} />
                 <NumField label={t('f_filterMinTriAngle')} hint={t('hint_filterMinTriAngle')} value={params.filterMinTriAngle} step={0.25}
-                  onChange={value => setParams({ filterMinTriAngle: value, colmapTriangulationPreset: 'custom' })} />
+                  onChange={value => setParams({ filterMinTriAngle: value })} />
                 <NumField label={t('f_triCreateMaxAngle')} hint={t('hint_triCreateMaxAngle')} value={params.triCreateMaxAngleError} step={0.25}
-                  onChange={value => setParams({ triCreateMaxAngleError: value, colmapTriangulationPreset: 'custom' })} />
+                  onChange={value => setParams({ triCreateMaxAngleError: value })} />
                 <NumField label={t('f_triContinueMaxAngle')} hint={t('hint_triContinueMaxAngle')} value={params.triContinueMaxAngleError} step={0.25}
-                  onChange={value => setParams({ triContinueMaxAngleError: value, colmapTriangulationPreset: 'custom' })} />
+                  onChange={value => setParams({ triContinueMaxAngleError: value })} />
                 <NumField label={t('f_triMergeMaxReproj')} hint={t('hint_triMergeMaxReproj')} value={params.triMergeMaxReprojError} step={0.25}
-                  onChange={value => setParams({ triMergeMaxReprojError: value, colmapTriangulationPreset: 'custom' })} />
+                  onChange={value => setParams({ triMergeMaxReprojError: value })} />
                 <NumField label={t('f_triCompleteMaxReproj')} hint={t('hint_triCompleteMaxReproj')} value={params.triCompleteMaxReprojError} step={0.25}
-                  onChange={value => setParams({ triCompleteMaxReprojError: value, colmapTriangulationPreset: 'custom' })} />
+                  onChange={value => setParams({ triCompleteMaxReprojError: value })} />
                 <NumField label={t('f_triMinAngle')} hint={t('hint_triMinAngle')} value={params.triMinAngle} step={0.25}
-                  onChange={value => setParams({ triMinAngle: value, colmapTriangulationPreset: 'custom' })} />
+                  onChange={value => setParams({ triMinAngle: value })} />
                 <NumField label={t('f_baLocalIters')} value={params.baLocalIters} onChange={value => setParams({ baLocalIters: value })} />
                 <NumField label={t('f_minModelSize')} value={params.minModelSize} onChange={value => setParams({ minModelSize: value })} />
               </>}
@@ -711,21 +710,19 @@ export const StageSettings = ({
             {t('cleanupSparseEnable')}
           </label>
           <div className="hint" style={{ marginBottom: 8 }}>{t('cleanupSparseHint')}</div>
-          <Slider label={t('cleanupFarDistance')} hint={t('cleanupFarDistanceHint')}
-            min={0.1} max={1} step={0.05} value={params.cleanupFarDistanceRatio}
-            onChange={value => setParams({ cleanupFarDistanceRatio: value })}
-            fmt={value => `${Math.round(value * 100)}%`} />
-          <Slider label={t('cleanupFarAngle')} hint={t('cleanupFarAngleHint')}
-            min={1.5} max={8} step={0.5} value={params.cleanupFarMinAngle}
-            onChange={value => setParams({ cleanupFarMinAngle: value })}
-            fmt={value => `${value.toFixed(1)}°`} />
-          <NumField label={t('cleanupMaxReprojection')} hint={t('cleanupMaxReprojectionHint')}
-            value={params.cleanupMaxReprojection} step={0.25}
-            onChange={value => setParams({ cleanupMaxReprojection: value })} />
-          <Slider label={t('cleanupMinTrack')} hint={t('cleanupMinTrackHint')}
-            min={2} max={10} step={1} value={params.cleanupMinTrackLength}
-            onChange={value => setParams({ cleanupMinTrackLength: Math.round(value) })}
-            fmt={value => String(Math.round(value))} />
+          <div className="hint" style={{ marginBottom: 8 }}>{t('cleanupUncertaintyHint')}</div>
+          <NumField label={t('cleanupRelativeError')} hint={t('cleanupRelativeErrorHint')}
+            value={params.cleanupRelativeError * 100} min={0.1} step={0.1}
+            disabled={!params.cleanupSparseEnabled}
+            onChange={value => setParams({ cleanupRelativeError: value / 100 })} />
+          <NumField label={t('cleanupPixelSigma')} hint={t('cleanupPixelSigmaHint')}
+            value={params.cleanupPixelSigma} min={0.1} step={0.1}
+            disabled={!params.cleanupSparseEnabled}
+            onChange={value => setParams({ cleanupPixelSigma: value })} />
+          <NumField label={t('cleanupMaxCrossError')} hint={t('cleanupMaxCrossErrorHint')}
+            value={params.cleanupMaxCrossError} min={0.25} step={0.25}
+            disabled={!params.cleanupSparseEnabled}
+            onChange={value => setParams({ cleanupMaxCrossError: value })} />
         </>
       )}
 
@@ -859,9 +856,9 @@ export const StageSettings = ({
   )
 }
 
-// COLMAP 詳細用の数値入力 (0 = COLMAP 既定). placeholder で「既定」を示す.
-const NumField = ({ label, hint, value, step = 1, disabled = false, onChange }: {
-  label: string; hint?: string; value: number; step?: number; disabled?: boolean; onChange: (v: number) => void
+// min=0 の既存 COLMAP 設定では空欄を 0（COLMAP 既定）として扱う。
+const NumField = ({ label, hint, value, min = 0, step = 1, disabled = false, onChange }: {
+  label: string; hint?: string; value: number; min?: number; step?: number; disabled?: boolean; onChange: (v: number) => void
 }) => {
   const { t } = useSettings()
   const inputId = useId()
@@ -874,7 +871,7 @@ const NumField = ({ label, hint, value, step = 1, disabled = false, onChange }: 
   const commit = () => {
     focused.current = false
     const parsed = draft.trim() === '' ? 0 : Number(draft)
-    const finite = Number.isFinite(parsed) && parsed >= 0 ? parsed : value
+    const finite = Number.isFinite(parsed) && parsed >= min ? parsed : value
     const normalized = floatingPoint ? finite : Math.round(finite)
     onChange(normalized)
     setDraft(normalized === 0 ? '' : String(normalized))
@@ -882,9 +879,9 @@ const NumField = ({ label, hint, value, step = 1, disabled = false, onChange }: 
   return (
     <div className="ctl" style={{ marginBottom: 6 }}>
       <label htmlFor={inputId} style={{ fontSize: 11 }}>{label}</label>
-      <input id={inputId} className="input" type="number" min={0} step={step} value={draft}
+      <input id={inputId} className="input" type="number" min={min} step={step} value={draft}
         disabled={disabled}
-        placeholder={t('defaultZero')} onFocus={() => { focused.current = true }}
+        placeholder={min === 0 ? t('defaultZero') : undefined} onFocus={() => { focused.current = true }}
         onChange={event => setDraft(event.target.value)} onBlur={commit}
         onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur() }} />
       {hint && <div className="hint">{hint}</div>}

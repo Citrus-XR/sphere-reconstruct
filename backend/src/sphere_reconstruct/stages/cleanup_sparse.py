@@ -1,18 +1,26 @@
-"""Scene-aligned sparse model から遠距離・低視差 point だけを条件付きで除去する。"""
+"""全 track の不確実性と capture 留保予測で sparse model をフィルタする。"""
 
 from __future__ import annotations
 
 import json
 import math
 import shutil
+from collections import Counter
 
 import numpy as np
 
-from ..colmap import gravity_align
 from ..colmap import model as colmap_model
-from ..colmap.ground_position import _nearest_trajectory_samples
+from ..colmap.input_workspace import InputSpec
+from ..colmap.point_stability import (
+    FULL_TRACK_COLUMNS,
+    assess_point,
+    geometry,
+    retain_points,
+    validate_tracks,
+)
 from ..domain.artifacts import FileRef, StageManifest
 from ..domain.pipeline_state import StageName
+from ..infrastructure.filesystem import sha256_file
 from ..pipeline.manifest import register
 from ..pipeline.stage import Stage, StageContext, new_manifest
 from . import similarity_transform
@@ -21,26 +29,29 @@ from . import similarity_transform
 @register
 class CleanupSparse(Stage):
     name = StageName.CLEANUP_SPARSE
-    impl_version = "1.0"
+    impl_version = "2.0"
 
     def normalize_params(self, raw: dict) -> dict:
-        far_distance_ratio = float(raw.get("far_distance_ratio", 0.3))
-        far_min_triangulation_deg = float(raw.get("far_min_triangulation_deg", 2.0))
-        if far_distance_ratio <= 0:
-            raise ValueError("far_distance_ratio must be positive")
-        if not 0 < far_min_triangulation_deg < 90:
-            raise ValueError("far_min_triangulation_deg must be within 0..90")
+        values = {
+            "relative_error": float(raw.get("relative_error", 0.02)),
+            "pixel_sigma": float(raw.get("pixel_sigma", 1.0)),
+            "max_cross_error": float(raw.get("max_cross_error", 2.0)),
+        }
+        for key, value in values.items():
+            if not math.isfinite(value) or value <= 0:
+                raise ValueError(f"{key} must be finite and positive")
+        max_preview_points = int(raw.get("max_preview_points", 500_000))
+        if max_preview_points <= 0:
+            raise ValueError("max_preview_points must be positive")
         return {
             "enabled": bool(raw.get("enabled", True)),
-            "far_distance_ratio": far_distance_ratio,
-            "far_min_triangulation_deg": far_min_triangulation_deg,
-            "max_reprojection_error": float(raw.get("max_reprojection_error", 0.0)),
-            "min_track_length": int(raw.get("min_track_length", 2)),
-            "max_preview_points": int(raw.get("max_preview_points", 500_000)),
+            **values,
+            "max_preview_points": max_preview_points,
         }
 
     def collect_inputs(self, ctx: StageContext) -> list[FileRef]:
         candidates = [
+            ctx.project_dir / "extract_features" / "input_spec.json",
             ctx.project_dir / "manifests" / "scene_alignment.json",
             ctx.project_dir / "scene_alignment" / "scene_alignment.json",
             *(ctx.project_dir / "scene_alignment" / "sparse" / "0").glob("*"),
@@ -59,7 +70,11 @@ class CleanupSparse(Stage):
         reconstruction = colmap_model.read_model(input_model)
         input_points = len(reconstruction.points3D)
         result = (
-            _filter_reconstruction(ctx, reconstruction)
+            _filter_reconstruction(
+                ctx,
+                reconstruction,
+                InputSpec.read(ctx.project_dir / "extract_features" / "input_spec.json").images,
+            )
             if ctx.params["enabled"]
             else {
                 "enabled": False,
@@ -73,7 +88,7 @@ class CleanupSparse(Stage):
         output_model = ctx.stage_out_dir / "sparse" / "0"
         output_model.mkdir(parents=True)
         colmap_model.write_cameras_bin(output_model / "cameras.bin", reconstruction.cameras)
-        image_span = 0.45, 0.84
+        image_span = 0.76, 0.86
         colmap_model.write_images_bin(
             output_model / "images.bin",
             reconstruction.images,
@@ -101,6 +116,15 @@ class CleanupSparse(Stage):
             max_points=ctx.params["max_preview_points"],
         )
         manifest.outputs = similarity_transform.output_refs(ctx, output_model, result_path)
+        assessment_path = ctx.stage_out_dir / "point_assessment.npz"
+        if assessment_path.is_file():
+            manifest.outputs.append(
+                FileRef(
+                    path=f"cleanup_sparse/{assessment_path.name}",
+                    size=assessment_path.stat().st_size,
+                    sha256=sha256_file(assessment_path),
+                )
+            )
         manifest.extra = {**result, "preview_points": preview.num_points_written}
         ctx.progress.info(
             "sparse cleanup complete",
@@ -111,77 +135,83 @@ class CleanupSparse(Stage):
         return manifest
 
 
-def _filter_reconstruction(ctx: StageContext, reconstruction: colmap_model.Reconstruction) -> dict:
-    reference_prefix = f"sources/{ctx.primary_source.id}/" if ctx.primary_source else None
-    reference_images = [
-        image
-        for image in reconstruction.images.values()
-        if reference_prefix is None or image.name.startswith(reference_prefix)
-    ]
-    if not reference_images:
-        raise RuntimeError("sparse cleanup reference trajectory is unavailable")
-    cameras = np.asarray([image.camera_center for image in reference_images], dtype=np.float64)
-    diameter = gravity_align.reference_trajectory_diameter(reconstruction, reference_prefix)
-    far_distance = diameter * ctx.params["far_distance_ratio"]
-    points = list(reconstruction.points3D.values())
-    coordinates = np.asarray([point.xyz for point in points], dtype=np.float64)
-    _, nearest_camera = _nearest_trajectory_samples(coordinates[:, [0, 2]], cameras[:, [0, 2]], far_distance)
-    far = nearest_camera < 0
-    centers = {image.image_id: np.asarray(image.camera_center) for image in reconstruction.images.values()}
-    removed_ids: set[int] = set()
-    removed_far_low_angle = 0
-    removed_reprojection = 0
-    removed_short_track = 0
-    for index, point in enumerate(points):
-        reason = None
-        if len(point.track) < ctx.params["min_track_length"]:
-            reason = "short_track"
-        elif ctx.params["max_reprojection_error"] > 0 and point.error > ctx.params["max_reprojection_error"]:
-            reason = "reprojection"
-        elif far[index] and not _has_triangulation_angle(
-            point, centers, ctx.params["far_min_triangulation_deg"]
-        ):
-            reason = "far_low_angle"
-        if reason is None:
-            continue
-        removed_ids.add(point.point3D_id)
-        removed_short_track += reason == "short_track"
-        removed_reprojection += reason == "reprojection"
-        removed_far_low_angle += reason == "far_low_angle"
-
-    for point_id in removed_ids:
-        del reconstruction.points3D[point_id]
-    cleared_observations = 0
+def _filter_reconstruction(
+    ctx: StageContext, reconstruction: colmap_model.Reconstruction, image_records: list[dict]
+) -> dict:
+    records = {}
+    for record in image_records:
+        name = record["name"]
+        source = record["source_id"]
+        capture = record["capture_index"]
+        if not isinstance(source, str) or not source or not isinstance(capture, int) or capture < 0:
+            raise ValueError(f"invalid source/capture metadata: {name}")
+        if name in records:
+            raise ValueError(f"duplicate capture metadata: {name}")
+        records[name] = record
     for image in reconstruction.images.values():
-        for observation in image.points2D:
-            if observation.point3D_id in removed_ids:
-                observation.point3D_id = -1
-                cleared_observations += 1
+        if image.name not in records:
+            raise ValueError(f"missing capture metadata: {image.name}")
+    validate_tracks(reconstruction)
+    views = geometry(reconstruction)
+    points = sorted(reconstruction.points3D.values(), key=lambda point: point.point3D_id)
+    if not points:
+        raise ValueError("sparse cleanup input has no points")
+    retained: set[int] = set()
+    counts = Counter()
+    metrics = np.full((len(points), len(FULL_TRACK_COLUMNS)), np.nan)
+    reasons = []
+    for index, point in enumerate(points):
+        reason, values = assess_point(
+            point,
+            views,
+            records,
+            relative_budget=ctx.params["relative_error"],
+            pixel_sigma=ctx.params["pixel_sigma"],
+            cross_limit=ctx.params["max_cross_error"],
+            policy="full_track",
+        )
+        metrics[index] = values
+        reasons.append(reason)
+        counts[reason] += 1
+        if reason == "keep":
+            retained.add(point.point3D_id)
+        ctx.progress.tick(
+            0.03 + 0.70 * (index + 1) / len(points),
+            message=f"verify sparse tracks {index + 1}/{len(points)}",
+            key="log.cleanup_sparse_assess",
+            args={"cur": index + 1, "tot": len(points), "kept": len(retained)},
+        )
+    np.savez_compressed(
+        ctx.stage_out_dir / "point_assessment.npz",
+        point_ids=np.asarray([point.point3D_id for point in points], dtype=np.uint64),
+        columns=np.asarray(FULL_TRACK_COLUMNS),
+        metrics=metrics,
+        reasons=np.asarray(reasons),
+    )
+    if not retained:
+        raise ValueError(
+            "no sparse points pass full-track cleanup; review the uncertainty and reprojection limits"
+        )
+    original_observations = sum(len(point.track) for point in points)
+    retain_points(reconstruction, retained)
     return {
         "enabled": True,
+        "policy": "full_track",
         "input_points": len(points),
-        "removed_points": len(removed_ids),
-        "output_points": len(reconstruction.points3D),
-        "removed_far_low_angle": removed_far_low_angle,
-        "removed_reprojection": removed_reprojection,
-        "removed_short_track": removed_short_track,
-        "cleared_observations": cleared_observations,
-        "reference_trajectory_diameter": diameter,
-        "far_distance_threshold": far_distance,
-        "far_candidate_points": int(np.count_nonzero(far)),
-        "far_min_triangulation_deg": ctx.params["far_min_triangulation_deg"],
+        "removed_points": len(points) - len(retained),
+        "output_points": len(retained),
+        "reason_counts": dict(counts),
+        "cleared_observations": original_observations
+        - sum(len(point.track) for point in reconstruction.points3D.values()),
+        "images_without_points": sum(
+            image.num_registered_points == 0 for image in reconstruction.images.values()
+        ),
+        "minimum_captures": 3,
+        "relative_error": ctx.params["relative_error"],
+        "pixel_sigma": ctx.params["pixel_sigma"],
+        "max_cross_error": ctx.params["max_cross_error"],
+        "max_single_error": 2 * ctx.params["max_cross_error"],
+        "camera_models": sorted({camera.model for camera in reconstruction.cameras.values()}),
+        "original_geometry_retained": True,
+        "added_points": 0,
     }
-
-
-def _has_triangulation_angle(
-    point: colmap_model.Point3D,
-    centers: dict[int, np.ndarray],
-    minimum_deg: float,
-) -> bool:
-    directions = np.asarray([np.asarray(point.xyz) - centers[image_id] for image_id, _ in point.track])
-    directions /= np.linalg.norm(directions, axis=1, keepdims=True)
-    maximum_abs_dot = math.cos(math.radians(minimum_deg))
-    for index in range(1, len(directions)):
-        if np.any(np.abs(directions[:index] @ directions[index]) <= maximum_abs_dot):
-            return True
-    return False

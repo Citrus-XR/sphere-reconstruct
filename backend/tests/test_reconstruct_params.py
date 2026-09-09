@@ -13,8 +13,8 @@ from sphere_reconstruct.stages.match_features import (
     _dominant_temporal_offset,
     _filter_cross_source_temporal_pairs,
     _filter_same_source_temporal_pairs,
-    _rig_verification_args,
     _matching_summary,
+    _rig_verification_args,
 )
 from sphere_reconstruct.stages.reconstruct import (
     Reconstruct,
@@ -396,13 +396,13 @@ def test_reconstruction_defaults_to_incremental_without_optional_gpu_solvers():
             "tri_min_angle",
         )
     } == {
-        "filter_max_reproj_error": 4.0,
-        "filter_min_tri_angle": 1.5,
-        "tri_create_max_angle_error": 2.0,
-        "tri_continue_max_angle_error": 2.0,
-        "tri_merge_max_reproj_error": 4.0,
-        "tri_complete_max_reproj_error": 4.0,
-        "tri_min_angle": 1.5,
+        "filter_max_reproj_error": 1.0,
+        "filter_min_tri_angle": 5.0,
+        "tri_create_max_angle_error": 0.75,
+        "tri_continue_max_angle_error": 0.75,
+        "tri_merge_max_reproj_error": 1.0,
+        "tri_complete_max_reproj_error": 1.0,
+        "tri_min_angle": 5.0,
     }
 
     gpu_params = Reconstruct().normalize_params({"ba_use_gpu": True})

@@ -1,29 +1,18 @@
 """既存点の厳格除去と native fisheye 不確実性の検証。"""
 
-import importlib.util
-import sys
-from pathlib import Path
 
 import numpy as np
 
-
-def load_script():
-    scripts = Path(__file__).resolve().parents[2] / "scripts"
-    if str(scripts) not in sys.path:
-        sys.path.insert(0, str(scripts))
-    spec = importlib.util.spec_from_file_location("strict_sparse", scripts / "export_strict_sparse.py")
-    script = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(script)
-    return script
+from sphere_reconstruct.colmap import point_stability as script
 
 
-def synthetic_track(script, positions, *, split_depth=None, focal_length=1000):
+def synthetic_track(positions, *, split_depth=None, focal_length=1000):
     model = script.model
     camera = model.Camera(1, "OPENCV_FISHEYE", 3840, 3840, [focal_length, focal_length, 1920, 1920, 0, 0, 0, 0])
     images, records = {}, {}
     for i, x in enumerate(positions):
         xyz = np.array([0., 0., 10. if split_depth is None or i < len(positions) // 2 else split_depth])
-        uv = script.camera_rays_to_pixels(camera.model, camera.params, (xyz - [x, 0, 0])[None])[0]
+        uv = script.camera_rays_to_pixels(camera, (xyz - [x, 0, 0])[None])[0]
         name = f"image{i}.png"
         images[i] = model.Image(i, (1, 0, 0, 0), (-x, 0, 0), 1, name,
                                 [model.ImagePoint2D(*uv, 5)])
@@ -34,7 +23,6 @@ def synthetic_track(script, positions, *, split_depth=None, focal_length=1000):
 
 
 def test_strict_filter_distinguishes_stability_from_reprojection_fit():
-    script = load_script()
     cases = [([-6, -4, -2, -1, 1, 2, 4, 6], None, "keep"),
              ([-1, 1], None, "insufficient_captures"),
              ([0.] * 8, None, "degenerate_split"),
@@ -42,15 +30,14 @@ def test_strict_filter_distinguishes_stability_from_reprojection_fit():
              ([-.12, -.08, -.04, -.02, .02, .04, .08, .12], 12, "split_disagreement"),
              ([-6, -4, -2, -1, 1, 2, 4, 6], 12, "original_reprojection")]
     for positions, split_depth, expected in cases:
-        reconstruction, point, records = synthetic_track(script, positions, split_depth=split_depth)
+        reconstruction, point, records = synthetic_track(positions, split_depth=split_depth)
         reason, values = script.assess_point(point, script.geometry(reconstruction), records,
                                              relative_budget=.02, pixel_sigma=1, cross_limit=2)
         assert reason == expected, (expected, reason, values)
 
 
 def test_original_position_must_pass_projection_even_when_split_fits_are_stable():
-    script = load_script()
-    reconstruction, point, records = synthetic_track(script, [-4, -2, 2, 4], focal_length=2000)
+    reconstruction, point, records = synthetic_track([-4, -2, 2, 4], focal_length=2000)
     reason, _ = script.assess_point(point, script.geometry(reconstruction), records,
                                     relative_budget=.02, pixel_sigma=1, cross_limit=2)
     assert reason == "keep"
@@ -62,8 +49,7 @@ def test_original_position_must_pass_projection_even_when_split_fits_are_stable(
 
 
 def test_conditional_radius_tracks_pixel_noise_and_camera_scale():
-    script = load_script()
-    reconstruction, point, _ = synthetic_track(script, [-6, -4, -2, -1, 1, 2, 4, 6])
+    reconstruction, point, _ = synthetic_track([-6, -4, -2, -1, 1, 2, 4, 6])
     views = list(script.geometry(reconstruction).values())
     centers = np.array([view["center"] for view in views])
     rotations = np.array([view["rotation"] for view in views])
@@ -87,8 +73,7 @@ def test_conditional_radius_tracks_pixel_noise_and_camera_scale():
 
 
 def test_capture_grouping_does_not_count_two_lenses_as_two_captures():
-    script = load_script()
-    reconstruction, point, records = synthetic_track(script, [-3, -2.97, 0, .03, 3, 3.03])
+    reconstruction, point, records = synthetic_track([-3, -2.97, 0, .03, 3, 3.03])
     for i, record in enumerate(records.values()):
         record["capture_index"] = i // 2
     reason, _ = script.assess_point(point, script.geometry(reconstruction), records,
@@ -97,8 +82,7 @@ def test_capture_grouping_does_not_count_two_lenses_as_two_captures():
 
 
 def test_deletion_preserves_survivor_and_clears_every_observation(tmp_path):
-    script = load_script()
-    reconstruction, point, _ = synthetic_track(script, [-6, -4, -2, -1, 1, 2, 4, 6])
+    reconstruction, point, _ = synthetic_track([-6, -4, -2, -1, 1, 2, 4, 6])
     original_xyz, original_track = point.xyz, list(point.track)
     second = script.model.Point3D(9, (1, 0, 10), (10, 20, 30), 0, [(i, 1) for i in reconstruction.images])
     reconstruction.points3D[9] = second
@@ -117,12 +101,11 @@ def test_deletion_preserves_survivor_and_clears_every_observation(tmp_path):
 
 
 def test_full_track_retains_three_constrained_positions_but_rejects_weak_baseline():
-    script = load_script()
     for positions, expected in [([-3, 0, 3], "keep"),
                                 ([0, .001, .002], "conditional_uncertainty"),
                                 ([0, 0, 0], "conditional_uncertainty"),
                                 ([-3, 3], "insufficient_captures")]:
-        reconstruction, point, records = synthetic_track(script, positions)
+        reconstruction, point, records = synthetic_track(positions)
         reason, values = script.assess_point(point, script.geometry(reconstruction), records,
                                              relative_budget=.02, pixel_sigma=1, cross_limit=2,
                                              policy="full_track")
@@ -130,8 +113,7 @@ def test_full_track_retains_three_constrained_positions_but_rejects_weak_baselin
 
 
 def test_leave_one_out_predicts_the_withheld_capture_and_checks_original_xyz():
-    script = load_script()
-    reconstruction, point, records = synthetic_track(script, [-3, 0, 3])
+    reconstruction, point, records = synthetic_track([-3, 0, 3])
     point.xyz = (.1, 0, 10)
     reason, _ = script.assess_point(point, script.geometry(reconstruction), records,
                                     relative_budget=.02, pixel_sigma=1, cross_limit=2, policy="full_track")
@@ -146,14 +128,13 @@ def test_leave_one_out_predicts_the_withheld_capture_and_checks_original_xyz():
 
 
 def test_leave_one_out_groups_both_lenses_and_rejects_a_degenerate_remainder():
-    script = load_script()
-    reconstruction, point, records = synthetic_track(script, [-3, -2.97, 3, 3.03])
+    reconstruction, point, records = synthetic_track([-3, -2.97, 3, 3.03])
     for i, record in enumerate(records.values()):
         record["capture_index"] = i // 2
     reason, _ = script.assess_point(point, script.geometry(reconstruction), records,
                                     relative_budget=.02, pixel_sigma=1, cross_limit=2, policy="full_track")
     assert reason == "insufficient_captures"
-    reconstruction, point, records = synthetic_track(script, [0, 0, 3])
+    reconstruction, point, records = synthetic_track([0, 0, 3])
     reason, _ = script.assess_point(point, script.geometry(reconstruction), records,
                                     relative_budget=.02, pixel_sigma=1, cross_limit=2, policy="full_track")
     assert reason == "degenerate_leave_one_out"
