@@ -48,7 +48,7 @@ Launcher は uv / pnpm environment、FFmpeg、COLMAP、jpegtran、optional model
 
 ### AI Agent による初回 setup
 
-AI Agent に setup を依頼する前に、必要な optional feature と runtime configuration を環境変数で明示する。これらは launcher / application の設定であり、AI Agent 自体を起動する変数ではない。未指定の optional feature は導入対象にしない。
+AI Agent に setup を依頼する前に、必要な optional feature と runtime configuration を環境変数で明示する。これらは launcher / application の設定であり、AI Agent 自体を起動する変数ではない。未指定の optional feature は導入対象にしない。以下の `<config-file>` と `<media-directory>` は利用環境の設定ファイルと素材 directory に置き換える。
 
 ```bash
 # SAM3 mask generation と RoMaV2 dense initialization が必要な場合だけ有効にする。
@@ -56,10 +56,10 @@ export SPHERE_WITH_SAM3=1
 export SPHERE_WITH_DENSE=1
 
 # 既定の runtime/config.toml 以外を使う場合だけ指定する。
-export SPHERE_CONFIG="/absolute/path/to/config.toml"
+export SPHERE_CONFIG="<config-file>"
 
 # Source browser が参照してよい media root。JSON array で指定する。
-export SPHERE_FILESYSTEM__ALLOWED_ROOTS='["/absolute/path/to/media"]'
+export SPHERE_FILESYSTEM__ALLOWED_ROOTS='["<media-directory>"]'
 ```
 
 PowerShell では同じ値を `$env:SPHERE_WITH_SAM3`、`$env:SPHERE_WITH_DENSE`、`$env:SPHERE_CONFIG`、`$env:SPHERE_FILESYSTEM__ALLOWED_ROOTS` に設定する。

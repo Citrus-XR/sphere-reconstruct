@@ -1,6 +1,6 @@
 # 固定 pose 再三角化と独立観測の検証
 
-2026-09-09 の TestO2 では、近い capture の対応を一律に削除しても改善しなかった。一方、厳格な点群を保ち、低視差候補のうち訓練側の前後時刻で安定した点だけを補完すると、留保画像で 2 px 以内に投影できる予測が 25–42% 増えた。元の浮遊点を除去した結果ではなく、既存 camera poses と verified matches を条件とする coverage 改善である。Production dataset と既定設定は変更していない。
+2026-09-09 の TestO2 では、固定 pose 再三角化と安定候補の補完後も、利用者の目視比較で大きな改善は認められなかった。留保画像で 2 px 以内に投影できる予測は 25–42% 増えたが、既存 camera poses と verified matches を条件とする coverage の増加であり、浮遊点や誤った深度の解決を示さない。今回の補完版は品質改善策として production に採用せず、元 dataset と既定設定を維持する。
 
 ## 対象と比較の境界
 
@@ -41,17 +41,17 @@ Capture index が `index % 5 == 2` の capture を留保する。同時刻の二
 | 厳格 + 安定候補 5% | 133,463 | 35.04% | 0.762 px | 2.963 px | 176,967 |
 | 厳格 + 安定候補 10% | 140,787 | 36.39% | 0.767 px | 2.969 px | 183,596 |
 
-近距離 pair 除外は coverage を相対 7.37% 失い、中央値改善は約 0.01 px に留まる。採用しない。安定候補 2% は 17,341 points を追加し、2 px 以内の留保予測は純増 32,845（25.36%）。5% は 29,702 points を追加し、純増 47,454（36.64%）。10% はより多くの depth 不確実性を許容するため、preview 優先候補は保守的な 2% と coverage を重視した 5% とする。
+近距離 pair 除外は coverage を相対 7.37% 失い、中央値改善は約 0.01 px に留まる。採用しない。安定候補 2% は 17,341 points を追加し、2 px 以内の留保予測は純増 32,845（25.36%）。5% は 29,702 points を追加し、純増 47,454（36.64%）。10% はさらに多くの depth 不確実性を許容する。これらの数値から 2% と 5% を目視比較の候補にしたが、その比較では大きな改善が報告されなかった。いずれも最適設定や推奨 cleanup として扱わない。
 
 三つの補完版すべてで、基準と共通の留保 keypoint の投影誤差は完全に同じだった。2% では 38,487 predictions が追加され、そのうち 33,736 が 2 px 以内。一方、候補競合により以前は評価可能だった 1,418 predictions が ambiguous になり、そのうち 891 が 2 px 以内だった。純増はこの損失を差し引く。既存点の XYZ を変えないことと、競合が増えないことは同義ではない。
 
-両 sensor・軌跡四分割の全区間で 2 px 以内の予測が純増した。2% の前半から後半への純増は lens0 で `6335 / 5843 / 4583 / 3153`、lens1 で `2853 / 4235 / 3826 / 2017`。開始部分だけの改善ではない。ただし、道路・空・遠景などの semantic 領域別の正解率や training 画質は未検証である。
+両 sensor・軌跡四分割の全区間で 2 px 以内の予測が純増した。2% の前半から後半への純増は lens0 で `6335 / 5843 / 4583 / 3153`、lens1 で `2853 / 4235 / 3826 / 2017`。予測 coverage の増加は開始部分だけに限られないが、目視での品質改善とは一致しなかった。道路・空・遠景などの semantic 領域別の正解率と LFStudio training 画質の定量比較は未実施である。
 
 元 model と全観測での固定再三角化は、それぞれ 110,919 / 133,196 points だった。留保対象の画像も三角化へ使うため、これらの投影結果を上表の未使用 observation と直接比較しない。元 model の時間分割 sample 9,244 points では、4,009 が capture 数不足、5,235 が解け、そのうち 58 が XYZ 差 10% 超だった。長い track の多くは条件付きで安定する一方、短い track には信頼できる深度判定の証拠が不足する。
 
 ## 成果物と再実行
 
-Backend environment の Python から実行する。Output は source project 外の新規 directory とし、実在 path を引数へ渡す。
+Repository root から Backend environment の Python で実行する。以下の `<project>`、`<colmap>`、各 experiment directory は実行環境で指定する引数を表す。Output は source project 外の新規 directory とする。Script と文書の参照は repository 相対とし、実験成果物は選択した experiment root からの相対名で示す。
 
 ```text
 python scripts/benchmark_fixed_pose.py <project> <strict-experiment> --colmap <colmap> --cases fixed_all heldout_all heldout_wide2 --detach
@@ -63,6 +63,14 @@ python scripts/audit_fixed_pose.py <supplement-experiment> --database <project>/
 python scripts/compare_fixed_pose_validation.py <strict-experiment>/validation_heldout_all.npz <supplement-experiment>/validation_heldout_supplement_02pct.npz <supplement-experiment>/validation_heldout_supplement_05pct.npz <supplement-experiment>/validation_heldout_supplement_10pct.npz --database <project>/reconstruct/database.db --spec <strict-experiment>/input_spec.json --output <supplement-experiment>/cohort_comparison.json
 ```
 
-今回の保存先は workspace sibling の `experiments/testo2-fixed-pose-20260909`、`testo2-fixed-pose-far-20260909`、`testo2-fixed-pose-supplement-20260909`。各補完 case に native camera の `sparse/0` と colored `points.ply` を保存した。`audit.json`、`validation_*.npz`、`stability_*.npz`、`cohort_comparison.json` は評価根拠である。5% 版は stock COLMAP の `model_analyzer` でも読め、1 rig、2 cameras、276 registered frames、552 registered images、133,463 points を確認した。これらは検証用 sparse model / point cloud で、画像と training mask を含む LFStudio dataset export ではない。
+今回の experiment root 内の directory 名は次の通り。
 
-この段階で示せたのは、カメラを変えずに検証可能な補完点を増やせることまでである。元の浮遊点は保持しており、弱 texture 全体の clean geometry や最終学習画質の解決は未確認。Production cleanup に採用するには、既存の弱支持点を分類する独立の証拠と視覚検証が必要になる。
+| 引数 | Experiment root からの相対名 |
+|---|---|
+| `<strict-experiment>` | `testo2-fixed-pose-20260909` |
+| `<far-experiment>` | `testo2-fixed-pose-far-20260909` |
+| `<supplement-experiment>` | `testo2-fixed-pose-supplement-20260909` |
+
+各補完 case に native camera の `sparse/0` と colored `points.ply` を保存した。`audit.json`、`validation_*.npz`、`stability_*.npz`、`cohort_comparison.json` は評価根拠である。5% 版は stock COLMAP の `model_analyzer` でも読め、1 rig、2 cameras、276 registered frames、552 registered images、133,463 points を確認した。これらは検証用 sparse model / point cloud で、画像と training mask を含む LFStudio dataset export ではない。
+
+今回の方式は既存点を保持して新規点を加えるため、元の誤点を直接修正・削除する処理を持たない。目視で大きな改善が得られなかった結果を踏まえ、同じ coverage 指標だけで補完容差を最適化することは品質改善の根拠にしない。次の調査では、見えている誤形状を既存の短い track、反復模様の対応、pose / calibration の残差に結び付けて検証する必要がある。現時点でどれが主因かは確定していない。

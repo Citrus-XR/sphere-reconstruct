@@ -1,6 +1,6 @@
 # Native dual-fisheye の sparse reconstruction 安定性
 
-TestO2 では、局所 BA の近傍数を増やしても点群品質の改善は確認できなかった。三角測量閾値を緩和すると観測と点数は増えたが、残差も増えたため、既存の厳格設定と成果物を維持する。2026-09-08 の Mapper 比較を以下に示し、pose を固定した 2026-09-09 の独立観測による点群検証は [固定 pose 再三角化](fixed-pose-triangulation.md) にまとめる。一つの実写 dataset の結果であり、他の機種に適用する既定値を決める根拠にはしない。
+TestO2 では、局所 BA の近傍数を増やしても点群品質の改善は確認できなかった。三角測量閾値を緩和すると観測と点数は増えたが、残差も増えたため、既存の厳格設定と成果物を維持する。2026-09-08 の Mapper 比較を以下に示す。2026-09-09 の [固定 pose 再三角化](fixed-pose-triangulation.md) は留保画像での予測 coverage を増やしたが、利用者の目視比較では大きな改善がなく、品質改善策として採用しない。一つの実写 dataset の結果であり、他の機種に適用する既定値を決める根拠にはしない。
 
 ## 比較条件と再実行
 
@@ -117,6 +117,6 @@ ALIKED は今回の設定では弱 texture の multi-view 拘束を増やさず�
 1. Camera-center の移動量と視差を区別して調べ、近接 capture の overlap を保つ。現行 spatial flow は縮小画像の Farneback flow であり、回転補償した並進視差ではない。同じ場所で回転した frame の増加は、深度の観測拘束を増やすとは限らない。
 2. 既存の intrinsics / rig / poses を固定した条件付き比較を行い、点の変更と軌跡の変更を分離する。元の calibration や軌跡の絶対精度が検証済みという意味ではない。
 3. Capture 全体を留保し、残りの観測だけで三角化して留保画像への投影を検証する。さらに track を時間的に前後へ分け、独立に得た XYZ の差を測る。道路や橋面の勾配・曲率を保持するため、全体を単一平面に拘束しない。
-4. 遠景を失わないため、低視差の候補は一律に捨てず、訓練側の時間分割で安定した点だけを既存点へ追加する。Coverage、共通観測の誤差、候補が競合する割合を同時に記録する。単眼 depth に基づく geometry の置換は行わない。
+4. 時間分割で安定した低視差点の追加は検証済みだが、目視で大きな改善がなかったため採用しない。次は誤形状のある局所領域と元 track の対応を調べ、既存点の誤対応・深度不確実性と pose / calibration の系統誤差を区別する。Coverage 増加だけを修復の判定にせず、単眼 depth に基づく geometry の置換も行わない。
 
 COLMAP の公式 tutorial は、白壁や無地の机などの弱 texture には追跡可能な拘束が少なく、視点の並進が必要であると説明している。FAQ にある dense MVS の解像度や PatchMatch window の調整は、現在の sparse SfM へそのまま適用できない。根拠: [COLMAP tutorial](https://github.com/colmap/colmap/blob/a0d785fba74b2664f31edc4a29026a8b27c00f67/doc/tutorial.rst#L125-L147)、[FAQ feature extraction](https://github.com/colmap/colmap/blob/a0d785fba74b2664f31edc4a29026a8b27c00f67/doc/faq.rst#L43-L53)、[弱 texture と運動](https://github.com/colmap/colmap/issues/830#issuecomment-602847248)。
