@@ -114,3 +114,46 @@ def test_deletion_preserves_survivor_and_clears_every_observation(tmp_path):
     loaded = script.model.read_model(tmp_path)
     script.validate_tracks(loaded)
     assert set(loaded.points3D) == {5}
+
+
+def test_full_track_retains_three_constrained_positions_but_rejects_weak_baseline():
+    script = load_script()
+    for positions, expected in [([-3, 0, 3], "keep"),
+                                ([0, .001, .002], "conditional_uncertainty"),
+                                ([0, 0, 0], "conditional_uncertainty"),
+                                ([-3, 3], "insufficient_captures")]:
+        reconstruction, point, records = synthetic_track(script, positions)
+        reason, values = script.assess_point(point, script.geometry(reconstruction), records,
+                                             relative_budget=.02, pixel_sigma=1, cross_limit=2,
+                                             policy="full_track")
+        assert reason == expected, (expected, reason, values)
+
+
+def test_leave_one_out_predicts_the_withheld_capture_and_checks_original_xyz():
+    script = load_script()
+    reconstruction, point, records = synthetic_track(script, [-3, 0, 3])
+    point.xyz = (.1, 0, 10)
+    reason, _ = script.assess_point(point, script.geometry(reconstruction), records,
+                                    relative_budget=.02, pixel_sigma=1, cross_limit=2, policy="full_track")
+    assert reason == "original_reprojection"
+    point.xyz = (0, 0, 10)
+    reconstruction.images[1].points2D[0].x += 3.5
+    # 元 XYZ の p95 は許容内でも、独立 capture への予測は一致しない。
+    reason, values = script.assess_point(point, script.geometry(reconstruction), records,
+                                         relative_budget=.02, pixel_sigma=1, cross_limit=3.4,
+                                         policy="full_track")
+    assert reason == "cross_reprojection", (reason, values)
+
+
+def test_leave_one_out_groups_both_lenses_and_rejects_a_degenerate_remainder():
+    script = load_script()
+    reconstruction, point, records = synthetic_track(script, [-3, -2.97, 3, 3.03])
+    for i, record in enumerate(records.values()):
+        record["capture_index"] = i // 2
+    reason, _ = script.assess_point(point, script.geometry(reconstruction), records,
+                                    relative_budget=.02, pixel_sigma=1, cross_limit=2, policy="full_track")
+    assert reason == "insufficient_captures"
+    reconstruction, point, records = synthetic_track(script, [0, 0, 3])
+    reason, _ = script.assess_point(point, script.geometry(reconstruction), records,
+                                    relative_budget=.02, pixel_sigma=1, cross_limit=2, policy="full_track")
+    assert reason == "degenerate_leave_one_out"

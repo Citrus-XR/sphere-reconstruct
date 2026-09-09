@@ -73,4 +73,4 @@ python scripts/compare_fixed_pose_validation.py <strict-experiment>/validation_h
 
 各補完 case に native camera の `sparse/0` と colored `points.ply` を保存した。`audit.json`、`validation_*.npz`、`stability_*.npz`、`cohort_comparison.json` は評価根拠である。5% 版は stock COLMAP の `model_analyzer` でも読め、1 rig、2 cameras、276 registered frames、552 registered images、133,463 points を確認した。これらは検証用 sparse model / point cloud で、画像と training mask を含む LFStudio dataset export ではない。
 
-今回の方式は既存点を保持して新規点を加えるため、元の誤点を直接修正・削除する処理を持たない。目視で大きな改善が得られなかった結果を踏まえ、同じ coverage 指標だけで補完容差を最適化することは品質改善の根拠にしない。[厳格な sparse cleanup](strict-sparse-cleanup.md) では基底点も対象に、証拠不足・分割不一致・条件付き位置不確実性で除去する比較を行う。見えている誤形状と既存の短い track、反復模様の対応、pose / calibration の残差の関係は引き続き検証が必要であり、主因は確定していない。
+今回の方式は既存点を保持して新規点を加えるため、元の誤点を直接修正・削除する処理を持たない。目視で大きな改善が得られなかった結果を踏まえ、同じ coverage 指標だけで補完容差を最適化することは品質改善の根拠にしない。[Sparse cleanup 比較](strict-sparse-cleanup.md) は基底点も対象とし、split policy の浮遊点減少と大きな欠損を受け、full-track 不確実性と capture 留保予測による候補を LFStudio で比較する。見えている誤形状と既存の短い track、反復模様の対応、pose / calibration の残差の関係は引き続き検証が必要であり、主因は確定していない。

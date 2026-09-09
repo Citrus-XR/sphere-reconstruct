@@ -1,0 +1,18 @@
+{
+  "optimization": {
+    "strategy": "mrnf",
+    "iterations": 30000,
+    "sh_degree": 3,
+    "means_lr": 0.00002,
+    "shs_lr": 0.002,
+    "opacity_lr": 0.012,
+    "scaling_lr": 0.007,
+    "rotation_lr": 0.002,
+    "lambda_dssim": 0.2,
+    "refine_every": 200,
+    "start_refine": 0,
+    "stop_refine": 28500,
+    "min_opacity": 0.00392156862745098,
+    "grow_until_iter": 28500
+  }
+}

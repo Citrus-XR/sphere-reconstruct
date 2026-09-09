@@ -117,6 +117,6 @@ ALIKED は今回の設定では弱 texture の multi-view 拘束を増やさず�
 1. Camera-center の移動量と視差を区別して調べ、近接 capture の overlap を保つ。現行 spatial flow は縮小画像の Farneback flow であり、回転補償した並進視差ではない。同じ場所で回転した frame の増加は、深度の観測拘束を増やすとは限らない。
 2. 既存の intrinsics / rig / poses を固定した条件付き比較を行い、点の変更と軌跡の変更を分離する。元の calibration や軌跡の絶対精度が検証済みという意味ではない。
 3. Capture 全体を留保し、残りの観測だけで三角化して留保画像への投影を検証する。さらに track を時間的に前後へ分け、独立に得た XYZ の差を測る。道路や橋面の勾配・曲率を保持するため、全体を単一平面に拘束しない。
-4. 時間分割で安定した低視差点の追加は検証済みだが、目視で大きな改善がなかったため採用しない。[厳格な sparse cleanup](strict-sparse-cleanup.md) では元の点にも同じ検証を適用し、証拠不足の点と条件付き位置不確実性の大きい点を除去する。誤形状のある局所領域と元 track の対応も調べ、既存点の誤対応・深度不確実性と pose / calibration の系統誤差を区別する。Coverage 増加や削除数だけを修復の判定にせず、単眼 depth に基づく geometry の置換も行わない。
+4. 時間分割で安定した低視差点の追加は検証済みだが、目視で大きな改善がなかったため採用しない。[Sparse cleanup 比較](strict-sparse-cleanup.md) では元の点も除去対象とする。Split policy は浮遊点を減らしたが大きな欠損を生じたため、full-track の条件付き不確実性と capture 単位の留保予測を使う候補を、同条件の LFStudio training で比較する。Coverage 増加や削除数だけを修復の判定にせず、既存点の誤対応・深度不確実性と pose / calibration の系統誤差を区別する。単眼 depth に基づく geometry の置換は行わない。
 
 COLMAP の公式 tutorial は、白壁や無地の机などの弱 texture には追跡可能な拘束が少なく、視点の並進が必要であると説明している。FAQ にある dense MVS の解像度や PatchMatch window の調整は、現在の sparse SfM へそのまま適用できない。根拠: [COLMAP tutorial](https://github.com/colmap/colmap/blob/a0d785fba74b2664f31edc4a29026a8b27c00f67/doc/tutorial.rst#L125-L147)、[FAQ feature extraction](https://github.com/colmap/colmap/blob/a0d785fba74b2664f31edc4a29026a8b27c00f67/doc/faq.rst#L43-L53)、[弱 texture と運動](https://github.com/colmap/colmap/issues/830#issuecomment-602847248)。

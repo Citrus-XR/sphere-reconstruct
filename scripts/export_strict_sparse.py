@@ -38,6 +38,9 @@ from supplement_stable_points import write_ply
 METRIC_COLUMNS = ["captures", "split_relative_difference", "original_relative_difference",
                   "cross_p95_px", "cross_max_px", "conditional_radius95_relative",
                   "original_p95_px", "original_max_px"]
+FULL_TRACK_COLUMNS = ["captures", "full_fit_relative_difference", "loo_relative_difference",
+                      "cross_p95_px", "cross_max_px", "conditional_radius95_relative",
+                      "original_p95_px", "original_max_px"]
 
 
 def project_and_jacobian(xyz, centers, rotations, cameras):
@@ -74,7 +77,42 @@ def relative_radius95(jacobian, sigma_px, distance):
     return float(2.7954834829151074 * sigma_px / singular[-1] / distance)
 
 
-def assess_point(point, views, records, *, relative_budget, pixel_sigma, cross_limit):
+def assess_full_track(point, centers, rotations, cameras, pixels, directions, keys, captures,
+                      distance, original_projection, values, *, relative_budget, pixel_sigma, cross_limit):
+    values[5] = relative_radius95(original_projection[1], pixel_sigma, distance)
+    if values[5] > relative_budget:
+        return "conditional_uncertainty", values
+    fit = triangulate_rays(centers, directions)
+    if fit is None:
+        return "degenerate_full_track", values
+    values[1] = np.linalg.norm(fit - point.xyz) / distance
+    if values[1] > relative_budget:
+        return "full_fit_disagreement", values
+    errors, differences = [], []
+    for capture in captures:
+        heldout = np.array([key == capture for key in keys])
+        fit = triangulate_rays(centers[~heldout], directions[~heldout])
+        if fit is None:
+            return "degenerate_leave_one_out", values
+        differences.append(float(np.linalg.norm(fit - point.xyz) / distance))
+        local = np.einsum("nij,nj->ni", rotations[heldout], fit - centers[heldout])
+        if not np.all(np.isfinite(local)) or np.any(local[:, 2] <= 0):
+            return "invalid_leave_one_out_projection", values
+        selected_cameras = [camera for camera, selected in zip(cameras, heldout, strict=True) if selected]
+        predicted = np.array([camera_rays_to_pixels(camera.model, camera.params, ray[None])[0]
+                              for camera, ray in zip(selected_cameras, local, strict=True)])
+        errors.extend(np.linalg.norm(predicted - pixels[heldout], axis=1).tolist())
+    values[2:5] = [max(differences), np.percentile(errors, 95), max(errors)]
+    if not np.all(np.isfinite(values)):
+        return "invalid_leave_one_out_projection", values
+    if values[3] > cross_limit or values[4] > 2 * cross_limit:
+        return "cross_reprojection", values
+    return "keep", values
+
+
+def assess_point(point, views, records, *, relative_budget, pixel_sigma, cross_limit, policy="split"):
+    if policy not in {"split", "full_track"}:
+        raise ValueError(f"unknown assessment policy: {policy}")
     values = np.full(len(METRIC_COLUMNS), np.nan)
     observations = sorted(point.track, key=lambda item: (
         records[views[item[0]]["image"].name]["source_id"],
@@ -83,7 +121,7 @@ def assess_point(point, views, records, *, relative_budget, pixel_sigma, cross_l
              records[views[i]["image"].name]["capture_index"]) for i, _ in observations]
     captures = list(dict.fromkeys(keys))
     values[0] = len(captures)
-    if len(captures) < 4:
+    if len(captures) < (4 if policy == "split" else 3):
         return "insufficient_captures", values
     centers = np.array([views[i]["center"] for i, _ in observations])
     rotations = np.array([views[i]["rotation"] for i, _ in observations])
@@ -102,6 +140,10 @@ def assess_point(point, views, records, *, relative_budget, pixel_sigma, cross_l
     values[6:] = [np.percentile(original_errors, 95), original_errors.max()]
     if values[6] > cross_limit or values[7] > 2 * cross_limit:
         return "original_reprojection", values
+    if policy == "full_track":
+        return assess_full_track(point, centers, rotations, cameras, pixels, directions, keys, captures,
+                                 distance, original_projection, values, relative_budget=relative_budget,
+                                 pixel_sigma=pixel_sigma, cross_limit=cross_limit)
     if len({key[0] for key in captures}) != 1:
         capture_centers = np.array([centers[[key == capture for key in keys]].mean(axis=0)
                                     for capture in captures])
@@ -188,8 +230,12 @@ def execute(args):
     started = time.monotonic()
     counts = Counter()
     for index, point in enumerate(points, 1):
-        reason, values = assess_point(point, views, records, relative_budget=args.relative_error,
-                                     pixel_sigma=args.pixel_sigma, cross_limit=args.max_cross_error)
+        if args.policy == "original":
+            reason, values = "keep", np.full(len(METRIC_COLUMNS), np.nan)
+        else:
+            reason, values = assess_point(point, views, records, relative_budget=args.relative_error,
+                                         pixel_sigma=args.pixel_sigma, cross_limit=args.max_cross_error,
+                                         policy=args.policy)
         metrics.append(values)
         reasons.append(reason)
         counts[reason] += 1
@@ -201,17 +247,22 @@ def execute(args):
             write_json(args.output / "status.json", state)
             print(json.dumps(state), flush=True)
     np.savez_compressed(args.output / "point_assessment.npz", point_ids=[p.point3D_id for p in points],
-                        values=metrics, reasons=reasons, columns=METRIC_COLUMNS,
+                        values=metrics, reasons=reasons,
+                        columns=METRIC_COLUMNS if args.policy == "split" else FULL_TRACK_COLUMNS,
                         model_fingerprint=json.dumps(source_fingerprint, sort_keys=True))
     if not retained:
         raise ValueError("no points satisfy the requested uncertainty budget; assessment has been saved")
     report = {"input_points": len(points), "retained_points": len(retained),
               "removed_points": len(points) - len(retained), "counts": dict(counts),
               "relative_error_budget": args.relative_error, "pixel_sigma_assumption": args.pixel_sigma,
-              "cross_p95_limit_px": args.max_cross_error, "cross_max_limit_px": 2 * args.max_cross_error,
-              "original_reprojection_limit_px": {"p95": args.max_cross_error, "max": 2 * args.max_cross_error},
-              "minimum_captures": 4, "splits": ["ordered_halves", "alternating_captures"],
-              "mixed_fisheye_source_order": "principal_axis_of_capture_centers",
+              "cross_p95_limit_px": args.max_cross_error,
+              "cross_max_limit_px": None if args.policy == "original" else 2 * args.max_cross_error,
+              "policy": args.policy,
+              "minimum_captures": {"original": None, "split": 4, "full_track": 3}[args.policy],
+              "cross_validation": {"original": None, "split": "ordered and alternating halves",
+                                   "full_track": "leave one capture out"}[args.policy],
+              "uncertainty_observations": {"original": None, "split": "each half",
+                                           "full_track": "full track"}[args.policy],
               "uncertainty": "conditional linearized 95% ellipsoid radius; fixed cameras and independent isotropic pixel errors",
               "model_fingerprint": source_fingerprint, "source_artifact_fingerprints": before,
               "original_geometry_retained": True, "added_points": 0}
@@ -263,7 +314,7 @@ def execute(args):
         "camera_models": sorted({camera.model for camera in loaded.cameras.values()}),
         "images": len(loaded.images), "points3D": len(loaded.points3D), "masks": len(mask_sizes),
         "mask_source": "training", "image_source": "original", "training_crop": {"enabled": False},
-        "model_source": "strict_sparse_experiment", "validation": validation,
+        "model_source": "sparse_cleanup_experiment", "cleanup_policy": args.policy, "validation": validation,
         "strict_cleanup_report": "../report.json",
         "recommended_viewer_settings": {"gut": True, "undistort": False, "mask_mode": "segment"},
     })
@@ -276,14 +327,18 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("project", type=Path)
     parser.add_argument("output", type=Path)
-    parser.add_argument("--relative-error", type=float, required=True)
-    parser.add_argument("--pixel-sigma", type=float, required=True)
-    parser.add_argument("--max-cross-error", type=float, required=True)
+    parser.add_argument("--relative-error", type=float)
+    parser.add_argument("--pixel-sigma", type=float)
+    parser.add_argument("--max-cross-error", type=float)
+    parser.add_argument("--policy", choices=["original", "split", "full_track"], default="split")
     args = parser.parse_args()
     for value in (args.relative_error, args.pixel_sigma, args.max_cross_error):
-        if not np.isfinite(value) or value <= 0:
-            raise ValueError("error and uncertainty budgets must be positive and finite")
-    if args.relative_error >= 1:
+        if args.policy == "original":
+            if value is not None:
+                raise ValueError("original baseline does not apply error budgets")
+        elif value is None or not np.isfinite(value) or value <= 0:
+            raise ValueError("all three error and uncertainty budgets must be specified, positive and finite")
+    if args.policy != "original" and args.relative_error >= 1:
         raise ValueError("relative error budget must be less than one")
     args.project, args.output = args.project.resolve(), args.output.resolve()
     if args.output.is_relative_to(args.project):
