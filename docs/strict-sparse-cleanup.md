@@ -62,9 +62,25 @@ Installed build は `v0.5.3-386-g395c7f31-dirty`。旧 preset JSON を読み込�
 
 共通条件は MRNF、30,000 iterations、1,000,000 Gaussian cap、`resize_factor=1`、`max_width=0`、GUT、`mask_mode=segment`、元画像と既存 Training mask。Undistort、PPISP / controller、depth / normal loss、sparsity は有効にしない。Cap は比較用の共通予算であり、画質上の最適値や任意場面での 12 GB 保証値ではない。
 
-Split の標準 training は 30,000 steps を正常完走し、開始・保存を含め約 21.93 分、steady 平均 42.92 ms/step、CUDA 使用量の記録上のピーク 7,305.5 MiB、最終 348,475 Gaussians だった。これは今回の CLI 条件の結果であり、以前の GUI training が遅かった原因まで確定するものではない。
+標準三群と成長期間延長の追加群は 30,000 steps を正常完走した。時間は supervisor の開始・保存を含む値、steady は LFStudio の perf collector、peak は CUDA 使用量の記録である。比較ページの時間は perf collector の wall time のため、起動・終了待ちの分だけ短い。
 
-標準 MRNF は `grow_until_iter=15000` で新規増加を止める。ログでも Split は iteration 14,800 に 348,475 点へ増え、その後は soft prune と同数の replacement のみで、100 万 cap には達しなかった。Cap は目標点数ではない。追加比較では `scripts/configs/lfs_mrnf_full_refinement_growth.json` を使い、同じ厳格 dataset の成長期間だけを既存 `stop_refine=28500` まで延長する。Config の他の明示 field は当該 build の MRNF defaults と JSON 必須 field を保持し、残りは `strategy=mrnf` に対応する defaults から読む。LFS source は変更しない。
+| 指標 | Original | Split | Full track | Split + growth 延長 |
+|---|---:|---:|---:|---:|
+| 完走時間 (min) | 36.67 | 21.93 | 32.14 | 28.63 |
+| Steady ms / step | 72.77 | 42.92 | 63.64 | 56.69 |
+| Peak CUDA (MiB) | 7,131.5 | 7,305.5 | 7,587.5 | 8,523.5 |
+| 最終 Gaussian 数 | 1,000,000 | 348,475 | 1,000,000 | 1,000,000 |
+| 8 視点平均 masked PSNR (dB) | 20.752 | 20.236 | 20.669 | 20.545 |
+
+四群とも非有限の Gaussian 座標・scale は検出されず、OOM は発生しなかった。今回の条件では Split が 1 step あたり遅くなる現象は再現しなかった。ただし以前の GUI training の設定が不明なため、その遅さの原因まで確定した結果ではない。
+
+Full track は Split より欄干や植生の輪郭を保持し、8 視点平均 PSNR は 0.433 dB 高い。Original との差は −0.082 dB と小さく、全体として Original の描写へ近づいた結果であって、明確な画質向上の実証ではない。元 pixel crop では三群とも近距離の柏油路がぼやけ、天空の大きな色むらも残る。RNG 差を含む単回比較であり、小さな score 差を最適化の根拠にしない。Training 後の浮遊 geometry を ground truth で分類したわけでもない。
+
+標準 MRNF は `grow_until_iter=15000` で新規増加を止める。ログでも Split は iteration 14,800 に 348,475 点へ増え、その後は soft prune と同数の replacement のみで、100 万 cap には達しなかった。Cap は目標点数ではない。追加比較では `scripts/configs/lfs_mrnf_full_refinement_growth.json` を使い、同じ厳格 dataset の成長期間だけを既存 `stop_refine=28500` まで延長した。Config の他の明示 field は当該 build の MRNF defaults と JSON 必須 field を保持し、残りは `strategy=mrnf` に対応する defaults から読む。LFS source は変更していない。
+
+延長群は iteration 16,000 に 19,072 点、16,200 に 20,030 点を追加し、15,000 以降にも増加することをログで確認した。最終的に 100 万点へ到達し、Split より平均 PSNR が 0.309 dB 改善した。ただし所要時間は約 6.70 分、peak CUDA は 1,218 MiB 増え、描写は Full track に達しない。近景路面の大きなぼけや斑状の描写も残った。厳格 cleanup 後の成長制限は損失の一因だが、成長期間だけの延長を一般的な修復設定として採用する根拠はない。
+
+今回の候補は、初期点を約半分に減らしつつ Original に近い描写を維持した Full track とする。これは初期点削減と coverage の比較上の妥協案であり、最終浮遊点の完全除去や低 texture 面の正しい深度を実証したものではない。Production default の変更や LFS source の変更は行わない。
 
 成長期間の根拠: [default](https://github.com/MrNeRF/LichtFeld-Studio/blob/395c7f31/src/core/include/core/parameters.hpp#L225)、[新規増加の条件](https://github.com/MrNeRF/LichtFeld-Studio/blob/395c7f31/src/training/strategies/mrnf.cpp#L1972)、[strategy defaults の JSON 読込](https://github.com/MrNeRF/LichtFeld-Studio/blob/395c7f31/src/core/parameters.cpp#L703)。この追加比較は標準三群とは異なる schedule であり、別群として扱う。
 
@@ -89,7 +105,7 @@ Repository root から Backend environment の Python を使用する。各引�
 | Full-track training | `testo2-lfs-full-track-30k-20260909/training` |
 | Original training | `testo2-lfs-original-30k-20260909/training` |
 | Split の成長期間延長 | `testo2-lfs-strict-extended-30k-20260909/training` |
-| Render comparison | `testo2-lfs-comparison-20260909` |
+| 最終 Render comparison | `testo2-lfs-comparison-20260909/final/index.html` |
 
 ```text
 python scripts/export_strict_sparse.py <project> <original-output> --policy original
@@ -100,6 +116,8 @@ python scripts/benchmark_lfs_training.py <lfs-executable> <dataset> <training-ou
 ```
 
 `--timelapse-images` は画像ごとに繰り返す。後続 job の `--wait-for <previous-output>/status.json` は前 job が成功した場合だけ開始し、失敗は後続 job も失敗として記録する。
+
+各 training directory の `project.licht` は完走した工程、`splat_30000.ply` は最終 Gaussian。最終比較の `index.html` は元 RGB・Training mask・四群の画面と元 pixel crop へのリンクをまとめる。`comparison.json` は全画像と crop の score、性能記録、Gaussian geometry 要約を持つ。元 RGB / mask の file identity または hash、render の元解像度を照合してから生成する。
 
 Cleanup output は以下の構成になる。
 
