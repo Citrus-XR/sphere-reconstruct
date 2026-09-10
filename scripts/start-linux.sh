@@ -16,7 +16,7 @@ echo "[2/5] Backend 依存関係"
 backend_extras=(--extra imaging --extra aliked)
 if [[ "${SPHERE_WITH_SAM3:-0}" == "1" ]]; then backend_extras+=(--extra sam3); fi
 if [[ "${SPHERE_WITH_DENSE:-0}" == "1" ]]; then backend_extras+=(--extra dense); fi
-(cd backend && uv sync "${backend_extras[@]}")
+(cd backend && uv sync --locked --inexact "${backend_extras[@]}")
 
 if [[ "${SPHERE_WITH_DENSE:-0}" == "1" ]]; then
   backend/.venv/bin/python scripts/install_romav2.py
@@ -40,7 +40,7 @@ if [[ -z "$configured_vocab_tree" ]]; then
 fi
 
 echo "[4/5] 環境診断"
-(cd backend && uv run sphere-doctor)
+(cd backend && .venv/bin/python -m sphere_reconstruct.cli)
 
 echo "[5/5] http://127.0.0.1:${port} で起動"
 cd backend

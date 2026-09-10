@@ -4,7 +4,7 @@ version = "0.0.1"
 description = "INSV / ERP から COLMAP 再構成と LFStudio 学習データを生成するローカル Web パイプライン"
 license = "GPL-3.0-or-later"
 requires-python = ">=3.12,<3.14"
-readme = "../README.md"
+readme = "README.md"
 dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",

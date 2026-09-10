@@ -32,6 +32,8 @@ scripts\start-windows.ps1
 scripts\start-windows.cmd
 ```
 
+Windows launcher は startup log を `runtime/logs/launcher-*.log` に保存し、失敗した工程と exit code を表示する。CMD window は結果表示後に key 入力を待つ。正常起動後は browser を開き、window を閉じても server は background で継続する。二回目の起動は既存の healthy server を使う。導入済み環境の download / build を省く場合は `-SkipSetup`、browser を開かない場合は `-NoBrowser` を付ける。自動実行では `SPHERE_LAUNCHER_NO_PAUSE=1` を設定する。
+
 ### Linux
 
 ```bash
@@ -64,11 +66,11 @@ export SPHERE_FILESYSTEM__ALLOWED_ROOTS='["<media-directory>"]'
 
 PowerShell では同じ値を `$env:SPHERE_WITH_SAM3`、`$env:SPHERE_WITH_DENSE`、`$env:SPHERE_CONFIG`、`$env:SPHERE_FILESYSTEM__ALLOWED_ROOTS` に設定する。
 
-Agent には次の手順を依頼する。まず対象 OS、shell、GPU の有無、上記 optional feature を確認する。次に対象 platform の launcher を実行し、`sphere-doctor` の結果から不足する `uv`、`pnpm`、FFmpeg / FFprobe、COLMAP、`jpegtran`、model / checkpoint を特定する。Windows launcher は COLMAP、`jpegtran`、vocabulary tree の project-local installer を呼び出す。Linux / macOS の native binary は system package manager で導入し、`runtime/config.toml` または `SPHERE_CONFIG` の `[binaries]` に path を設定する。不足項目を導入した後は launcher を再実行し、Doctor が必要な capability を確認できた時だけ server を起動する。
+Agent には次の手順を依頼する。まず対象 OS、shell、GPU の有無、上記 optional feature を確認する。次に対象 platform の launcher を実行し、Doctor の結果から不足する `uv`、`pnpm`、FFmpeg / FFprobe、COLMAP、`jpegtran`、model / checkpoint を特定する。依存同期は `uv sync --locked --inexact` を使い、導入済み optional dependency を保持する。診断は `.venv` の Python から直接実行し、再同期しない。Windows launcher は未設定の COLMAP、`jpegtran`、vocabulary tree に project-local installer を使う。Linux / macOS の native binary は system package manager で導入し、`runtime/config.toml` または `SPHERE_CONFIG` の `[binaries]` に path を設定する。不足項目を導入した後は launcher を再実行し、Doctor が必要な capability を確認できた時だけ server を起動する。
 
 OS の package manager、GPU driver、CUDA toolkit、media root のように自動判定できない項目だけは、Agent が不足内容と実行する install command を確認してから導入する。Python と frontend の依存関係は launcher がそれぞれ `backend/.venv` と `frontend` に導入するため、global Python package / npm package として導入しない。
 
-初回 setup 後に terminal / SSH session から独立して backend を維持する場合は、同じ Python service manager を全 platform で使う。
+Windows launcher は共通 Python service manager で background 起動する。Linux / macOS の launcher は foreground 起動するため、初回 setup 後に terminal / SSH session から独立して backend を維持する場合は同じ manager を使う。
 
 ```bash
 # Linux / macOS

@@ -22,6 +22,9 @@ playwright-report/
 # ワークスペース (プロジェクト成果物)
 workspace/
 runtime/local.toml
+runtime/backend.pid.json
+runtime/backend.pid.tmp
+runtime/launcher.lock
 .runtime/
 
 # エディタ

@@ -14,6 +14,18 @@ scripts\start-windows.ps1
 scripts\start-windows.cmd
 ```
 
+Startup log は `runtime/logs/launcher-<timestamp>-<pid>.log`。Native command の stdout / stderr、失敗工程、exit code を保存する。CMD は成功・失敗の両方で key 入力を待ち、失敗時は非ゼロ exit code を返す。PowerShell からの直接実行は待機しない。Server の health check が成功した時だけ browser を開き、以後 server は terminal と独立して稼働する。
+
+- `-NoBrowser`: browser を開かない。SSH / 自動検証向け。
+- `-SkipSetup`: dependency installation、frontend build、model download を省略する。既存 `.venv` と `frontend/dist` が必要で、runtime diagnosis は実行する。
+- `SPHERE_LAUNCHER_NO_PAUSE=1`: CMD の終了時待機を省く。
+- `SPHERE_PORT`: listen port の明示 override。未指定時は runtime config の `server.port`。
+- `SPHERE_SERVICE_RUNTIME`: PID / log directory の override。未指定時は repository の `runtime`。
+
+Launcher の同時実行は file lock で拒否し、healthy な管理対象 server がある場合は依存同期も重複起動も行わず既存 URL を使う。Code / dependency 更新を適用するときは先に実行中 Job を終了し、`server_service.py stop` の後に通常 launcher を実行する。Unhealthy server や別 port の管理対象 server がある場合は診断を表示し、自動終了しない。
+
+Source browser root が未設定の場合だけ repository の親 folder を使う。Drive root を自動列挙しない。明示した runtime config / environment の root は保持する。
+
 ### Linux
 
 ```bash
@@ -26,20 +38,23 @@ scripts\start-windows.cmd
 ./scripts/start-macos.sh
 ```
 
-Launcher は backend / frontend environment を作成し、runtime config を読み、server と Vite frontend を起動する。Python package は uv、Node package は pnpm で管理する。Global Python / npm install は使用しない。
+Launcher は backend / frontend environment を作成し、runtime config を読み、build 済み frontend を配信する backend を起動する。Windows は background、Linux / macOS は foreground で稼働する。Vite development server は起動しない。Python package は uv、Node package は pnpm で管理し、global Python / npm install は使用しない。
+
+Backend は `uv sync --locked --inexact` で lockfile に従って同期する。今回指定していない SAM3 / RoMaV2 などの導入済み package は削除しない。診断は `.venv` の Python から `-m sphere_reconstruct.cli` を実行し、`uv run` による追加同期を避ける。Package の README は `backend/README.md` とし、Hatchling が禁止する project 外への metadata path を使わない。
 
 ### Background service
 
-初回 launcher 実行後は `scripts/server_service.py` が Windows / Linux / macOS 共通の background lifecycle を提供する。Windows Task Scheduler、systemd、launchd を application contract にしない。Windows では detached + breakaway process、POSIX では independent session を作り、共通 PID record、stdout / stderr log、health check を使う。
+`scripts/server_service.py` が Windows / Linux / macOS 共通の background lifecycle を提供する。Windows launcher はこれを直接使う。Windows Task Scheduler、systemd、launchd を application contract にしない。Windows では detached + breakaway process、POSIX では independent session を作り、共通 PID record、stdout / stderr log、health check を使う。
 
 ```text
 server_service.py start [--port 8787]
 server_service.py status
+server_service.py status --json
 server_service.py restart
 server_service.py stop
 ```
 
-Python executable は `backend/.venv` の platform 固有 path を使う。PID record は `runtime/backend.pid.json`、log は `runtime/logs/backend.stdout.log` と `backend.stderr.log`。Backend restart 時は前回の `running / queued` Job を `interrupted by restart` として終了し、未確定 Stage は再実行可能な状態へ戻す。
+Python executable は `backend/.venv` の platform 固有 path を使う。PID record は `runtime/backend.pid.json`、log は `runtime/logs/backend.stdout.log` と `backend.stderr.log`。Python output は unbuffered で保存する。Port を使用できない場合は server process を作る前に失敗し、既存 process は停止しない。起動直後の異常終了は今回の stderr 末尾を表示し、health timeout では起動した process を停止してから失敗を返す。`status` の exit code は healthy=0、stopped=1、unhealthy=2。Backend restart 時は前回の `running / queued` Job を `interrupted by restart` として終了し、未確定 Stage は再実行可能な状態へ戻す。
 
 同じ workspace に対する API service は一つだけ起動する。Project ごとの排他制御はこの API process が所有し、Worker の稼働状態は SQLite の Job record で共有する。Frontend build の静的配信は解決後の path を `frontend/dist` 内に限定し、上位 directory や外部を指す symlink を配信しない。未定義の `/api` route は HTML に置き換えず HTTP 404 を返す。
 
@@ -111,6 +126,8 @@ Generic installer:
 ```bash
 uv run scripts/install_colmap.py
 ```
+
+Windows 自動導入は official `cpu` / `cuda` package を使う。`SPHERE_COLMAP_VARIANT` で明示でき、未指定時は `nvidia-smi` の存在で選ぶ。独自 CUDA BA build は `[binaries].colmap` または `SPHERE_BINARIES__COLMAP` に path を指定する。存在しない installer variant `cuda-ba` は渡さない。設定済みの `jpegtran` も再導入しない。
 
 Windows CUDA / cuDSS build:
 
