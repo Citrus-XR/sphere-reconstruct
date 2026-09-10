@@ -23,13 +23,13 @@ COLMAP 4.1.1 の `OPENCV_FISHEYE` は各 sensor の forward hemisphere、すな�
 ### Windows
 
 ```powershell
-scripts\start-windows.ps1
+.\start-windows.ps1
 ```
 
 または:
 
 ```bat
-scripts\start-windows.cmd
+start-windows.cmd
 ```
 
 Windows launcher は startup log を `runtime/logs/launcher-*.log` に保存し、失敗した工程と exit code を表示する。CMD window は結果表示後に key 入力を待つ。正常起動後は browser を開き、window を閉じても server は background で継続する。二回目の起動は既存の healthy server を使う。導入済み環境の download / build を省く場合は `-SkipSetup`、browser を開かない場合は `-NoBrowser` を付ける。自動実行では `SPHERE_LAUNCHER_NO_PAUSE=1` を設定する。
@@ -37,13 +37,13 @@ Windows launcher は startup log を `runtime/logs/launcher-*.log` に保存し�
 ### Linux
 
 ```bash
-./scripts/start-linux.sh
+./start-linux.sh
 ```
 
 ### macOS
 
 ```bash
-./scripts/start-macos.sh
+./start-macos.sh
 ```
 
 Launcher は uv / pnpm environment、FFmpeg、COLMAP、jpegtran、optional model を診断し、不足項目を明示する。既定 server は `127.0.0.1:8787`。詳細は [Runtime / GPU setup](docs/setup-gpu.md) を参照する。

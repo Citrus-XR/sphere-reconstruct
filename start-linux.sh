@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-repository_dir="$(cd "$(dirname "$0")/.." && pwd)"
+repository_dir="$(cd "$(dirname "$0")" && pwd)"
 port="${SPHERE_PORT:-8787}"
 cd "$repository_dir"
 

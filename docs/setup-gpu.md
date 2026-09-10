@@ -4,14 +4,16 @@ Development checkout と packaged runtime の起動、dependency diagnosis、CUD
 
 ## Launchers
 
+各 platform の `start-*` entry point は repository root に置く。以下の command は root から実行する。Windows では root の `start-windows.cmd` を double-click しても起動できる。
+
 ### Windows
 
 ```powershell
-scripts\start-windows.ps1
+.\start-windows.ps1
 ```
 
 ```bat
-scripts\start-windows.cmd
+start-windows.cmd
 ```
 
 Startup log は `runtime/logs/launcher-<timestamp>-<pid>.log`。Native command の stdout / stderr、失敗工程、exit code を保存する。CMD は成功・失敗の両方で key 入力を待ち、失敗時は非ゼロ exit code を返す。PowerShell からの直接実行は待機しない。Server の health check が成功した時だけ browser を開き、以後 server は terminal と独立して稼働する。
@@ -29,13 +31,13 @@ Source browser root が未設定の場合だけ repository の親 folder を使�
 ### Linux
 
 ```bash
-./scripts/start-linux.sh
+./start-linux.sh
 ```
 
 ### macOS
 
 ```bash
-./scripts/start-macos.sh
+./start-macos.sh
 ```
 
 Launcher は backend / frontend environment を作成し、runtime config を読み、build 済み frontend を配信する backend を起動する。Windows は background、Linux / macOS は foreground で稼働する。Vite development server は起動しない。Python package は uv、Node package は pnpm で管理し、global Python / npm install は使用しない。

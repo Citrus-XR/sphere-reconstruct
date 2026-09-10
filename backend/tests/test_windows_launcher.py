@@ -17,9 +17,9 @@ def launcher(tmp_path):
     repo = tmp_path / "checkout with spaces"
     scripts = repo / "scripts"
     scripts.mkdir(parents=True)
-    original = Path(__file__).resolve().parents[2] / "scripts"
+    original = Path(__file__).resolve().parents[2]
     for name in ("start-windows.ps1", "start-windows.cmd"):
-        shutil.copyfile(original / name, scripts / name)
+        shutil.copyfile(original / name, repo / name)
     backend = repo / "backend"
     venv.EnvBuilder(with_pip=False).create(backend / ".venv")
     package = backend / "sphere_reconstruct"
@@ -66,7 +66,7 @@ def launcher(tmp_path):
 
     def run(*args, **overrides):
         result = subprocess.run(
-            ["cmd.exe", "/d", "/c", str(scripts / "start-windows.cmd"), "-NoBrowser", *args],
+            ["cmd.exe", "/d", "/c", str(repo / "start-windows.cmd"), "-NoBrowser", *args],
             cwd=tmp_path,
             env={**env, **overrides},
             capture_output=True,

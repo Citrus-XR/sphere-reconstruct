@@ -6,9 +6,9 @@ param(
 
 $ErrorActionPreference = "Stop"
 $PSNativeCommandUseErrorActionPreference = $false
-$repositoryDir = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+$repositoryDir = $PSScriptRoot
 $python = Join-Path $repositoryDir "backend\.venv\Scripts\python.exe"
-$serviceScript = Join-Path $PSScriptRoot "server_service.py"
+$serviceScript = Join-Path $repositoryDir "scripts\server_service.py"
 $runtimeDir = if ($env:SPHERE_SERVICE_RUNTIME) {
     [IO.Path]::GetFullPath($env:SPHERE_SERVICE_RUNTIME)
 } else {
