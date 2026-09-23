@@ -71,6 +71,53 @@ def test_mixed_cleanup_keeps_constrained_geometry_and_removes_uncertain_depth(tm
         assert assessment["reasons"].tolist() == ["keep", "conditional_uncertainty"]
 
 
+def test_trajectory_removal_assesses_short_tracks_and_reports_final_counts(tmp_path, monkeypatch):
+    camera = model.Camera(1, "PINHOLE", 2000, 1500, [1200, 1200, 1000, 750])
+    centers = [(-2, 0, 0), (-1, 0.2, 0), (0, 0, 0), (1, -0.2, 0), (2, 0, 0)]
+    images, records = {}, []
+    points = {
+        1: model.Point3D(1, (0, 0, 8), (120, 130, 140), 0, []),
+        2: model.Point3D(2, (0.5, 0.4, 6), (40, 50, 60), 0, []),
+    }
+    for capture, center in enumerate(centers):
+        image_id = capture + 1
+        observations = []
+        observed_points = points.values() if capture < 3 else (points[1],)
+        for point in observed_points:
+            pixel = camera_rays_to_pixels(
+                camera, (np.asarray(point.xyz) - np.asarray(center))[None]
+            )[0]
+            point.track.append((image_id, len(observations)))
+            observations.append(model.ImagePoint2D(*pixel, point.point3D_id))
+        name = f"phone/frame_{capture:06d}.jpg"
+        images[image_id] = model.Image(
+            image_id, (1, 0, 0, 0), tuple(-value for value in center), 1, name, observations
+        )
+        records.append({"name": name, "source_id": "phone", "capture_index": capture})
+    reconstruction = model.Reconstruction({1: camera}, images, points)
+    monkeypatch.setattr(
+        "sphere_reconstruct.stages.cleanup_sparse._find_trajectory_outliers",
+        lambda *_: {
+            "outlier_captures_by_source": {"phone": [0, 1]},
+            "trajectories": {"phone": {"test": "outliers"}},
+        },
+    )
+
+    result = _filter_reconstruction(context(tmp_path), reconstruction, records)
+
+    assert result["reason_counts"] == {"keep": 1, "insufficient_captures": 1}
+    assert result["input_points"] == 2
+    assert result["removed_points"] == 1
+    assert result["output_points"] == len(reconstruction.points3D) == 1
+    assert result["trajectory_removed_observations"] == 4
+    assert result["cleared_observations"] == 5
+    assert result["removed_images"] == 2
+    assert len(reconstruction.points3D[1].track) == 3
+    with np.load(tmp_path / "point_assessment.npz") as assessment:
+        assert assessment["point_ids"].tolist() == [1, 2]
+        assert assessment["reasons"].tolist() == ["keep", "insufficient_captures"]
+
+
 def test_mixed_capture_indices_are_source_scoped_and_same_capture_views_are_grouped():
     reconstruction, records = mixed_model()
     for record in records:
@@ -253,7 +300,7 @@ def test_stage_exports_complete_model_and_declares_metadata_dependency(tmp_path,
     )
     manifest = CleanupSparse().execute(ctx)
     assert any(ref.path == "extract_features/input_spec.json" for ref in manifest.inputs)
-    assert manifest.impl_version == "2.2"
+    assert manifest.impl_version == "2.3"
     loaded = model.read_model(output / "sparse" / "0")
     assert len(loaded.points3D) == (1 if enabled else 2)
     assert loaded.cameras == original_model.cameras

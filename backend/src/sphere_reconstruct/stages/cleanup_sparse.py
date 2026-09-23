@@ -31,7 +31,7 @@ from . import similarity_transform
 @register
 class CleanupSparse(Stage):
     name = StageName.CLEANUP_SPARSE
-    impl_version = "2.2"
+    impl_version = "2.3"
 
     def normalize_params(self, raw: dict) -> dict:
         values = {
@@ -163,8 +163,18 @@ def _filter_reconstruction(
         if image.name not in records:
             raise ValueError(f"missing capture metadata: {image.name}")
     validate_tracks(reconstruction)
-    views = geometry(reconstruction)
+    input_image_count = len(reconstruction.images)
+    input_observations = sum(len(point.track) for point in reconstruction.points3D.values())
     trajectory_result = _find_trajectory_outliers(ctx, reconstruction, image_records)
+    removed_image_ids = _remove_trajectory_outlier_images(
+        reconstruction,
+        image_records,
+        trajectory_result["outlier_captures_by_source"],
+    )
+    trajectory_removed_observations = input_observations - sum(
+        len(point.track) for point in reconstruction.points3D.values()
+    )
+    views = geometry(reconstruction)
     points = sorted(reconstruction.points3D.values(), key=lambda point: point.point3D_id)
     if not points:
         raise ValueError("sparse cleanup input has no points")
@@ -204,26 +214,22 @@ def _filter_reconstruction(
         raise ValueError(
             "no sparse points pass full-track cleanup; review the uncertainty and reprojection limits"
         )
-    original_observations = sum(len(point.track) for point in points)
     retain_points(reconstruction, retained)
-    removed_image_ids = _remove_trajectory_outlier_images(
-        reconstruction,
-        image_records,
-        trajectory_result["outlier_captures_by_source"],
-    )
     remaining_observations = sum(len(point.track) for point in reconstruction.points3D.values())
+    output_points = len(reconstruction.points3D)
     return {
         "enabled": True,
         "policy": "full_track",
         "input_points": len(points),
-        "removed_points": len(points) - len(retained),
-        "output_points": len(retained),
+        "removed_points": len(points) - output_points,
+        "output_points": output_points,
         "reason_counts": dict(counts),
-        "cleared_observations": original_observations - remaining_observations,
+        "cleared_observations": input_observations - remaining_observations,
+        "trajectory_removed_observations": trajectory_removed_observations,
         "images_without_points": sum(
             image.num_registered_points == 0 for image in reconstruction.images.values()
         ),
-        "input_images": len(views),
+        "input_images": input_image_count,
         "output_images": len(reconstruction.images),
         "removed_images": len(removed_image_ids),
         "removed_captures": sum(
@@ -323,14 +329,10 @@ def _remove_trajectory_outlier_images(
     }
     if not removed_image_ids:
         return set()
-    kept_points = {}
     track_keys: dict[int, set[tuple[int, int]]] = {}
     for point_id, point in reconstruction.points3D.items():
         point.track = [item for item in point.track if item[0] not in removed_image_ids]
-        if len(point.track) >= 2:
-            kept_points[point_id] = point
-            track_keys[point_id] = set(point.track)
-    reconstruction.points3D = kept_points
+        track_keys[point_id] = set(point.track)
     reconstruction.images = {
         image_id: image
         for image_id, image in reconstruction.images.items()
