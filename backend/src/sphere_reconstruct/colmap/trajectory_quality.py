@@ -57,6 +57,7 @@ def evaluate_primary_trajectory(
             "expected_captures": len(expected_captures),
             "registered_captures": len(capture_centers),
             "consecutive_steps": len(steps),
+            "outlier_captures": [],
         }
 
     distances = sorted(float(step["distance"]) for step in steps)
@@ -65,6 +66,7 @@ def evaluate_primary_trajectory(
     maximum = distances[-1]
     threshold = max(p95 * max_step_ratio, 1e-9)
     outliers = [step for step in steps if step["distance"] > threshold]
+    outlier_captures = _outlier_captures(outliers)
     largest = sorted(steps, key=lambda step: step["distance"], reverse=True)[:10]
     return {
         "available": True,
@@ -79,12 +81,40 @@ def evaluate_primary_trajectory(
         "max_step_ratio_limit": max_step_ratio,
         "outlier_threshold": threshold,
         "outlier_steps": len(outliers),
+        "outlier_captures": outlier_captures,
         "outlier_capture_pairs": [
             f"{step['from_capture']}->{step['to_capture']}: {step['distance']:.6g}"
             for step in sorted(outliers, key=lambda item: item["distance"], reverse=True)
         ],
         "largest_steps": largest,
     }
+
+
+def _outlier_captures(outlier_steps: list[dict]) -> list[int]:
+    """Choose captures that are themselves discontinuous, rather than both jump endpoints.
+
+    A single bad pose normally creates two large edges (previous -> bad -> next).  The
+    shared capture is therefore the safest deletion candidate.  For a one-sided jump,
+    the destination is the first pose on the inconsistent branch.
+    """
+    if not outlier_steps:
+        return []
+    edges = {(int(step["from_capture"]), int(step["to_capture"])) for step in outlier_steps}
+    incident: defaultdict[int, int] = defaultdict(int)
+    for first, second in edges:
+        incident[first] += 1
+        incident[second] += 1
+    selected: set[int] = set()
+    for first, second in edges:
+        if incident[first] >= 2 and incident[second] < incident[first]:
+            selected.add(first)
+        elif incident[second] >= 2 and incident[first] < incident[second]:
+            selected.add(second)
+        elif incident[first] >= 2 and incident[second] >= 2:
+            selected.add(first if incident[first] > incident[second] else second)
+        else:
+            selected.add(second)
+    return sorted(selected)
 
 
 def _percentile(sorted_values: list[float], fraction: float) -> float:

@@ -14,7 +14,11 @@ from sphere_reconstruct.colmap.input_workspace import InputSpec
 from sphere_reconstruct.colmap.point_stability import assess_point, geometry
 from sphere_reconstruct.imaging.camera_geometry import camera_rays_to_pixels
 from sphere_reconstruct.pipeline.stage import ProgressReporter, StageContext
-from sphere_reconstruct.stages.cleanup_sparse import CleanupSparse, _filter_reconstruction
+from sphere_reconstruct.stages.cleanup_sparse import (
+    CleanupSparse,
+    _filter_reconstruction,
+    _remove_trajectory_outlier_images,
+)
 
 
 def mixed_model():
@@ -118,6 +122,40 @@ def test_cleanup_requires_capture_metadata(tmp_path):
         _filter_reconstruction(context(tmp_path), reconstruction, records[:-1])
 
 
+def test_trajectory_outlier_image_removal_rewrites_tracks():
+    camera = model.Camera(1, "PINHOLE", 100, 100, [80, 80, 50, 50])
+    images = {
+        image_id: model.Image(
+            image_id,
+            (1, 0, 0, 0),
+            (-float(index), 0, 0),
+            1,
+            f"phone/frame_{index:06d}.jpg",
+            [model.ImagePoint2D(50, 50, 1)],
+        )
+        for index, image_id in enumerate((1, 2, 3))
+    }
+    reconstruction = model.Reconstruction(
+        {1: camera},
+        images,
+        {1: model.Point3D(1, (1, 0, 5), (100, 100, 100), 0, [(1, 0), (2, 0), (3, 0)])},
+    )
+
+    removed = _remove_trajectory_outlier_images(
+        reconstruction,
+        [
+            {"name": image.name, "source_id": "phone", "capture_index": index}
+            for index, image in enumerate(images.values())
+        ],
+        {"phone": [1]},
+    )
+
+    assert removed == {2}
+    assert set(reconstruction.images) == {1, 3}
+    assert reconstruction.points3D[1].track == [(1, 0), (3, 0)]
+    assert all(image.num_registered_points == 1 for image in reconstruction.images.values())
+
+
 def test_cleanup_rejects_unsupported_projection_before_filtering(tmp_path):
     reconstruction, records = mixed_model()
     reconstruction.cameras[1].model = "EQUIRECTANGULAR"
@@ -169,7 +207,7 @@ def test_stage_exports_complete_model_and_declares_metadata_dependency(tmp_path,
     )
     manifest = CleanupSparse().execute(ctx)
     assert any(ref.path == "extract_features/input_spec.json" for ref in manifest.inputs)
-    assert manifest.impl_version == "2.0"
+    assert manifest.impl_version == "2.1"
     loaded = model.read_model(output / "sparse" / "0")
     assert len(loaded.points3D) == (1 if enabled else 2)
     assert loaded.cameras == original_model.cameras

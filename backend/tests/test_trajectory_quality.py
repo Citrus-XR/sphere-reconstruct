@@ -50,6 +50,7 @@ def test_piecewise_translation_jump_fails_with_capture_ids():
     assert result["maximum_to_p95_ratio"] > 40
     assert result["largest_steps"][0]["from_capture"] == 24
     assert result["largest_steps"][0]["to_capture"] == 25
+    assert result["outlier_captures"] == [25]
 
 
 def test_short_sequence_does_not_create_a_false_failure():

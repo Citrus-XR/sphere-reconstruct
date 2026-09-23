@@ -28,7 +28,13 @@ import {
   pickCameraGizmo,
 } from './cameraGizmo'
 import { createCircularPointMaterial } from './pointRendering'
-import { applyViewPose, equalViewPose, fitInitialView, readViewPose } from './viewPose'
+import {
+  applyViewPose,
+  equalViewPose,
+  fitInitialView,
+  readViewPose,
+  robustSceneBounds,
+} from './viewPose'
 
 const PointCloud = ({ points, size }: { points: ParsedPoints; size: number }) => {
   const { gl } = useThree()
@@ -519,20 +525,21 @@ export const PointCloudViewer = ({
   }, [projectId, recon, revision])
 
   const scene = useMemo(() => {
-    const box = new THREE.Box3(), v = new THREE.Vector3()
     if (points && points.count > 0) {
-      for (let i = 0; i < points.count; i++) {
-        v.fromArray(points.positions, i * 3)
-        box.expandByPoint(v)
+      const bounds = robustSceneBounds(points.positions, points.count)
+      return {
+        center: new THREE.Vector3(...bounds.center),
+        scale: bounds.scale,
+        minimumY: bounds.minimumY,
       }
-    } else {
-      for (const image of recon?.images ?? []) box.expandByPoint(v.fromArray(image.position))
     }
-    if (box.isEmpty()) return { scale: 10, center: new THREE.Vector3(), minimumY: 0 }
+    const imagePositions = new Float32Array((recon?.images.length ?? 0) * 3)
+    recon?.images.forEach((image, index) => imagePositions.set(image.position, index * 3))
+    const bounds = robustSceneBounds(imagePositions)
     return {
-      center: box.getCenter(new THREE.Vector3()),
-      scale: box.getSize(new THREE.Vector3()).length() || 10,
-      minimumY: box.min.y,
+      center: new THREE.Vector3(...bounds.center),
+      scale: bounds.scale,
+      minimumY: bounds.minimumY,
     }
   }, [points, recon])
 

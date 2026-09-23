@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import shutil
-from collections import Counter
+from collections import Counter, defaultdict
 
 import numpy as np
 
 from ..colmap import model as colmap_model
+from ..colmap import trajectory_quality
 from ..colmap.input_workspace import InputSpec
 from ..colmap.point_stability import (
     FULL_TRACK_COLUMNS,
@@ -29,7 +31,7 @@ from . import similarity_transform
 @register
 class CleanupSparse(Stage):
     name = StageName.CLEANUP_SPARSE
-    impl_version = "2.0"
+    impl_version = "2.1"
 
     def normalize_params(self, raw: dict) -> dict:
         values = {
@@ -43,10 +45,19 @@ class CleanupSparse(Stage):
         max_preview_points = int(raw.get("max_preview_points", 500_000))
         if max_preview_points <= 0:
             raise ValueError("max_preview_points must be positive")
+        max_adjacent_step_ratio = float(raw.get("max_adjacent_step_ratio", 10.0))
+        if max_adjacent_step_ratio != 0.0 and max_adjacent_step_ratio <= 1.0:
+            raise ValueError("max_adjacent_step_ratio must be zero or greater than one")
+        trajectory_minimum_steps = int(raw.get("trajectory_minimum_steps", 20))
+        if trajectory_minimum_steps < 2:
+            raise ValueError("trajectory_minimum_steps must be at least two")
         return {
             "enabled": bool(raw.get("enabled", True)),
             **values,
             "max_preview_points": max_preview_points,
+            "remove_trajectory_outliers": bool(raw.get("remove_trajectory_outliers", True)),
+            "max_adjacent_step_ratio": max_adjacent_step_ratio,
+            "trajectory_minimum_steps": trajectory_minimum_steps,
         }
 
     def collect_inputs(self, ctx: StageContext) -> list[FileRef]:
@@ -153,6 +164,7 @@ def _filter_reconstruction(
             raise ValueError(f"missing capture metadata: {image.name}")
     validate_tracks(reconstruction)
     views = geometry(reconstruction)
+    trajectory_result = _find_trajectory_outliers(ctx, reconstruction, image_records)
     points = sorted(reconstruction.points3D.values(), key=lambda point: point.point3D_id)
     if not points:
         raise ValueError("sparse cleanup input has no points")
@@ -194,6 +206,11 @@ def _filter_reconstruction(
         )
     original_observations = sum(len(point.track) for point in points)
     retain_points(reconstruction, retained)
+    removed_image_ids = _remove_trajectory_outlier_images(
+        reconstruction,
+        image_records,
+        trajectory_result["outlier_captures_by_source"],
+    )
     return {
         "enabled": True,
         "policy": "full_track",
@@ -206,6 +223,12 @@ def _filter_reconstruction(
         "images_without_points": sum(
             image.num_registered_points == 0 for image in reconstruction.images.values()
         ),
+        "input_images": len(views),
+        "removed_images": len(removed_image_ids),
+        "removed_captures": sum(
+            len(captures) for captures in trajectory_result["outlier_captures_by_source"].values()
+        ),
+        "trajectory_outliers": trajectory_result["trajectories"],
         "minimum_captures": 3,
         "relative_error": ctx.params["relative_error"],
         "pixel_sigma": ctx.params["pixel_sigma"],
@@ -215,3 +238,92 @@ def _filter_reconstruction(
         "original_geometry_retained": True,
         "added_points": 0,
     }
+
+
+_SEQUENCE_NAME = re.compile(r"(?:frame|image|img)[_-]?\d+", re.IGNORECASE)
+
+
+def _find_trajectory_outliers(ctx, reconstruction, image_records: list[dict]) -> dict:
+    records_by_source: dict[str, list[dict]] = defaultdict(list)
+    for record in image_records:
+        records_by_source[str(record["source_id"])].append(record)
+    source_contexts = {source.id: source for source in getattr(ctx, "sources", ())}
+    outlier_captures_by_source: dict[str, list[int]] = {}
+    trajectories: dict[str, dict] = {}
+    ratio = float(ctx.params.get("max_adjacent_step_ratio", 0.0))
+    if not ctx.params.get("remove_trajectory_outliers", True) or ratio == 0.0:
+        return {
+            "outlier_captures_by_source": outlier_captures_by_source,
+            "trajectories": trajectories,
+        }
+    for source_id, records in records_by_source.items():
+        source = source_contexts.get(source_id)
+        media_kind = getattr(getattr(source, "media_kind", None), "value", None)
+        if media_kind != "video" and not any(_SEQUENCE_NAME.search(str(record["name"])) for record in records):
+            continue
+        result = trajectory_quality.evaluate_primary_trajectory(
+            reconstruction,
+            image_records,
+            source_id,
+            max_step_ratio=ratio,
+            minimum_steps=int(ctx.params.get("trajectory_minimum_steps", 20)),
+        )
+        trajectories[source_id] = result
+        if result.get("available") and result.get("outlier_captures"):
+            outlier_captures_by_source[source_id] = [
+                int(capture) for capture in result["outlier_captures"]
+            ]
+    return {
+        "outlier_captures_by_source": outlier_captures_by_source,
+        "trajectories": trajectories,
+    }
+
+
+def _remove_trajectory_outlier_images(
+    reconstruction,
+    image_records: list[dict],
+    outlier_captures_by_source: dict[str, list[int]],
+) -> set[int]:
+    if not outlier_captures_by_source:
+        return set()
+    capture_keys = {
+        (source_id, int(capture))
+        for source_id, captures in outlier_captures_by_source.items()
+        for capture in captures
+    }
+    records_by_name = {str(record["name"]): record for record in image_records}
+    removed_image_ids = {
+        image_id
+        for image_id, image in reconstruction.images.items()
+        if (
+            str(records_by_name[image.name]["source_id"]),
+            int(records_by_name[image.name]["capture_index"]),
+        )
+        in capture_keys
+    }
+    if not removed_image_ids:
+        return set()
+    kept_points = {}
+    track_keys: dict[int, set[tuple[int, int]]] = {}
+    for point_id, point in reconstruction.points3D.items():
+        point.track = [item for item in point.track if item[0] not in removed_image_ids]
+        if len(point.track) >= 2:
+            kept_points[point_id] = point
+            track_keys[point_id] = set(point.track)
+    reconstruction.points3D = kept_points
+    reconstruction.images = {
+        image_id: image
+        for image_id, image in reconstruction.images.items()
+        if image_id not in removed_image_ids
+    }
+    for image_id, image in reconstruction.images.items():
+        for index, observation in enumerate(image.points2D):
+            if observation.point3D_id == 2**64 - 1:
+                continue
+            if (
+                observation.point3D_id not in track_keys
+                or (image_id, index) not in track_keys[observation.point3D_id]
+            ):
+                observation.point3D_id = 2**64 - 1
+    validate_tracks(reconstruction)
+    return removed_image_ids

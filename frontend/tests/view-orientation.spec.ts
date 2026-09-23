@@ -15,7 +15,13 @@ import {
   pickCameraGizmo,
 } from '../src/viewers/cameraGizmo'
 import { createCircularPointMaterial } from '../src/viewers/pointRendering'
-import { applyViewPose, equalViewPose, fitInitialView, readViewPose } from '../src/viewers/viewPose'
+import {
+  applyViewPose,
+  equalViewPose,
+  fitInitialView,
+  readViewPose,
+  robustSceneBounds,
+} from '../src/viewers/viewPose'
 
 test('mouse yaw and pitch do not introduce camera roll', () => {
   for (const [yaw, pitch] of [[0.8, 0.4], [-1.7, 0.9], [2.4, -0.7]]) {
@@ -64,6 +70,18 @@ test('scene grid keeps perspective depth without occluding point geometry', () =
   expect(material.side).toBe(THREE.DoubleSide)
   expect(material.polygonOffset).toBe(true)
   expect(material.polygonOffsetFactor).toBe(1)
+})
+
+test('robust scene bounds ignore sparse reconstruction teleports', () => {
+  const body = Array.from({ length: 100 }, (_, index) => [index % 5 - 2, index % 3, 0]).flat()
+  const positions = new Float32Array([...body, 1_000_000, -2_000_000, 3_000_000])
+  const bounds = robustSceneBounds(positions)
+
+  expect(bounds.center[0]).toBeCloseTo(0)
+  expect(bounds.center[1]).toBeCloseTo(1)
+  expect(bounds.center[2]).toBeCloseTo(0)
+  expect(bounds.scale).toBeLessThan(10)
+  expect(bounds.minimumY).toBeLessThanOrEqual(0)
 })
 
 test('movement speed follows bounded half and double steps', () => {
