@@ -296,6 +296,27 @@ def sequential_matcher(
     return run_command(colmap_bin, args, log_path=log_path, on_line=on_line)
 
 
+def explicit_pairs_matcher(
+    colmap_bin: str,
+    *,
+    database_path: Path,
+    match_list_path: Path,
+    use_gpu: bool = True,
+    matching_type: str = "SIFT_BRUTEFORCE",
+    extra_args: list[str] | None = None,
+    log_path: Path | None = None,
+    on_line: Callable[[str], None] | None = None,
+) -> CommandResult:
+    args = [
+        "matches_importer", "--database_path", str(database_path),
+        "--match_list_path", str(match_list_path), "--match_type", "pairs",
+        "--FeatureMatching.use_gpu", "1" if use_gpu else "0",
+        "--FeatureMatching.type", matching_type,
+        *(extra_args or []),
+    ]
+    return run_command(colmap_bin, args, log_path=log_path, on_line=on_line)
+
+
 def vocab_tree_matcher(
     colmap_bin: str,
     *,

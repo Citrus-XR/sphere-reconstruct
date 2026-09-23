@@ -12,8 +12,10 @@ from pathlib import Path
 from ..colmap import input_workspace, rig_visibility
 from ..colmap import runner as colmap_runner
 from ..colmap.input_workspace import InputSpec
+from ..colmap.sequence_pairs import missing_sequence_pairs
 from ..domain.artifacts import FileRef, StageManifest
 from ..domain.pipeline_state import StageName
+from ..domain.source import MediaKind
 from ..infrastructure.filesystem import sha256_file
 from ..pipeline import prepared_images
 from ..pipeline.manifest import register
@@ -25,7 +27,7 @@ from .colmap_progress import matching_progress
 @register
 class MatchFeatures(Stage):
     name = StageName.MATCH_FEATURES
-    impl_version = "2.10"
+    impl_version = "2.12"
 
     def normalize_params(self, raw: dict) -> dict:
         feature_type = str(raw.get("feature_type", "SIFT")).upper()
@@ -39,11 +41,15 @@ class MatchFeatures(Stage):
         transitive_iterations = int(raw.get("transitive_iterations", 1))
         if overlap <= 0 or transitive_iterations <= 0:
             raise ValueError("matching overlap and transitive iterations must be positive")
+        ordered_images = raw.get("ordered_image_source_ids", [])
+        if not isinstance(ordered_images, list) or any(not isinstance(value, str) or not value for value in ordered_images):
+            raise ValueError("ordered_image_source_ids must be a list of nonempty source IDs")
         return {
             "feature_type": feature_type,
             "matcher_type": matcher,
             "pairing": pairing,
             "overlap": overlap,
+            "ordered_image_source_ids": sorted(set(ordered_images)),
             "loop_closure": bool(raw.get("loop_closure", False)),
             "transitive_matching": bool(raw.get("transitive_matching", False)),
             "transitive_iterations": transitive_iterations,
@@ -96,6 +102,12 @@ class MatchFeatures(Stage):
             ctx.project_dir,
             InputSpec.read(ctx.project_dir / "extract_features" / "input_spec.json"),
         )
+        ordered_sources = {source.id for source in ctx.sources if source.media_kind == MediaKind.VIDEO}
+        requested_ordered_images = set(ctx.params["ordered_image_source_ids"])
+        image_sources = {source.id for source in ctx.sources if source.media_kind == MediaKind.IMAGES}
+        if requested_ordered_images - image_sources:
+            raise ValueError("ordered_image_source_ids must refer to enabled still-image sources")
+        ordered_sources.update(requested_ordered_images)
         colmap_bin = colmap_runner.resolve_colmap_bin(settings.binaries.colmap or None)
         vocab_tree = colmap_runner.resolve_vocab_tree_path(settings.binaries.vocab_tree or None)
         matching_type = _matching_type(ctx.params["feature_type"], ctx.params["matcher_type"])
@@ -129,7 +141,7 @@ class MatchFeatures(Stage):
             "matching_type": matching_type,
             "extra_args": pairing_extra_args,
             "log_path": logs_dir / "matcher.log",
-            "on_line": matching_progress(ctx, low=0.05, high=0.7 if run_transitive else 0.9),
+            "on_line": matching_progress(ctx, low=0.05, high=0.7 if run_transitive or (pairing == "vocab_tree" and ordered_sources) else 0.9),
         }
         if pairing == "exhaustive":
             colmap_runner.exhaustive_matcher(colmap_bin, **common)
@@ -156,6 +168,22 @@ class MatchFeatures(Stage):
                 vocab_tree_path=vocab_tree if loop else None,
                 **common,
             )
+
+        sequence_matching = {"enabled": False, "missing_pairs": 0}
+        if pairing == "vocab_tree" and ordered_sources:
+            pairs, sequence_matching = missing_sequence_pairs(
+                database_path, spec.images, ordered_sources, overlap=ctx.params["overlap"],
+            )
+            if pairs:
+                pair_list = ctx.stage_out_dir / "sequence_pairs.txt"
+                pair_list.write_text("\n".join(f"{first} {second}" for first, second in pairs) + "\n", encoding="utf-8")
+                ctx.progress.info(f"matching {len(pairs)} sequence neighbors omitted by retrieval", progress=0.71)
+                colmap_runner.explicit_pairs_matcher(
+                    colmap_bin, database_path=database_path, match_list_path=pair_list,
+                    use_gpu=ctx.params["use_gpu"], matching_type=matching_type, extra_args=extra_args,
+                    log_path=logs_dir / "sequence_matcher.log",
+                    on_line=matching_progress(ctx, low=0.72, high=0.9),
+                )
 
         if run_transitive:
             # Global positioning は 3-view 以上の track を必要とするため、sequential edge を推移的に展開する。
@@ -248,6 +276,7 @@ class MatchFeatures(Stage):
                 "gpu_enabled": ctx.params["use_gpu"],
                 "same_source_temporal_filter": same_source_filter,
                 "cross_source_temporal_filter": temporal_filter,
+                "sequence_matching": sequence_matching,
             }
         )
         summary_path = ctx.stage_out_dir / "matching_summary.json"

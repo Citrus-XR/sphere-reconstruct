@@ -10,18 +10,22 @@ import json
 import math
 import shutil
 import sqlite3
+from collections import defaultdict
+from dataclasses import replace
 from pathlib import Path
 
 from ..colmap import model as colmap_model
 from ..colmap import quality as colmap_quality
 from ..colmap import runner as colmap_runner
 from ..colmap import trajectory_quality
+from ..colmap.camera_policy import apply_camera_policies
 from ..colmap.input_workspace import InputSpec
 from ..colmap.solver_diagnostics import read_solver_diagnostics
 from ..domain.artifacts import FileRef, StageManifest
 from ..domain.pipeline_state import StageName
 from ..domain.source import MediaKind
 from ..infrastructure.filesystem import sha256_file
+from ..pipeline import prepared_images
 from ..pipeline.manifest import register
 from ..pipeline.stage import Stage, StageContext, new_manifest
 from ..settings import get_settings
@@ -32,7 +36,7 @@ from .colmap_progress import global_mapper_progress, hidden_log, mapper_progress
 @register
 class Reconstruct(Stage):
     name = StageName.RECONSTRUCT
-    impl_version = "2.10"
+    impl_version = "2.12"
 
     def normalize_params(self, raw: dict) -> dict:
         mapper = str(raw.get("mapper", "incremental")).lower()
@@ -92,6 +96,7 @@ class Reconstruct(Stage):
             ctx.project_dir / "manifests" / "match_features.json",
             ctx.project_dir / "match_features" / "database.db",
             ctx.project_dir / "extract_features" / "input_spec.json",
+            prepared_images.catalog_path(ctx.project_dir),
         ]
         return [
             FileRef(
@@ -112,9 +117,46 @@ class Reconstruct(Stage):
         if not source_database.exists() or not spec_path.exists():
             raise RuntimeError("extract_features and match_features must run before reconstruction")
         spec = InputSpec.read(spec_path)
+        source_contexts = {source.id: source for source in ctx.sources}
+        spec = replace(
+            spec,
+            sources=[
+                {**source, "media_kind": source_contexts[source["id"]].media_kind.value}
+                for source in spec.sources
+            ],
+        )
         ctx.progress.info("copying matched database", progress=0.0, key="log.recon_copy_database")
         database_path = ctx.stage_out_dir / "database.db"
         shutil.copy2(source_database, database_path)
+        catalog = prepared_images.load_catalog(ctx.project_dir)
+        constant_cameras = apply_camera_policies(database_path, catalog)
+        constant_camera_args: list[str] = []
+        if constant_cameras:
+            constant_camera_path = ctx.stage_out_dir / "constant_cameras.txt"
+            constant_camera_path.write_text(
+                "\n".join(str(value) for value in constant_cameras) + "\n", encoding="utf-8"
+            )
+            constant_camera_args = ["--Mapper.constant_camera_list_path", str(constant_camera_path)]
+        full_spec = spec
+        mixed_calibration = bool(spec.refine_intrinsics and constant_cameras)
+        primary_groups = [
+            group for group in catalog["camera_groups"]
+            if group["source_id"] == spec.primary_source_id
+        ]
+        anchor_primary = bool(
+            spec.source_count > 1
+            and mixed_calibration
+            and primary_groups
+            and all(not group["refine_intrinsics"] for group in primary_groups)
+            and len({image["capture_index"] for image in spec.images if image["source_id"] == spec.primary_source_id}) >= 2
+        )
+        image_list_path = None
+        if anchor_primary:
+            spec = _primary_input_spec(
+                spec, refine_intrinsics=any(group["refine_intrinsics"] for group in primary_groups)
+            )
+            image_list_path = ctx.stage_out_dir / "primary_images.txt"
+            image_list_path.write_text("\n".join(spec.primary_image_names) + "\n", encoding="utf-8")
         ctx.progress.tick(0.03, message="matched database copied", key="log.recon_database_ready")
         sparse_dir = ctx.stage_out_dir / "sparse"
         logs_dir = ctx.stage_out_dir / "logs"
@@ -124,7 +166,11 @@ class Reconstruct(Stage):
         settings = get_settings()
         colmap_bin = colmap_runner.resolve_colmap_bin(settings.binaries.colmap or None)
         image_path = ctx.project_dir / "extract_features" / spec.image_path
-        mapper = ctx.params["mapper"]
+        requested_mapper = ctx.params["mapper"]
+        mapper = requested_mapper
+        if mapper == "global" and mixed_calibration and not anchor_primary:
+            mapper = "incremental"
+            ctx.progress.info("using Incremental Mapper to preserve per-camera calibration constraints")
         effective_mapper = mapper
         video_data = any(source.media_kind == MediaKind.VIDEO for source in ctx.sources)
         require_trajectory_continuity = bool(
@@ -170,6 +216,8 @@ class Reconstruct(Stage):
                     sparse_dir=sparse_dir,
                     logs_dir=logs_dir,
                     require_trajectory_continuity=require_trajectory_continuity,
+                    image_list_path=image_list_path,
+                    progress_high=0.58 if anchor_primary else 0.72,
                 )
             except RuntimeError as error:
                 global_error = error
@@ -194,6 +242,7 @@ class Reconstruct(Stage):
                 )
                 fallback_database = ctx.stage_out_dir / "incremental_fallback.db"
                 shutil.copy2(source_database, fallback_database)
+                apply_camera_policies(fallback_database, catalog)
                 fallback_sparse = ctx.stage_out_dir / "incremental_fallback_sparse"
                 fallback_sparse.mkdir()
                 fallback_initialization = _requested_primary_initialization(
@@ -207,13 +256,17 @@ class Reconstruct(Stage):
                     refine_intrinsics=spec.refine_intrinsics,
                     refine_rig=spec.refine_rig,
                     multiple_models=spec.multiple_models,
-                    extra_args=_incremental_args(
+                    extra_args=constant_camera_args + _image_list_args(image_list_path, "Mapper") + _incremental_args(
                         ctx.params,
                         fallback_initialization,
                         video_data=video_data,
                     ),
                     log_path=logs_dir / "incremental_fallback.log",
-                    on_line=mapper_progress(ctx, spec.frame_count, low=0.76, high=0.9),
+                    on_line=mapper_progress(
+                        ctx, spec.frame_count,
+                        low=0.60 if anchor_primary else 0.76,
+                        high=0.69 if anchor_primary else 0.9,
+                    ),
                 )
                 fallback_model, fallback_summary = _select_largest_model(
                     fallback_sparse,
@@ -262,13 +315,13 @@ class Reconstruct(Stage):
                 refine_intrinsics=spec.refine_intrinsics,
                 refine_rig=spec.refine_rig,
                 multiple_models=spec.multiple_models,
-                extra_args=_incremental_args(
+                extra_args=constant_camera_args + _image_list_args(image_list_path, "Mapper") + _incremental_args(
                     ctx.params,
                     primary_initialization,
                     video_data=video_data,
                 ),
                 log_path=logs_dir / "mapper.log",
-                on_line=mapper_progress(ctx, spec.frame_count, low=0.12, high=0.9),
+                on_line=mapper_progress(ctx, spec.frame_count, low=0.12, high=0.69 if anchor_primary else 0.9),
             )
             model_dir, summary = _select_largest_model(
                 sparse_dir,
@@ -276,7 +329,26 @@ class Reconstruct(Stage):
                 max_step_ratio=_evaluation_step_ratio(ctx.params),
             )
             mapper_attempts = []
-        if effective_mapper in {"incremental", "incremental_fallback"}:
+        mixed_registration = None
+        if anchor_primary:
+            if not _summary_passes(
+                summary, ctx.params, spec.primary_source_id,
+                require_trajectory_continuity=require_trajectory_continuity,
+            ):
+                raise RuntimeError("primary reconstruction failed quality gates before supplemental registration")
+            model_dir, summary, mixed_registration = _register_supplemental_sources(
+                ctx, full_spec,
+                colmap_bin=colmap_bin,
+                database_path=database_path,
+                image_path=image_path,
+                model_dir=model_dir,
+                logs_dir=logs_dir,
+                constant_camera_args=constant_camera_args,
+                primary_summary=summary,
+                video_data=video_data,
+            )
+            spec = full_spec
+        if anchor_primary or effective_mapper in {"incremental", "incremental_fallback"}:
             color_summary, color_completion = _complete_incremental_point_colors(
                 ctx,
                 colmap_bin=colmap_bin,
@@ -295,6 +367,8 @@ class Reconstruct(Stage):
                 "resolved_points": 0,
             }
         summary["point_color_completion"] = color_completion
+        if mixed_registration is not None:
+            summary["mixed_registration"] = mixed_registration
         if primary_initialization is not None:
             summary["primary_initialization"] = primary_initialization
         ctx.progress.tick(0.92, message="mapper complete", key="log.recon_mapper_done")
@@ -302,7 +376,7 @@ class Reconstruct(Stage):
         summary["registered_ratio"] = primary["registered"] / max(1, primary["total"])
         summary["registered_total_ratio"] = summary["num_images"] / max(1, spec.image_count)
         summary["mapper"] = effective_mapper
-        summary["requested_mapper"] = mapper
+        summary["requested_mapper"] = requested_mapper
         summary["input_images"] = spec.image_count
         summary["view_graph_calibration"] = bool(
             apply_view_graph_calibration and effective_mapper == "global"
@@ -310,7 +384,7 @@ class Reconstruct(Stage):
         summary["view_graph_calibration_requested"] = bool(ctx.params["view_graph_calibration"])
         summary["ba_gpu_enabled"] = ctx.params["ba_use_gpu"]
         summary["global_positioning_gpu_requested"] = bool(
-            mapper == "global" and ctx.params["global_positioning_use_gpu"]
+            requested_mapper == "global" and ctx.params["global_positioning_use_gpu"]
         )
         summary["global_positioning_gpu_used"] = bool(
             effective_mapper == "global" and ctx.params["global_positioning_use_gpu"]
@@ -368,6 +442,79 @@ class Reconstruct(Stage):
             },
         )
         return manifest
+
+
+def _primary_input_spec(spec: InputSpec, *, refine_intrinsics: bool) -> InputSpec:
+    images = [image for image in spec.images if image["source_id"] == spec.primary_source_id]
+    return replace(
+        spec,
+        image_count=len(images),
+        source_count=1,
+        sources=[source for source in spec.sources if source["id"] == spec.primary_source_id],
+        images=images,
+        feature_batches=[batch for batch in spec.feature_batches if batch.source_id == spec.primary_source_id],
+        refine_intrinsics=refine_intrinsics,
+    )
+
+
+def _image_list_args(path: Path | None, namespace: str) -> list[str]:
+    return [f"--{namespace}.image_list_path", str(path)] if path is not None else []
+
+
+def _register_supplemental_sources(
+    ctx: StageContext,
+    spec: InputSpec,
+    *,
+    colmap_bin: str,
+    database_path: Path,
+    image_path: Path,
+    model_dir: Path,
+    logs_dir: Path,
+    constant_camera_args: list[str],
+    primary_summary: dict,
+    video_data: bool,
+) -> tuple[Path, dict, dict]:
+    # GlobalMapper 4.2 has no per-camera intrinsic lock. Official incremental
+    # continuation can protect calibration and the established primary poses.
+    # https://github.com/colmap/colmap/blob/be5e29168d4aff238409d60424812df66aac919f/src/colmap/controllers/incremental_pipeline.h#L180-L190
+    seed_dir = ctx.stage_out_dir / "primary_sparse"
+    model_dir.rename(seed_dir)
+    ctx.progress.info("registering supplemental cameras against the primary reconstruction", progress=0.7)
+    colmap_runner.mapper(
+        colmap_bin,
+        database_path=database_path,
+        image_path=image_path,
+        output_path=model_dir,
+        refine_intrinsics=spec.refine_intrinsics,
+        refine_rig=spec.refine_rig,
+        multiple_models=False,
+        extra_args=[
+            "--input_path", str(seed_dir),
+            "--Mapper.fix_existing_frames", "1",
+            "--Mapper.structure_less_registration_fallback", "0",
+            *constant_camera_args,
+            *_incremental_args(ctx.params, None, video_data=video_data),
+        ],
+        log_path=logs_dir / "supplemental_mapper.log",
+        on_line=mapper_progress(ctx, spec.frame_count, low=0.7, high=0.89),
+    )
+    model_dir, summary = _select_largest_model(
+        model_dir.parent, spec, max_step_ratio=_evaluation_step_ratio(ctx.params)
+    )
+    registered_supplemental = sum(
+        source["registered"] for source_id, source in summary["source_registration"].items()
+        if source_id != spec.primary_source_id
+    )
+    if registered_supplemental == 0:
+        raise RuntimeError("no supplemental cameras could be registered against the primary reconstruction")
+    return model_dir, summary, {
+        "strategy": "primary_anchored",
+        "supplemental_mapper": "incremental",
+        "primary_poses_fixed": True,
+        "primary_registered_images": primary_summary["num_images"],
+        "primary_points3D": primary_summary["num_points3D"],
+        "registered_supplemental_images": registered_supplemental,
+    }
 
 
 def _requested_primary_initialization(
@@ -529,12 +676,17 @@ def _run_global_mapper_with_retries(
     sparse_dir: Path,
     logs_dir: Path,
     require_trajectory_continuity: bool = False,
+    image_list_path: Path | None = None,
+    progress_high: float = 0.72,
 ) -> tuple[Path, dict, list[dict]]:
     initial_seed = int(ctx.params["random_seed"])
     seeds = list(dict.fromkeys((initial_seed, initial_seed + 1, initial_seed + 2)))
     candidates: list[tuple[Path, dict]] = []
     attempts = []
-    attempt_boundaries = (0.12, 0.46, 0.60, 0.72)
+    attempt_boundaries = tuple(
+        0.12 + (value - 0.12) * (progress_high - 0.12) / 0.6
+        for value in (0.12, 0.46, 0.60, 0.72)
+    )
     for attempt_index, seed in enumerate(seeds):
         attempt_dir = sparse_dir / f"attempt_{attempt_index:02d}_seed_{seed}"
         attempt_dir.mkdir(parents=True, exist_ok=True)
@@ -557,7 +709,10 @@ def _run_global_mapper_with_retries(
                 refine_rig=spec.refine_rig,
                 ba_use_gpu=ctx.params["ba_use_gpu"],
                 global_positioning_use_gpu=ctx.params["global_positioning_use_gpu"],
-                extra_args=colmap_quality.global_mapper_extra_args(attempt_params),
+                extra_args=(
+                    colmap_quality.global_mapper_extra_args(attempt_params)
+                    + _image_list_args(image_list_path, "GlobalMapper")
+                ),
                 log_path=logs_dir / f"global_mapper_seed_{seed}.log",
                 on_line=global_mapper_progress(ctx, low=attempt_low, high=attempt_high),
             )
@@ -573,7 +728,6 @@ def _run_global_mapper_with_retries(
                 max_step_ratio=_evaluation_step_ratio(ctx.params),
             )
             primary = summary["source_registration"][spec.primary_source_id]
-            registered_ratio = primary["registered"] / max(1, primary["total"])
             trajectory = summary["primary_trajectory"]
             trajectory_ok = _trajectory_passes(
                 trajectory,
@@ -589,13 +743,13 @@ def _run_global_mapper_with_retries(
                 "trajectory_continuity_passed": trajectory_ok,
                 "trajectory_maximum_to_p95_ratio": trajectory.get("maximum_to_p95_ratio"),
                 "trajectory_outlier_steps": trajectory.get("outlier_steps", 0),
+                "source_quality_failure": _source_quality_failure(summary, ctx.params),
             }
             attempts.append(attempt)
             candidates.append((model_dir, summary))
-            if (
-                registered_ratio >= ctx.params["min_registered_ratio"]
-                and summary["num_points3D"] >= ctx.params["min_points3D"]
-                and trajectory_ok
+            if _summary_passes(
+                summary, ctx.params, spec.primary_source_id,
+                require_trajectory_continuity=require_trajectory_continuity,
             ):
                 break
             ctx.progress.warn(
@@ -619,16 +773,9 @@ def _run_global_mapper_with_retries(
     best_model, best_summary = max(
         candidates,
         key=lambda candidate: (
-            (
-                candidate[1]["source_registration"][spec.primary_source_id]["registered"]
-                / max(1, candidate[1]["source_registration"][spec.primary_source_id]["total"])
-                >= ctx.params["min_registered_ratio"]
-                and candidate[1]["num_points3D"] >= ctx.params["min_points3D"]
-                and _trajectory_passes(
-                    candidate[1]["primary_trajectory"],
-                    ctx.params,
-                    require_trajectory_continuity=require_trajectory_continuity,
-                )
+            _summary_passes(
+                candidate[1], ctx.params, spec.primary_source_id,
+                require_trajectory_continuity=require_trajectory_continuity,
             ),
             candidate[1]["source_registration"][spec.primary_source_id]["registered"],
             candidate[1]["num_points3D"],
@@ -659,6 +806,9 @@ def _validate_summary(
             f"reconstruction quality gate failed: points3D={summary['num_points3D']} "
             f"< {params['min_points3D']}"
         )
+    source_failure = _source_quality_failure(summary, params)
+    if source_failure is not None:
+        raise RuntimeError(f"reconstruction quality gate failed: {source_failure}")
     if require_trajectory_continuity and params["max_adjacent_step_ratio"] > 0:
         trajectory = summary["primary_trajectory"]
         if trajectory["passed"]:
@@ -693,12 +843,33 @@ def _summary_passes(
         return False
     if summary["num_points3D"] < params["min_points3D"]:
         return False
+    if _source_quality_failure(summary, params) is not None:
+        return False
     trajectory = summary["primary_trajectory"]
     return _trajectory_passes(
         trajectory,
         params,
         require_trajectory_continuity=require_trajectory_continuity,
     )
+
+
+def _source_quality_failure(summary: dict, params: dict) -> str | None:
+    unsupported = summary.get("unsupported_registered_frames", [])
+    if unsupported:
+        examples = ", ".join(
+            f"{frame['source_label']}:{frame['capture_index']}" for frame in unsupported[:8]
+        )
+        return f"{len(unsupported)} registered frames have no 3D observations ({examples})"
+    if params.get("max_adjacent_step_ratio", 0) > 0:
+        for source in summary.get("supplemental_trajectories", {}).values():
+            trajectory = source["trajectory"]
+            if trajectory["available"] and not trajectory["passed"]:
+                return (
+                    f"supplemental trajectory {source['label']} has "
+                    f"{trajectory['outlier_steps']} discontinuities; "
+                    f"max/p95={trajectory['maximum_to_p95_ratio']:.2f}"
+                )
+    return None
 
 
 def _trajectory_passes(
@@ -760,6 +931,26 @@ def _select_largest_model(
     summary["num_models"] = len(models)
     registration = {}
     source_metadata = {source["id"]: source for source in spec.sources}
+    records_by_name = {image["name"]: image for image in spec.images}
+    observations_by_capture: dict[tuple[str, int], int] = defaultdict(int)
+    for image in reconstructions[best].images.values():
+        record = records_by_name[image.name]
+        observations_by_capture[(record["source_id"], int(record["capture_index"]))] += image.num_registered_points
+    summary["unsupported_registered_frames"] = [
+        {"source_id": source_id, "source_label": source_metadata[source_id]["label"], "capture_index": capture}
+        for (source_id, capture), observations in sorted(observations_by_capture.items())
+        if observations == 0
+    ]
+    summary["supplemental_trajectories"] = {
+        source["id"]: {
+            "label": source["label"],
+            "trajectory": trajectory_quality.evaluate_primary_trajectory(
+                reconstructions[best], spec.images, source["id"], max_step_ratio=max_step_ratio,
+            ),
+        }
+        for source in spec.sources
+        if source["id"] != spec.primary_source_id and source.get("media_kind") == "video"
+    }
     for source_id in sorted({image["source_id"] for image in spec.images}):
         total = sum(image["source_id"] == source_id for image in spec.images)
         registered = sum(

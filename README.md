@@ -267,6 +267,10 @@ Optional RoMaV2 dense initialization は native camera ray、certainty、mask、
 
 ## Mapper decision
 
+Vocabulary-tree matching では、同じ source / sensor の動画近傍で検索から漏れた pair を追加する。撮影順を確認できる写真集合は API の `ordered_image_source_ids` で明示し、通常の写真集合を自動的に時系列とは扱わない。
+
+固定校正の主素材と可変 calibration の補助素材を混ぜる場合は、主素材を先に再構成し、その pose と calibration を固定して補助画像を登録する。推測した焦点距離は実測 prior と区別する。LiDAR や ARKit pose を使わない RoomTest の再登録と LFS 対照手順は [画像のみの姿勢検証](docs/image-only-pose-repair.md) を参照する。
+
 ### Incremental Mapper
 
 Default mapper かつ calibrated dual-fisheye の current recommendation。Generalized frame registration と full correspondence graph の retriangulation により、sensor をまたぐ temporal tracks を保持する。

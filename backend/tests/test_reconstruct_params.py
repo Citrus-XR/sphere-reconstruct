@@ -359,6 +359,7 @@ def test_rig_verification_runs_on_pairing_graph_before_transitive(tmp_path: Path
         params=MatchFeatures().normalize_params(
             {"pairing": "sequential", "transitive_matching": True}
         ),
+        sources=(),
         progress=ProgressReporter(lambda *_args: None),
         inputs_for=lambda _stage: [],
     )

@@ -15,8 +15,8 @@ from benchmark_fixed_pose import fingerprint, write_json
 
 def execute(args):
     command = [str(args.executable), "-d", str(args.dataset), "-o", str(args.output / "training"),
-               "--headless", "--train", "--safe-mode", "--gut", "--resize_factor", "1", "--max-width", "0",
-               "--mask-mode", "segment", "--min-track-length", "0", "--strategy", "mrnf",
+               "--headless", "--train", "--safe-mode", "--gut", "--resize_factor", "1", "--max-width", str(args.max_width),
+               "--mask-mode", args.mask_mode, "--min-track-length", "0", "--strategy", "mrnf",
                "--iter", str(args.iterations), "--max-cap", str(args.max_cap),
                "--export", "ply", "--perf-bench", "--log-file", str(args.output / "training.log")]
     command.extend(args.lfs_args)
@@ -75,6 +75,8 @@ def main():
     parser.add_argument("output", type=Path)
     parser.add_argument("--iterations", type=int, required=True)
     parser.add_argument("--max-cap", type=int, required=True)
+    parser.add_argument("--max-width", type=int, default=0)
+    parser.add_argument("--mask-mode", choices=["ignore", "segment"], default="ignore")
     parser.add_argument("--timeout-seconds", type=int, default=0)
     parser.add_argument("--detach", action="store_true")
     parser.add_argument("--wait-for", type=Path)
@@ -84,8 +86,8 @@ def main():
         args.wait_for = args.wait_for.resolve()
         if not args.wait_for.is_file() or args.wait_for.is_relative_to(args.output):
             raise ValueError("predecessor status file must exist outside this output")
-    if args.iterations <= 0 or args.max_cap <= 0 or args.timeout_seconds < 0:
-        raise ValueError("iterations/cap must be positive and timeout nonnegative")
+    if args.iterations <= 0 or args.max_cap <= 0 or args.timeout_seconds < 0 or args.max_width < 0:
+        raise ValueError("iterations/cap must be positive and timeout/max-width nonnegative")
     if not args.executable.is_file() or not (args.dataset / "export_manifest.json").is_file():
         raise ValueError("executable and exported dataset manifest must exist")
     if args.output.is_relative_to(args.dataset):

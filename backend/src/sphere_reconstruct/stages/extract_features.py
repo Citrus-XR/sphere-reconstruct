@@ -6,7 +6,7 @@ import json
 import sqlite3
 from pathlib import Path
 
-from ..colmap import input_workspace
+from ..colmap import camera_policy, input_workspace
 from ..colmap import runner as colmap_runner
 from ..domain.artifacts import FileRef, StageManifest
 from ..domain.pipeline_state import StageName
@@ -23,7 +23,7 @@ _FEATURE_TYPES = {"SIFT", "ALIKED_N16ROT", "ALIKED_N32"}
 @register
 class ExtractFeatures(Stage):
     name = StageName.EXTRACT_FEATURES
-    impl_version = "3.1"
+    impl_version = "3.2"
 
     def normalize_params(self, raw: dict) -> dict:
         feature_type = str(raw.get("feature_type", "SIFT")).upper()
@@ -125,6 +125,7 @@ class ExtractFeatures(Stage):
                     high=high,
                 ),
             )
+        camera_policy.apply_camera_policies(database_path, prepared_images.load_catalog(ctx.project_dir))
         if spec.rig_config_path:
             colmap_runner.rig_configurator(
                 colmap_bin,

@@ -117,6 +117,8 @@ def test_perspective_exif_orientation_and_focal_are_normalized(tmp_path):
     assert (prepared["width"], prepared["height"]) == (80, 120)
     group = catalog["camera_groups"][0]
     assert group["camera_model"] == "SIMPLE_RADIAL"
+    assert group["has_prior_focal_length"] is True
+    assert group["refine_intrinsics"] is True
     assert 75 < group["camera_params"][0] < 85
     with Image.open(output / Path(prepared["path"]).relative_to("prepare_images")) as normalized:
         assert normalized.getexif().get(274) is None
@@ -206,6 +208,7 @@ def test_source_region_is_remapped_with_pinhole_views(tmp_path, projection_name)
                                sources=(), progress=ProgressReporter(lambda *_args: None))
         stage.execute(context)
         catalog = json.loads((output / "image_catalog.json").read_text())
+        assert all(group["has_prior_focal_length"] is True for group in catalog["camera_groups"])
         masks = []
         for record in catalog["images"]:
             with Image.open(project / record["valid_mask_path"]) as mask:
@@ -304,6 +307,16 @@ def test_native_fisheye_and_phone_create_separate_camera_groups(tmp_path):
     assert len(native_groups) == 2
     assert native_groups[0]["camera_params"] != native_groups[1]["camera_params"]
     assert all(group["refine_intrinsics"] is False for group in native_groups)
+    assert all(group["has_prior_focal_length"] is True for group in native_groups)
+    phone_group = next(group for group in catalog["camera_groups"] if group["source_id"] == "phone")
+    assert phone_group["has_prior_focal_length"] is False
+    assert phone_group["refine_intrinsics"] is True
+    assert phone_group["camera_params"][0] == 120.0
+    assert all(
+        group["rectification"]["target_camera_model"] == "OPENCV_FISHEYE"
+        and len(group["rectification"]["target_camera_params"]) == 8
+        for group in native_groups
+    )
     native_regions = [
         image["valid_region"]
         for image in catalog["images"]

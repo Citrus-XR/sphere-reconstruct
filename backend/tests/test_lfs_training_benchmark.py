@@ -21,7 +21,7 @@ def setup_run(tmp_path, monkeypatch, *, exit_code=0, complete=True):
     output.mkdir()
     (dataset / "export_manifest.json").write_text("{}")
     args = SimpleNamespace(executable=Path(sys.executable), dataset=dataset, output=output,
-                           iterations=30000, max_cap=1000000, timeout_seconds=0, lfs_args=[])
+                           iterations=30000, max_cap=1000000, max_width=2048, mask_mode="ignore", timeout_seconds=0, lfs_args=[])
     if complete:
         (output / "training").mkdir()
         for name in ["project.licht", "splat_30000.ply", "perf_bench.json"]:
@@ -42,6 +42,10 @@ def test_telemetry_failure_does_not_cancel_successful_training(tmp_path, monkeyp
     process.kill.assert_not_called()
     assert "TimeoutExpired" in (args.output / "gpu.jsonl").read_text()
     assert json.loads((args.output / "status.json").read_text())["status"] == "succeeded"
+    command = json.loads((args.output / "invocation.json").read_text())["command"]
+    assert command[command.index("--mask-mode") + 1] == "ignore"
+    assert command.count("--max-width") == 1
+    assert command[command.index("--max-width") + 1] == "2048"
 
 
 def test_nonzero_exit_preserves_failure_even_if_output_files_exist(tmp_path, monkeypatch):

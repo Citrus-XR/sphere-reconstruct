@@ -32,7 +32,7 @@ FULL_FRAME_DIAGONAL_MM = math.hypot(36.0, 24.0)
 @register
 class PrepareImages(Stage):
     name = StageName.PREPARE_IMAGES
-    impl_version = "4.1"
+    impl_version = "4.4"
 
     def collect_inputs(self, ctx: StageContext) -> list[FileRef]:
         candidates = [
@@ -188,7 +188,12 @@ class PrepareImages(Stage):
             )
         intrinsics = [sensor.intrinsics.scaled(width, height) for sensor in system.sensors]
         approximations = [projection.approximate_thin_prism_fisheye(intr) for intr in intrinsics]
-        compatible_approximations = [
+        # The full OMNI model drives RGB remapping, so a radial target does not
+        # discard source tangential/prism distortion. Keep the consumer grid
+        # OPENCV: LFS evaluates THIN_PRISM terms differently from COLMAP.
+        # https://github.com/MrNeRF/LichtFeld-Studio/blob/395c7f31edc3790fbe013f2bd9bed9f9af1e45e7/src/training/rasterization/gsplat/Cameras.cuh#L1149-L1197
+        # https://github.com/colmap/colmap/blob/be5e29168d4aff238409d60424812df66aac919f/src/colmap/sensor/models.h#L2216-L2239
+        target_approximations = [
             projection.approximate_opencv_fisheye(intr) for intr in intrinsics
         ]
         sensors = tuple(sensor.id for sensor in system.sensors)
@@ -246,17 +251,14 @@ class PrepareImages(Stage):
                     single_camera=True,
                     single_camera_per_folder=False,
                     refine_intrinsics=False,
+                    has_prior_focal_length=True,
                     rectification={
                         "required": True,
                         "source_projection": intrinsics[index].to_dict(),
-                        "target_camera_model": compatible_approximations[index].camera_model,
-                        "target_camera_params": list(compatible_approximations[index].params),
-                        "rms_error_px_before_resampling": compatible_approximations[
-                            index
-                        ].rms_error_px,
-                        "maximum_error_px_before_resampling": compatible_approximations[
-                            index
-                        ].maximum_error_px,
+                        "target_camera_model": target_approximations[index].camera_model,
+                        "target_camera_params": list(target_approximations[index].params),
+                        "rms_error_px_before_resampling": target_approximations[index].rms_error_px,
+                        "maximum_error_px_before_resampling": target_approximations[index].maximum_error_px,
                     },
                 )
                 for index, sensor in enumerate(sensors)
@@ -298,9 +300,9 @@ class PrepareImages(Stage):
                         "forward_theta_limit_deg": math.degrees(maximum_theta_rad),
                         "physical_valid_radius_ratio": float(region[sensor]["r"]),
                         "rectification_target": {
-                            "camera_model": compatible_approximations[index].camera_model,
-                            "rms_error_px": compatible_approximations[index].rms_error_px,
-                            "maximum_error_px": compatible_approximations[index].maximum_error_px,
+                            "camera_model": target_approximations[index].camera_model,
+                            "rms_error_px": target_approximations[index].rms_error_px,
+                            "maximum_error_px": target_approximations[index].maximum_error_px,
                         },
                     }
                     for index, sensor in enumerate(sensors)
@@ -391,6 +393,7 @@ class PrepareImages(Stage):
                     single_camera=True,
                     single_camera_per_folder=False,
                     refine_intrinsics=False,
+                    has_prior_focal_length=True,
                 )
             ],
             "rigs": [],
@@ -513,6 +516,7 @@ class PrepareImages(Stage):
                     single_camera=False,
                     single_camera_per_folder=True,
                     refine_intrinsics=False,
+                    has_prior_focal_length=True,
                 )
             ],
             "rigs": colmap_rig.build_rig_config(cameras, params),
@@ -594,6 +598,7 @@ class PrepareImages(Stage):
                     single_camera=True,
                     single_camera_per_folder=False,
                     refine_intrinsics=True,
+                    has_prior_focal_length=bool(group["focal_35mm"]),
                 )
             )
         return {"images": images, "camera_groups": camera_groups, "rigs": [], "outputs": outputs}
@@ -701,6 +706,7 @@ def _camera_group(
     single_camera: bool,
     single_camera_per_folder: bool,
     refine_intrinsics: bool,
+    has_prior_focal_length: bool,
     rectification: dict | None = None,
 ) -> dict:
     group = {
@@ -711,6 +717,7 @@ def _camera_group(
         "single_camera": single_camera,
         "single_camera_per_folder": single_camera_per_folder,
         "refine_intrinsics": refine_intrinsics,
+        "has_prior_focal_length": has_prior_focal_length,
         "image_names": image_names,
     }
     if rectification is not None:
