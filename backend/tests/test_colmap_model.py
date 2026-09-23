@@ -13,6 +13,47 @@ import pytest
 from sphere_reconstruct.colmap import model
 
 
+def test_filter_frames_removes_dangling_images_and_empty_frames(tmp_path):
+    pose = (1, 0, 0, 0, 1.5, -2, 3)
+    first = struct.pack("<II7dI", 9, 2, *pose, 3)
+    kept_image = struct.pack("<iIQ", 0, 10, 100)
+    removed_image = struct.pack("<iIQ", 0, 11, 101)
+    imu = struct.pack("<iIQ", 1, 12, 2**40)
+    empty = struct.pack("<II7dI", 10, 2, *pose, 1) + struct.pack("<iIQ", 0, 10, 102)
+    source, destination = tmp_path / "source.bin", tmp_path / "result.bin"
+    original = struct.pack("<Q", 2) + first + kept_image + removed_image + imu + empty
+    source.write_bytes(original)
+
+    model.filter_frames_bin(source, destination, {100})
+
+    assert destination.read_bytes() == (
+        struct.pack("<Q", 1) + struct.pack("<II7dI", 9, 2, *pose, 2) + kept_image + imu
+    )
+    assert source.read_bytes() == original
+
+
+@pytest.mark.parametrize("failure", ["truncated", "missing_image", "duplicate_image", "trailing"])
+def test_filter_frames_rejects_invalid_input_before_writing(tmp_path, failure):
+    frame = struct.pack("<II7dI", 1, 1, 1, 0, 0, 0, 0, 0, 0, 1)
+    reference = struct.pack("<iIQ", 0, 1, 100)
+    data = struct.pack("<Q", 1) + frame + reference
+    images = {100}
+    if failure == "truncated":
+        data = data[:-1]
+    elif failure == "missing_image":
+        images.add(101)
+    elif failure == "duplicate_image":
+        data = struct.pack("<Q", 2) + frame + reference
+        data += struct.pack("<II7dI", 2, 1, 1, 0, 0, 0, 0, 0, 0, 1) + reference
+    else:
+        data += b"unexpected"
+    source, destination = tmp_path / "source.bin", tmp_path / "result.bin"
+    source.write_bytes(data)
+    with pytest.raises((EOFError, ValueError)):
+        model.filter_frames_bin(source, destination, images)
+    assert not destination.exists()
+
+
 def _write_cameras(path: Path):
     with path.open("wb") as f:
         f.write(struct.pack("<Q", 1))

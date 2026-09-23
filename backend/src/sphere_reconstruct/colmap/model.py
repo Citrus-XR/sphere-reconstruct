@@ -224,6 +224,47 @@ def _read(fmt: str, f) -> tuple:
     return struct.unpack(fmt, data)
 
 
+def filter_frames_bin(source: Path, destination: Path, image_ids: set[int]) -> None:
+    """削除 image の参照と空 frame を除き、保持 rig pose と他 sensor の参照を保存する。"""
+    # COLMAP 4.2 stores sensor data IDs as uint64, including camera image IDs.
+    # https://github.com/colmap/colmap/blob/be5e29168d4aff238409d60424812df66aac919f/src/colmap/scene/reconstruction_io_binary.cc#L365
+    frames = []
+    seen_images: set[int] = set()
+    seen_frames: set[int] = set()
+    with source.open("rb") as stream:
+        (count,) = _read("<Q", stream)
+        for _ in range(count):
+            frame_id, rig_id, *pose, num_data = _read("<II7dI", stream)
+            if frame_id in seen_frames:
+                raise ValueError(f"duplicate COLMAP frame: {frame_id}")
+            seen_frames.add(frame_id)
+            retained = []
+            has_image = False
+            for _ in range(num_data):
+                sensor_type, sensor_id, data_id = _read("<iIQ", stream)
+                if sensor_type == 0:
+                    if data_id not in image_ids:
+                        continue
+                    if data_id in seen_images:
+                        raise ValueError(f"image referenced by multiple COLMAP frames: {data_id}")
+                    seen_images.add(data_id)
+                    has_image = True
+                retained.append((sensor_type, sensor_id, data_id))
+            if has_image:
+                frames.append((frame_id, rig_id, pose, retained))
+        if stream.read(1):
+            raise ValueError(f"unexpected trailing data in COLMAP frames: {source}")
+    missing = image_ids - seen_images
+    if missing:
+        raise ValueError(f"images missing from COLMAP frames: {sorted(missing)[:10]}")
+    with destination.open("wb") as stream:
+        stream.write(struct.pack("<Q", len(frames)))
+        for frame_id, rig_id, pose, retained in frames:
+            stream.write(struct.pack("<II7dI", frame_id, rig_id, *pose, len(retained)))
+            for reference in retained:
+                stream.write(struct.pack("<iIQ", *reference))
+
+
 def qvec_to_rotation(qvec) -> tuple[tuple[float, float, float], ...]:
     """COLMAP の world->camera quaternion を 3x3 回転行列へ変換する."""
     qw, qx, qy, qz = qvec

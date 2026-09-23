@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import struct
 from copy import deepcopy
 from types import SimpleNamespace
 
@@ -256,8 +257,10 @@ def test_cleanup_rejects_unsupported_projection_before_filtering(tmp_path):
         _filter_reconstruction(context(tmp_path), reconstruction, records)
 
 
-@pytest.mark.parametrize("enabled", [True, False])
-def test_stage_exports_complete_model_and_declares_metadata_dependency(tmp_path, enabled):
+@pytest.mark.parametrize("enabled,remove_image", [(True, False), (False, False), (True, True)])
+def test_stage_exports_complete_model_and_declares_metadata_dependency(
+    tmp_path, enabled, remove_image, monkeypatch
+):
     reconstruction, records = mixed_model()
     source = tmp_path / "scene_alignment" / "sparse" / "0"
     source.mkdir(parents=True)
@@ -265,7 +268,17 @@ def test_stage_exports_complete_model_and_declares_metadata_dependency(tmp_path,
     model.write_images_bin(source / "images.bin", reconstruction.images)
     model.write_points3D_bin(source / "points3D.bin", reconstruction.points3D)
     (source / "rigs.bin").write_bytes(b"fixture rig")
-    (source / "frames.bin").write_bytes(b"fixture frames")
+    frames = [
+        struct.pack("<II7dI", image.image_id, image.camera_id, *image.qvec, *image.tvec, 1)
+        + struct.pack("<iIQ", 0, image.camera_id, image.image_id)
+        for image in reconstruction.images.values()
+    ]
+    (source / "frames.bin").write_bytes(struct.pack("<Q", len(frames)) + b"".join(frames))
+    if remove_image:
+        monkeypatch.setattr(
+            "sphere_reconstruct.stages.cleanup_sparse._find_trajectory_outliers",
+            lambda *_: {"outlier_captures_by_source": {"source1": [0]}, "trajectories": {}},
+        )
     original_model = model.read_model(source)
     spec = InputSpec(
         3,
@@ -300,12 +313,16 @@ def test_stage_exports_complete_model_and_declares_metadata_dependency(tmp_path,
     )
     manifest = CleanupSparse().execute(ctx)
     assert any(ref.path == "extract_features/input_spec.json" for ref in manifest.inputs)
-    assert manifest.impl_version == "2.3"
+    assert manifest.impl_version == "2.4"
     loaded = model.read_model(output / "sparse" / "0")
     assert len(loaded.points3D) == (1 if enabled else 2)
     assert loaded.cameras == original_model.cameras
-    for filename in ("rigs.bin", "frames.bin"):
-        assert (output / "sparse" / "0" / filename).read_bytes() == (source / filename).read_bytes()
+    assert (output / "sparse/0/rigs.bin").read_bytes() == (source / "rigs.bin").read_bytes()
+    expected_frames = frames[1:] if remove_image else frames
+    assert (output / "sparse/0/frames.bin").read_bytes() == (
+        struct.pack("<Q", len(expected_frames)) + b"".join(expected_frames)
+    )
+    assert len(loaded.images) == len(expected_frames)
     assert (output / "preview" / "points.bin").is_file()
     assert bool([ref for ref in manifest.outputs if ref.path.endswith("point_assessment.npz")]) is enabled
     result = json.loads((output / "cleanup_sparse.json").read_text())

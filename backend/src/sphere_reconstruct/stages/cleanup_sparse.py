@@ -31,7 +31,7 @@ from . import similarity_transform
 @register
 class CleanupSparse(Stage):
     name = StageName.CLEANUP_SPARSE
-    impl_version = "2.3"
+    impl_version = "2.4"
 
     def normalize_params(self, raw: dict) -> dict:
         values = {
@@ -114,7 +114,10 @@ class CleanupSparse(Stage):
         for name in ("rigs.bin", "frames.bin", "project.ini"):
             source = input_model / name
             if source.is_file():
-                shutil.copy2(source, output_model / name)
+                if name == "frames.bin" and result.get("removed_images", 0):
+                    colmap_model.filter_frames_bin(source, output_model / name, set(reconstruction.images))
+                else:
+                    shutil.copy2(source, output_model / name)
 
         result_path = ctx.stage_out_dir / "cleanup_sparse.json"
         result_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
