@@ -17,6 +17,7 @@ from sphere_reconstruct.pipeline.stage import ProgressReporter, StageContext
 from sphere_reconstruct.stages.cleanup_sparse import (
     CleanupSparse,
     _filter_reconstruction,
+    _find_trajectory_outliers,
     _remove_trajectory_outlier_images,
 )
 
@@ -156,6 +157,51 @@ def test_trajectory_outlier_image_removal_rewrites_tracks():
     assert all(image.num_registered_points == 1 for image in reconstruction.images.values())
 
 
+def test_cleanup_combines_robust_steps_with_primary_path_consistency():
+    camera = model.Camera(1, "PINHOLE", 100, 100, [80, 80, 50, 50])
+    images, records = {}, []
+    primary_centers = []
+    image_id = 1
+    for capture in range(40):
+        angle = capture * 2 * np.pi / 40
+        center = (2 * np.cos(angle), 1.0, 2 * np.sin(angle))
+        primary_centers.append(center)
+        name = f"360/frame_{capture:06d}.jpg"
+        images[image_id] = model.Image(
+            image_id, (1, 0, 0, 0), tuple(-value for value in center), 1, name
+        )
+        records.append({"name": name, "source_id": "primary", "capture_index": capture})
+        image_id += 1
+    for capture in range(30):
+        center = list(primary_centers[capture])
+        if capture in {10, 20}:
+            center[1] += 100
+        name = f"phone/frame_{capture:06d}.jpg"
+        images[image_id] = model.Image(
+            image_id, (1, 0, 0, 0), tuple(-value for value in center), 1, name
+        )
+        records.append({"name": name, "source_id": "phone", "capture_index": capture})
+        image_id += 1
+    reconstruction = model.Reconstruction({1: camera}, images, {})
+    primary = SimpleNamespace(
+        id="primary", role=SimpleNamespace(value="primary"), media_kind=SimpleNamespace(value="video")
+    )
+    supplemental = SimpleNamespace(
+        id="phone", role=SimpleNamespace(value="supplemental"), media_kind=SimpleNamespace(value="images")
+    )
+    ctx = SimpleNamespace(
+        params=CleanupSparse().normalize_params({}),
+        sources=(primary, supplemental),
+        primary_source=primary,
+    )
+
+    result = _find_trajectory_outliers(ctx, reconstruction, records)
+
+    assert result["outlier_captures_by_source"] == {"phone": [10, 20]}
+    phone = result["trajectories"]["phone"]
+    assert phone["primary_path_consistency"]["maximum_allowed_distance"] < 10
+
+
 def test_cleanup_rejects_unsupported_projection_before_filtering(tmp_path):
     reconstruction, records = mixed_model()
     reconstruction.cameras[1].model = "EQUIRECTANGULAR"
@@ -207,7 +253,7 @@ def test_stage_exports_complete_model_and_declares_metadata_dependency(tmp_path,
     )
     manifest = CleanupSparse().execute(ctx)
     assert any(ref.path == "extract_features/input_spec.json" for ref in manifest.inputs)
-    assert manifest.impl_version == "2.1"
+    assert manifest.impl_version == "2.2"
     loaded = model.read_model(output / "sparse" / "0")
     assert len(loaded.points3D) == (1 if enabled else 2)
     assert loaded.cameras == original_model.cameras

@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+import math
+
 from sphere_reconstruct.colmap.model import Camera, Image, Reconstruction
-from sphere_reconstruct.colmap.trajectory_quality import evaluate_primary_trajectory
+from sphere_reconstruct.colmap.trajectory_quality import (
+    evaluate_primary_trajectory,
+    evaluate_source_path_consistency,
+)
 
 
 def _sequence(*, jump_at: int | None = None) -> tuple[Reconstruction, list[dict]]:
@@ -73,3 +78,77 @@ def test_long_input_without_enough_consecutive_registration_fails():
     assert result["available"] is False
     assert result["passed"] is False
     assert result["reason"] == "too_few_consecutive_registered_captures"
+
+
+def test_median_step_baseline_is_not_inflated_by_repeated_teleports():
+    camera = Camera(1, "PINHOLE", 64, 64, [20, 20, 32, 32], 1)
+    bad_captures = {10, 20, 30, 40, 50, 60, 70}
+    images = {}
+    records = []
+    for capture in range(100):
+        image_id = capture + 1
+        y = 100.0 if capture in bad_captures else 0.0
+        center = (capture * 0.1, y, 0.0)
+        name = f"phone/frame_{capture:06d}.jpg"
+        images[image_id] = Image(
+            image_id,
+            (1.0, 0.0, 0.0, 0.0),
+            tuple(-value for value in center),
+            1,
+            name,
+        )
+        records.append({"name": name, "source_id": "phone", "capture_index": capture})
+    reconstruction = Reconstruction({1: camera}, images, {})
+
+    result = evaluate_primary_trajectory(
+        reconstruction,
+        records,
+        "phone",
+        max_step_ratio=10.0,
+        step_baseline="median",
+    )
+
+    assert result["passed"] is False
+    assert result["p95_step"] > result["outlier_threshold"]
+    assert result["outlier_captures"] == sorted(bad_captures)
+
+
+def test_supplemental_path_outliers_are_measured_against_primary_360_path():
+    camera = Camera(1, "PINHOLE", 64, 64, [20, 20, 32, 32], 1)
+    images = {}
+    records = []
+    image_id = 1
+    primary_centers = []
+    for capture in range(40):
+        angle = capture * 2 * math.pi / 40
+        center = (2 * math.cos(angle), 1.0, 2 * math.sin(angle))
+        primary_centers.append(center)
+        name = f"360/frame_{capture:06d}.jpg"
+        images[image_id] = Image(
+            image_id, (1.0, 0.0, 0.0, 0.0), tuple(-value for value in center), 1, name
+        )
+        records.append({"name": name, "source_id": "primary", "capture_index": capture})
+        image_id += 1
+    for capture in range(30):
+        center = list(primary_centers[capture])
+        if capture in {10, 20}:
+            center[1] += 100
+        name = f"phone/frame_{capture:06d}.jpg"
+        images[image_id] = Image(
+            image_id, (1.0, 0.0, 0.0, 0.0), tuple(-value for value in center), 1, name
+        )
+        records.append({"name": name, "source_id": "phone", "capture_index": capture})
+        image_id += 1
+    reconstruction = Reconstruction({1: camera}, images, {})
+
+    result = evaluate_source_path_consistency(
+        reconstruction,
+        records,
+        "primary",
+        "phone",
+        minimum_captures=20,
+    )
+
+    assert result["available"] is True
+    assert result["outlier_captures"] == [10, 20]
+    assert result["maximum_nearest_distance"] > 90

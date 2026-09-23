@@ -31,7 +31,7 @@ from . import similarity_transform
 @register
 class CleanupSparse(Stage):
     name = StageName.CLEANUP_SPARSE
-    impl_version = "2.1"
+    impl_version = "2.2"
 
     def normalize_params(self, raw: dict) -> dict:
         values = {
@@ -211,6 +211,7 @@ def _filter_reconstruction(
         image_records,
         trajectory_result["outlier_captures_by_source"],
     )
+    remaining_observations = sum(len(point.track) for point in reconstruction.points3D.values())
     return {
         "enabled": True,
         "policy": "full_track",
@@ -218,12 +219,12 @@ def _filter_reconstruction(
         "removed_points": len(points) - len(retained),
         "output_points": len(retained),
         "reason_counts": dict(counts),
-        "cleared_observations": original_observations
-        - sum(len(point.track) for point in reconstruction.points3D.values()),
+        "cleared_observations": original_observations - remaining_observations,
         "images_without_points": sum(
             image.num_registered_points == 0 for image in reconstruction.images.values()
         ),
         "input_images": len(views),
+        "output_images": len(reconstruction.images),
         "removed_images": len(removed_image_ids),
         "removed_captures": sum(
             len(captures) for captures in trajectory_result["outlier_captures_by_source"].values()
@@ -267,12 +268,31 @@ def _find_trajectory_outliers(ctx, reconstruction, image_records: list[dict]) ->
             source_id,
             max_step_ratio=ratio,
             minimum_steps=int(ctx.params.get("trajectory_minimum_steps", 20)),
+            step_baseline="median",
         )
-        trajectories[source_id] = result
-        if result.get("available") and result.get("outlier_captures"):
-            outlier_captures_by_source[source_id] = [
-                int(capture) for capture in result["outlier_captures"]
-            ]
+        diagnostics = {"adjacent_steps": result}
+        candidates = set(result.get("outlier_captures", [])) if result.get("available") else set()
+        primary = getattr(ctx, "primary_source", None)
+        role = getattr(getattr(source, "role", None), "value", getattr(source, "role", None))
+        if (
+            source is not None
+            and primary is not None
+            and role == "supplemental"
+            and primary.id != source_id
+        ):
+            consistency = trajectory_quality.evaluate_source_path_consistency(
+                reconstruction,
+                image_records,
+                primary.id,
+                source_id,
+                minimum_captures=int(ctx.params.get("trajectory_minimum_steps", 20)),
+            )
+            diagnostics["primary_path_consistency"] = consistency
+            if consistency.get("available"):
+                candidates.update(int(capture) for capture in consistency["outlier_captures"])
+        trajectories[source_id] = diagnostics
+        if candidates:
+            outlier_captures_by_source[source_id] = sorted(candidates)
     return {
         "outlier_captures_by_source": outlier_captures_by_source,
         "trajectories": trajectories,

@@ -1,20 +1,20 @@
 # Full-track sparse cleanup と native fisheye 比較
 
-正式な `cleanup_sparse` Step は既存 COLMAP 点群のうち、全 track の観測支持と位置の安定性を検証できた点だけを残す。既存点の座標・色・camera pose・intrinsics は変更せず、不合格点とその observation association を除去する。新しい点の補完、ERP 化、単眼 depth、道路の平面拘束は使わない。
+正式な `cleanup_sparse` Step は既存 COLMAP 点群のうち、全 track の観測支持と位置の安定性を検証できた点だけを残す。連番 capture の隣接 pose に明確な跳躍がある場合、および supplemental camera が primary 360 trajectory から大きく外れる場合は、その capture の image pose も削除し、全 track と image observation を整合させる。保持 point の座標・色と保持 camera pose・intrinsics は変更しない。新しい点の補完、ERP 化、単眼 depth、道路の平面拘束は使わない。
 
 [固定 pose 補完実験](fixed-pose-triangulation.md) では予測 coverage が増えても目視で大きな改善がなかった。全既存点を対象とした split cleanup は浮遊点を減らした一方、大きな欠損が生じ、LFStudio が遅いという報告があった。元 model・split・full-track の LFStudio 比較と利用者の目視評価を踏まえ、full-track を正式 Step に採用した。削除数や coverage 単独で最適解とは判定しない。
 
 ## 正式 Step の設定と対象
 
-`scene_alignment/sparse/0` と `extract_features/input_spec.json` を入力にし、後者の `(source_id, capture_index)` で独立 capture を識別する。異なる source の同じ frame 番号は別 capture。同一 capture の二眼や virtual views はまとめて留保し、source 間の撮影開始時刻や固定相対 pose を仮定しない。異なる camera は自身の intrinsics、distortion、pose で直接投影する。
+`scene_alignment/sparse/0` と `extract_features/input_spec.json` を入力にし、後者の `(source_id, capture_index)` で独立 capture を識別する。異なる source の同じ frame 番号は別 capture。同一 capture の二眼や virtual views はまとめて留保し、source 間の撮影開始時刻や固定相対 pose を仮定しない。補助 source の trajectory は primary 360 path への最近傍距離を robust 統計で評価し、時刻同期を仮定しない。異なる camera は自身の intrinsics、distortion、pose で直接投影する。
 
 既定は有効、相対誤差 `relative_error=0.02`、pixel noise の仮定 `pixel_sigma=1`、reprojection P95 上限 `max_cross_error=2 px`（最大値は 4 px）。Inspector では相対誤差を百分率で編集する。最低 3 capture は固定条件。全 parameter は正の有限値とし、全点が不合格なら空 model を publish せず失敗を報告する。無効時は元 model を通す。
 
 対応 camera は `OPENCV_FISHEYE`、`THIN_PRISM_FISHEYE`、`PINHOLE`、`SIMPLE_PINHOLE`、`SIMPLE_RADIAL`、`RADIAL`。通常の写真・phone video を含む mixed input にも同じ計算を適用できる。Mixed の合成幾何テストはあるが、以下の実素材比較は TestO2 の二眼 fisheye のみであり、mixed の画質改善を実証したものではない。ERP など未対応 model は明示的に失敗するため、当該 workflow では cleanup を無効にする。
 
-`cleanup_sparse/point_assessment.npz` に point ID、metric column、判定理由を記録し、`cleanup_sparse.json` と manifest に理由別件数と observation がゼロの画像数を保存する。Camera、rig、frame、保持 point の XYZ / RGB / track を保持し、scene-aligned model から直接 export できる。判定実装は Backend の `colmap/point_stability.py` に集約し、比較 CLI も共有する。旧 distance / angle filter は重ねて適用しない。
+`cleanup_sparse/point_assessment.npz` に point ID、metric column、判定理由を記録し、`cleanup_sparse.json` と manifest に理由別件数、削除した image / capture 数、trajectory 判定、observation がゼロの残存画像数を保存する。削除 capture に属する image は model から除き、point track が 2 observation 未満になった点も除去する。残存 point / image の双方向 association を検証してから書き出す。Rig、frame、保持 point の XYZ / RGB / track と保持 camera pose / intrinsics は変更せず、scene-aligned model から直接 export できる。点の安定性評価は `colmap/point_stability.py`、trajectory 評価は `colmap/trajectory_quality.py` に集約する。旧 distance / angle filter は重ねて適用しない。
 
-旧 cleanup の UI 編集値は起動時に server DB で新設定へ移行する。保存済み enable 状態や他 Step の数値は保持する。Triangulation preset 名は七つの実値から導出し、別保存されていた名称は DB から除去する。以前の実行 manifest と成果物は当時の記録として保持し、再実行時は実装 version `2.0` と新 parameter / input hash により旧 cache を採用しない。再実行するまで既存 export / training の内容は変わらない。Sparse reconstruction の未指定値は [厳格 preset](setup-gpu.md#incremental-mapper-の三角測量設定) になり、明示的に保存した各値は上書きしない。
+旧 cleanup の UI 編集値は起動時に server DB で新設定へ移行する。保存済み enable 状態や他 Step の数値は保持する。Triangulation preset 名は七つの実値から導出し、別保存されていた名称は DB から除去する。以前の実行 manifest と成果物は当時の記録として保持し、再実行時は実装 version `2.2` と新 parameter / input hash により旧 cache を採用しない。再実行するまで既存 export / training の内容は変わらない。Sparse reconstruction の未指定値は [厳格 preset](setup-gpu.md#incremental-mapper-の三角測量設定) になり、明示的に保存した各値は上書きしない。
 
 ## Split policy の判定条件
 
