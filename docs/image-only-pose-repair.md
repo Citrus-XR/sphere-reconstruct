@@ -49,4 +49,35 @@ LFS の camera loss heatmap は camera ごとの photometric loss EMA を相対�
 
 `scripts/benchmark_lfs_training.py --max-width 2048` で解像度を明示し、同じ iteration、strategy、capacity、mask mode と評価分割を使う。Current export の診断 training と、この共通条件での比較は区別する。Windows の `--detach` は WMI で起動し、SSH session の終了から supervisor を分離する。
 
-実データの再構成・training は検証中であり、この文書の初期件数を改善後の成績と読み替えない。採用前に同じ phone 視点の render と幾何指標、欠落画像、残る曖昧性を確認する。
+## RoomTest の実測結果
+
+再登録と二条件の 7,000 iterations training は 2026-09-24 に完了し、2026-09-27 に report と render を確認した。実験名は `fixed-primary-repair`。不足していた 1,238 pairs を補完し、既存の 360 pose を固定した条件付き参照を用いた。LiDAR、depth、ARKit pose は使用していない。独立した 360-only Global Mapper の二つの seed は主軌跡に大きな跳躍または発散を生じたため、今回の採用結果には使っていない。したがって、別 dataset での主素材再構成まで検証済みとはしない。
+
+- 360 は 1,994 images を維持し、camera center の最大変化は約 `1.05e-14` model units。
+- Phone は 676 images 中 665 を再登録した。旧 export の 571 images との共通集合は 568、新たに含まれる画像は 97、旧 export から登録できなかった画像は 3。登録件数の増加を全画像の精度保証とはしない。
+- 同一の 660 adjacent pairs の移動量 p95 は `151.073 → 0.454`、最大値は `1,335,723.666 → 5.270` model units。メートル尺度は確定していない。
+- 主軌跡への距離は p95 `0.402`、最大 `0.943` model units。主軌跡から離れる outlier 判定はゼロだが、隣接移動量は `1400→1401` と `1423→1424` が p95 の 10 倍を超える。他にも大きな移動や回転が残り、部屋の内側にあることだけで正確とは判定しない。
+- Primary-only correspondence の支持判定は共通画像で `334 → 357`。Inlier 合計は `206,890 → 197,774` と減っており、全指標が一様に改善した結果ではない。
+
+再登録できなかった phone frame は `1377, 1378, 1402, 1403, 1437, 1595–1600`。このうち `1402, 1403, 1437` は旧 export に存在した。削除による改善を避けるため、以下の A/B は両方に存在する同じ 568 phone images と 1,994 primary images、同じ 354,625 primary-only seed points を使用した。
+
+| Official heldout metric / 7,000 iterations | 旧 pose | 新 pose |
+| --- | ---: | ---: |
+| PSNR (dB) | 21.547941 | 21.674349 |
+| SSIM | 0.850071 | 0.849228 |
+
+全体 PSNR は小幅に改善し、SSIM はわずかに低下した。以下は事前選択した同一視点の JPEG render に対する診断 PSNR で、official heldout metric とは異なる。Training views を含み、単一 seed の結果である。
+
+| Phone frame | 旧 pose (dB) | 新 pose (dB) | Render の確認 |
+| --- | ---: | ---: | --- |
+| 001144 | 14.66 | 25.00 | 入口付近からベッド側の壁へ修正 |
+| 001147 | 12.85 | 24.04 | 机側の照明からベッド側の照明へ修正 |
+| 001156 | 10.88 | 21.66 | 同じくベッド側の照明へ修正 |
+| 001230 | 9.11 | 19.67 | 窓外から室内のテレビと窓へ修正 |
+| 001496 | 11.32 | 15.33 | 浴室の向きは改善、鏡・ガラス部分は不十分 |
+
+正常視点 `000997, 001120` と primary `000350` の診断 PSNR はそれぞれ `0.52, 0.20, 0.31 dB` 低下した。特定の誤登録が明確に改善した一方、全視点の完全修復や training 品質の一様な向上は確認できていない。
+
+根拠は実験内の `registration/report.json`、`audit/report.json`、`final-trajectory.json`、`training-comparison/report.json` と `training-comparison/contact.jpg`。Color extraction 後の sparse model は 1,352,651 points、純黒点は 4。旧 experiment report の黒点数は色抽出前の値だったため、完成モデルを再読込して確認した。現在の driver は色抽出後にこの統計を更新する。A/B は primary-only seed points を使っているので、完成モデルの全点・全 665 phone images を用いた training の成績とは区別する。
+
+2026-09-27 に改善後の model を RoomTest へ反映した。旧 reconstruction と下流成果物・manifest をバックアップし、完成した model と matching database を取り込んで、alignment、scale、scene alignment、export だけを再実行した。追加の camera 削除は行っていない。Export は 2,659 images / 1,352,651 points と全画像分の training masks を含み、`training_ready` 検証と公開元 model のファイルハッシュ検証を通過した。未解決の trajectory warning は import receipt と幾何 report に残し、この export を全 camera の修正完了とは扱わない。

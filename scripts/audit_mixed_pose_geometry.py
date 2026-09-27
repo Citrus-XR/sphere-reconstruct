@@ -225,6 +225,16 @@ def main():
     parser.add_argument("--reference-report", type=Path, help="Provenance and limits of a conditional primary reference")
     parser.add_argument("--detach", action="store_true")
     args = parser.parse_args()
+    for name in ["primary", "baseline", "candidate"]:
+        path = getattr(args, name)
+        if not path.is_dir():
+            parser.error(f"--{name} model directory does not exist: {path}")
+    for name in ["catalog", "database", "reference_report"]:
+        path = getattr(args, name)
+        if path is not None and not path.is_file():
+            parser.error(f"--{name.replace('_', '-')} file does not exist: {path}")
+    if not (args.backend_src / "sphere_reconstruct").is_dir():
+        parser.error(f"--backend-src must contain the sphere_reconstruct package: {args.backend_src}")
     args.output = args.output.resolve()
     if args.detach:
         launch_detached(args)

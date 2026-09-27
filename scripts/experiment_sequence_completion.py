@@ -102,6 +102,16 @@ def execute(args, status):
     run([args.colmap, "color_extractor", "--input_path", str(sparse), "--output_path", str(colored),
          "--image_path", str(image_path), "--num_threads", "8"], args.output, "colors", status)
     shutil.copy2(colored / "points3D.bin", sparse / "points3D.bin")
+    points = cm.read_points3D_bin(sparse / "points3D.bin")
+    if len(points) != report["summary"]["num_points3D"]:
+        raise RuntimeError("color extraction changed the number of reconstructed points")
+    black_before = report["summary"]["exact_black_points"]
+    black_after = sum(point.rgb == (0, 0, 0) for point in points.values())
+    report["summary"].update(exact_black_points=black_after,
+                             exact_black_point_ratio=black_after / max(1, len(points)))
+    report["point_color_completion"] = {"exact_black_points_before": black_before,
+                                         "exact_black_points_after": black_after}
+    write_json(args.output / "report.json", report)
     print(json.dumps(report["by_source"], indent=2), flush=True)
 
 
