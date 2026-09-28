@@ -80,4 +80,26 @@ LFS の camera loss heatmap は camera ごとの photometric loss EMA を相対�
 
 根拠は実験内の `registration/report.json`、`audit/report.json`、`final-trajectory.json`、`training-comparison/report.json` と `training-comparison/contact.jpg`。Color extraction 後の sparse model は 1,352,651 points、純黒点は 4。旧 experiment report の黒点数は色抽出前の値だったため、完成モデルを再読込して確認した。現在の driver は色抽出後にこの統計を更新する。A/B は primary-only seed points を使っているので、完成モデルの全点・全 665 phone images を用いた training の成績とは区別する。
 
-2026-09-27 に改善後の model を RoomTest へ反映した。旧 reconstruction と下流成果物・manifest をバックアップし、完成した model と matching database を取り込んで、alignment、scale、scene alignment、export だけを再実行した。追加の camera 削除は行っていない。Export は 2,659 images / 1,352,651 points と全画像分の training masks を含み、`training_ready` 検証と公開元 model のファイルハッシュ検証を通過した。未解決の trajectory warning は import receipt と幾何 report に残し、この export を全 camera の修正完了とは扱わない。
+## 公開時の点群検証と回帰
+
+2026-09-27 の公開は、alignment、scale、scene alignment、export だけを再実行し、camera 削除を避けるために `cleanup_sparse` 全体を省略していた。これは点の安定性検証も省略する誤った公開手順だった。旧 export は清理済みの 206,056 points、新 export は 1,352,651 points で、594,436 points（43.95%）が二観測 track だった。上記 A/B の共通 seed points と公開した全点は異なるため、pose の比較結果をこの初期点群の品質保証に流用できない。`training_ready` は dataset の読み込み・画像・mask などの整合性検証であり、浮遊 geometry がないことを保証しない。
+
+画像だけで pose を修正した候補でも、点の清理は `enabled=true` で実行する。Camera 集合を固定して評価する場合は、`remove_trajectory_outliers=false` を別に指定する。既存実装はこの二つを独立して制御できる。`scripts/publish_image_only_candidate.py` はこの条件で cleanup を必ず実行し、export の model source と点数が cleanup 出力に一致すること、追加の camera 削除がないことを検証する。旧 cleanup manifest がない場合や disabled の場合も点の清理を省略しない。入力変更・出力不整合・公開失敗は検出し、既存成果物と manifest をバックアップから復元する。初期点群の比較は全 export と同じ画像・pose・intrinsics・RGB・masks を使い、seed points だけを変更する。Pose の比較では逆に seed points を共通にする。どちらも検証した条件と公開する条件を混同しない。
+
+2026-09-28 の隔離実験 `floaters-cleanup-20260928` は、現在の scene-aligned model を full-track policy（3 captures 以上、relative error 0.02、pixel sigma 1、cross reprojection 2 px）で評価した。点座標の再最適化、距離による切断、camera の削除は行っていない。
+
+| 診断 | 清理前 | 清理後 |
+| --- | ---: | ---: |
+| Points | 1,352,651 | 632,484 |
+| 二観測 track | 594,436 | 0 |
+| 平均 track length | 6.21 | 10.74 |
+| 360 camera center への最近傍距離 < 0.25 | 30,624 | 635 |
+| 360 camera center への最近傍距離 > 10 | 5,116 | 3 |
+
+距離は model units であり、メートル値や浮遊点の ground truth ではない。保持した 2,659 images の pose と intrinsics は digest で完全一致し、camera / frame / rig metadata も同一だった。720,167 points の除去理由は、capture 不足 594,852、留保 capture の再投影不整合 84,924、条件付き不確実性 40,357、退化または無効な留保投影 34。清理後に安定点の観測がない画像は 47 枚あり、全 camera が正確になったとは扱わない。根拠は同実験の `report.json`、`source_hashes.json` と `cleanup_sparse/point_assessment.npz`。
+
+全 2,659 images を使った raw / cleaned export の LFS 比較は `floaters-lfs-raw-20260928` と `floaters-evaluation-20260928` に保存する。MRNF、GUT、Ignore masks、width cap 2048、7,000 iterations、capacity 2,000,000 と同じ評価分割を使う。双方の training は完了し、全 2,659 RGB files と 2,659 masks の SHA-256、全 camera の pose / intrinsics が条件間で一致した。結果は raw / cleaned の順に PSNR `21.327076 / 21.241682 dB`、SSIM `0.851716 / 0.848808` だった。単一試行で全体指標の改善は確認できない。事前選択した phone frame `001144` と `001156` の診断 JPEG PSNR はそれぞれ `26.30 → 27.71`、`20.97 → 23.45 dB`、他の視点はほぼ同等または低下した。鏡を含む浴室の不整合も残る。
+
+今回の確認対象は application の export / sparse preview に増えた散点である。同じ座標軸・同じ sample 数の比較では、部屋の周囲・上下の散点が明確に減り、室内構造が維持された。これを training 後の全浮遊物や全 camera pose の解決とは扱わない。Training の根拠は `floaters-evaluation-20260928/comparison/report.json` と `comparison/contact.jpg`。
+
+2026-09-28 に清理済み `cleanup_sparse` と `export_dataset` を RoomTest に公開した。再構成・matching・alignment は再実行せず、隔離検証済みの成果物を取り込んだ。公開先の全 sparse binary と preview は検証元と SHA-256 が一致し、API health、project state `exported`、全 RGB / masks の validation を確認した。未清理 export は `floaters-publication-20260928/backup`、それ以前の成果物は `publication-image-only-20260927-retry1/backup` に保存されている。公開確認は `floaters-publication-20260928/verification.json` と `published_hashes.json`。既存の実験用公開 entrypoint も versioned publisher を呼ぶ形に変更した。
