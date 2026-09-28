@@ -28,7 +28,7 @@ CLI は official COLMAP 4.2 の `matches_importer --match_type pairs` を使う�
 
 Reconstruct 2.12 の primary-first path で 360-only model を作成し、primary pose と既知の calibration を固定して補助 camera を Incremental Mapper で登録する。推測した phone focal length は trusted prior にしない。Matching を追加する実験は同じ primary model を使い、全体の再構成やフレーム抽出を繰り返さない。
 
-最小手順の比較用に、`scripts/prepare_fixed_primary_reference.py` は既存の primary pose を固定し、phone observation を除いた primary observation だけで点座標を再三角化する。3 captures 以上で観測された track を対象とし、reprojection error と triangulation angle で検証する。この参照は camera pose と track identity を joint model から継承するため、独立した 360-only reconstruction とは区別する。`--reference-report` でこの制約を姿勢検証の report に引き継ぐ。
+最小手順の比較用に、`scripts/prepare_fixed_primary_reference.py` は既存の primary pose を固定し、phone observation を除いた primary observation だけで点座標を再三角化する。3 captures 以上で観測された track を対象とし、full-track の条件付き不確実性と capture を留保した再投影誤差で検証する。既定値は relative error 0.02、pixel sigma 1、cross reprojection 2 px。固定の最小 triangulation angle は使わない。多数の独立 capture で支持された遠景を角度だけで失わず、二観測点や奥行きが不確定な点は引き続き除外する。この参照は camera pose と track identity を joint model から継承するため、独立した 360-only reconstruction とは区別する。`--reference-report` でこの制約を姿勢検証の report に引き継ぐ。
 
 `scripts/experiment_sequence_completion.py` は隔離 database で不足 pair を補完する。`--matches-only` で matching だけを先に完了でき、後の実行で `--database` にその database を指定すると再利用できる。`--ordered-source` は順序が確認できる source、`--calibration-model` は画像から求めた calibration の参照を指定する。現在の experiment driver は SIFT brute-force を対象とし、production matcher 自体は既存の matcher type を引き継ぐ。
 
@@ -40,6 +40,16 @@ Reconstruct 2.12 の primary-first path で 360-only model を作成し、primar
 - 移動量の比較は両 model に存在する同じ隣接 pair を使い、欠落数を別に報告する。
 
 Mapper が既に使った image matches を audit が含むため、これを SfM 全体から独立した ground truth と扱わない。反復物体の誤対応や planar calibration の曖昧性は、低い reprojection error だけでは解消しない。
+
+## 局所姿勢と失われた track の修正
+
+点の安定性検証は camera pose が正しいという条件付きの評価である。Phone だけの短い連続区間で camera と点が同時にずれた場合、低い再投影誤差でも浮遊 geometry が残る。既知の primary-only 3D points と別 source の画像対応で pose を再推定し、fit に使っていない reference と 3D identity で旧 / 新 pose を比較する。対応が足りない frame に補間 pose を割り当てない。
+
+`scripts/repair_sparse_geometry.py` は検証済み pose report の `accepted` rows を入力し、phone pose と、その pose を観測に含む点を一緒に更新する。影響点は元の image observations から再三角化し、通常と同じ full-track 検証を通す。残りの pose、intrinsics、camera 集合は保存する。Pycolmap 4.2 の frame API を使うため、`images.bin` と `frames.bin` の pose は同時に更新され、書き戻し後にも再読込して確認する。
+
+遠景の回復は旧 track の primary observations だけを用いる。現在の pose で再三角化し、3 captures 以上、条件付き不確実性、capture 留保の再投影検証に合格し、既存の安定点と observation が競合しないものだけを追加する。Web preview は `diag(1,-1,-1)` の座標変換を含むため、binary model と比較する前に座標系を合わせる。
+
+`scripts/publish_geometry_repair.py` は source / candidate binary の hash、track の双方向参照、camera 集合を検証してから修正を公開する。候補を元の reconstruct 座標系に戻し、reconstruct から cleanup / export まで一貫した manifest と preview を再生成する。公開 transaction と rollback は sequence repair と共通で、清理を省略せず、camera の追加削除を許可しない。この局所幾何検証は LFS training の品質比較とは別に記録する。
 
 ## LFS の検証
 

@@ -7,15 +7,18 @@ import contextlib
 import json
 import os
 import traceback
+from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
 import pycolmap
 from experiment_support import launch_detached, write_json
+from sphere_reconstruct.colmap.model import Camera
+from sphere_reconstruct.colmap.point_stability import assess_observations
 
 
-def refit_primary(reconstruction, records, primary_source_id, *, max_error, min_angle, progress):
+def refit_primary(reconstruction, records, primary_source_id, *, max_error, relative_error=0.02, pixel_sigma=1.0, progress):
     primary_ids = {i for i in reconstruction.reg_image_ids()
                    if records[reconstruction.images[i].name]["source_id"] == primary_source_id}
     if not primary_ids:
@@ -63,7 +66,39 @@ def refit_primary(reconstruction, records, primary_source_id, *, max_error, min_
         reconstruction.delete_point3D(point_id)
     del rays
     observation_manager = pycolmap.ObservationManager(reconstruction)
-    removed_observations = observation_manager.filter_all_points3D(max_error, min_angle)
+    removed_observations = observation_manager.filter_points3D_with_large_reprojection_error(
+        max_error, set(reconstruction.points3D)
+    )
+    cameras = {
+        i: Camera(i, camera.model.name, camera.width, camera.height, list(camera.params))
+        for i, camera in reconstruction.cameras.items()
+    }
+    centers = {i: -pose[:, :3].T @ pose[:, 3] for i, pose in poses.items()}
+    reasons = Counter()
+    rejected = []
+    for index, (point_id, point) in enumerate(reconstruction.points3D.items(), 1):
+        track = sorted(point.track.elements, key=lambda element: records[
+            reconstruction.images[element.image_id].name]["capture_index"])
+        images = [reconstruction.images[element.image_id] for element in track]
+        reason, _ = assess_observations(
+            point.xyz,
+            np.asarray([centers[element.image_id] for element in track]),
+            np.asarray([poses[element.image_id][:, :3] for element in track]),
+            [cameras[image.camera_id] for image in images],
+            np.asarray([image.points2D[element.point2D_idx].xy
+                        for image, element in zip(images, track, strict=True)]),
+            [(primary_source_id, records[image.name]["capture_index"]) for image in images],
+            relative_budget=relative_error, pixel_sigma=pixel_sigma,
+            cross_limit=max_error, policy="full_track",
+        )
+        reasons[reason] += 1
+        if reason != "keep":
+            rejected.append(point_id)
+        if index % 10000 == 0:
+            progress(index, len(reconstruction.points3D))
+    for point_id in rejected:
+        removed_observations += reconstruction.points3D[point_id].track.length()
+        reconstruction.delete_point3D(point_id)
     reconstruction.update_point_3d_errors()
     for image_id, matrix in original_poses.items():
         if not np.array_equal(reconstruction.images[image_id].cam_from_world().matrix(), matrix):
@@ -71,7 +106,8 @@ def refit_primary(reconstruction, records, primary_source_id, *, max_error, min_
     return {"primary_images": len(primary_ids), "points_after_removing_phone_observations": before,
             "points_triangulated_from_primary_only": triangulated, "retained_points": len(reconstruction.points3D),
             "filtered_observations": removed_observations, "max_reprojection_error": max_error,
-            "min_triangulation_angle": min_angle, "primary_poses_unchanged": True}
+            "point_policy": "full_track", "relative_error": relative_error, "pixel_sigma": pixel_sigma,
+            "reason_counts": dict(reasons), "primary_poses_unchanged": True}
 
 
 def execute(args, status):
@@ -92,7 +128,7 @@ def execute(args, status):
                   "This is a conditional reference, not a wholly independent primary reconstruction or ground truth.",
               ]}
     report.update(refit_primary(reconstruction, records, catalog["primary_source_id"], max_error=args.max_error,
-                               min_angle=args.min_angle, progress=progress))
+                               relative_error=args.relative_error, pixel_sigma=args.pixel_sigma, progress=progress))
     sparse = args.output / "sparse"
     sparse.mkdir()
     reconstruction.write(str(sparse))
@@ -105,11 +141,13 @@ def main():
     for name in ["model", "catalog", "output"]:
         parser.add_argument(f"--{name}", type=Path, required=True)
     parser.add_argument("--max-error", type=float, default=2.0)
-    parser.add_argument("--min-angle", type=float, default=3.0)
+    parser.add_argument("--relative-error", type=float, default=0.02)
+    parser.add_argument("--pixel-sigma", type=float, default=1.0)
     parser.add_argument("--detach", action="store_true")
     args = parser.parse_args()
     args.output = args.output.resolve()
-    if not np.isfinite([args.max_error, args.min_angle]).all() or min(args.max_error, args.min_angle) <= 0:
+    thresholds = [args.max_error, args.relative_error, args.pixel_sigma]
+    if not np.isfinite(thresholds).all() or min(thresholds) <= 0:
         parser.error("point quality thresholds must be positive and finite")
     if args.detach:
         launch_detached(args)

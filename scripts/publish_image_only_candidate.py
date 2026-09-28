@@ -94,21 +94,10 @@ def execute(args, status):
     sys.path.insert(0, str(args.backend_src))
     from sphere_reconstruct import stages  # noqa: F401
     from sphere_reconstruct.colmap import model as colmap_model
-    from sphere_reconstruct.colmap.input_workspace import InputSpec
-    from sphere_reconstruct.domain.artifacts import FileRef, StageManifest
+    from sphere_reconstruct.domain.artifacts import StageManifest
     from sphere_reconstruct.domain.pipeline_state import StageName, downstream_of
     from sphere_reconstruct.infrastructure.filesystem import sha256_bytes, sha256_file
-    from sphere_reconstruct.pipeline.engine import Engine
-    from sphere_reconstruct.pipeline.invalidation import derive_pipeline_state
-    from sphere_reconstruct.pipeline.manifest import register
     from sphere_reconstruct.pipeline.prepared_images import load_catalog
-    from sphere_reconstruct.pipeline.stage import new_manifest
-    from sphere_reconstruct.stages import similarity_transform
-    from sphere_reconstruct.stages.reconstruct import (
-        Reconstruct,
-        _file_ref,
-        _select_largest_model,
-    )
 
     project = args.project.resolve()
     affected = downstream_of(StageName.RECONSTRUCT)
@@ -192,6 +181,34 @@ def execute(args, status):
     if args.validate_only:
         return
 
+    publish_validated_candidate(args, status, receipt, report_bytes, evidence_bytes, old_manifests, catalog)
+
+
+def publish_validated_candidate(args, status, receipt, report_bytes, evidence_bytes, old_manifests, catalog,
+                                *, candidate_database=None):
+    from sphere_reconstruct.colmap import model as colmap_model
+    from sphere_reconstruct.colmap.input_workspace import InputSpec
+    from sphere_reconstruct.domain.artifacts import FileRef, StageManifest
+    from sphere_reconstruct.domain.pipeline_state import StageName, downstream_of
+    from sphere_reconstruct.infrastructure.filesystem import sha256_file
+    from sphere_reconstruct.pipeline.engine import Engine
+    from sphere_reconstruct.pipeline.invalidation import derive_pipeline_state
+    from sphere_reconstruct.pipeline.manifest import register
+    from sphere_reconstruct.pipeline.stage import new_manifest
+    from sphere_reconstruct.stages import similarity_transform
+    from sphere_reconstruct.stages.reconstruct import (
+        Reconstruct,
+        _file_ref,
+        _select_largest_model,
+    )
+
+    project = args.project.resolve()
+    affected = downstream_of(StageName.RECONSTRUCT)
+    required = [StageName.RECONSTRUCT, StageName.ALIGN_RECONSTRUCTION, StageName.RESTORE_METRIC_SCALE,
+                StageName.SCENE_ALIGNMENT, StageName.CLEANUP_SPARSE, StageName.EXPORT_DATASET]
+    candidate_model = args.candidate / "sparse/0"
+    candidate_database = candidate_database or args.candidate / "database.db"
+    files = receipt["files"]
     job_id = str(uuid.uuid4())
     now = datetime.now(UTC).isoformat()
     database = project.parents[1] / "state.db"
@@ -239,7 +256,7 @@ def execute(args, status):
 
         @register
         class CandidateReconstruction(Reconstruct):
-            impl_version = "image-only-repair-import-1"
+            impl_version = "verified-sparse-import-2"
 
             def collect_inputs(self, ctx):
                 return [*super().collect_inputs(ctx), *[
@@ -266,7 +283,7 @@ def execute(args, status):
                 summary["preview_points"] = preview.num_points_written
                 write_json(ctx.stage_out_dir / "model_summary.json", summary)
                 (ctx.stage_out_dir / "quality_report.json").write_bytes(report_bytes)
-                shutil.copy2(args.candidate / "database.db", ctx.stage_out_dir / "database.db")
+                shutil.copy2(candidate_database, ctx.stage_out_dir / "database.db")
                 manifest.outputs = [_file_ref(path, ctx) for path in sorted(ctx.stage_out_dir.rglob("*")) if path.is_file()]
                 manifest.extra = summary
                 return manifest

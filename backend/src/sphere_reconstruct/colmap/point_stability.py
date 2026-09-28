@@ -109,7 +109,7 @@ def relative_radius95(jacobian, sigma_px, distance):
 
 
 def assess_full_track(
-    point,
+    xyz,
     centers,
     rotations,
     cameras,
@@ -131,7 +131,7 @@ def assess_full_track(
     fit = triangulate_rays(centers, directions)
     if fit is None:
         return "degenerate_full_track", values
-    values[1] = np.linalg.norm(fit - point.xyz) / distance
+    values[1] = np.linalg.norm(fit - xyz) / distance
     if values[1] > relative_budget:
         return "full_fit_disagreement", values
     errors, differences = [], []
@@ -140,7 +140,7 @@ def assess_full_track(
         fit = triangulate_rays(centers[~heldout], directions[~heldout])
         if fit is None:
             return "degenerate_leave_one_out", values
-        differences.append(float(np.linalg.norm(fit - point.xyz) / distance))
+        differences.append(float(np.linalg.norm(fit - xyz) / distance))
         local = np.einsum("nij,nj->ni", rotations[heldout], fit - centers[heldout])
         if not np.all(np.isfinite(local)) or np.any(local[:, 2] <= 0):
             return "invalid_leave_one_out_projection", values
@@ -161,9 +161,6 @@ def assess_full_track(
 
 
 def assess_point(point, views, records, *, relative_budget, pixel_sigma, cross_limit, policy="split"):
-    if policy not in {"split", "full_track"}:
-        raise ValueError(f"unknown assessment policy: {policy}")
-    values = np.full(len(METRIC_COLUMNS), np.nan)
     observations = sorted(
         point.track,
         key=lambda item: (
@@ -175,26 +172,39 @@ def assess_point(point, views, records, *, relative_budget, pixel_sigma, cross_l
         (records[views[i]["image"].name]["source_id"], records[views[i]["image"].name]["capture_index"])
         for i, _ in observations
     ]
-    captures = list(dict.fromkeys(keys))
-    values[0] = len(captures)
-    if len(captures) < (4 if policy == "split" else 3):
-        return "insufficient_captures", values
     centers = np.array([views[i]["center"] for i, _ in observations])
     rotations = np.array([views[i]["rotation"] for i, _ in observations])
     cameras = [views[i]["camera"] for i, _ in observations]
     pixels = np.array(
         [[views[i]["image"].points2D[j].x, views[i]["image"].points2D[j].y] for i, j in observations]
     )
+    return assess_observations(
+        point.xyz, centers, rotations, cameras, pixels, keys,
+        relative_budget=relative_budget, pixel_sigma=pixel_sigma, cross_limit=cross_limit, policy=policy,
+    )
+
+
+def assess_observations(
+    xyz, centers, rotations, cameras, pixels, keys, *, relative_budget, pixel_sigma, cross_limit, policy="split",
+):
+    """独立 capture 単位で検証する。Binary model と pycolmap refit の共通評価。"""
+    if policy not in {"split", "full_track"}:
+        raise ValueError(f"unknown assessment policy: {policy}")
+    values = np.full(len(METRIC_COLUMNS), np.nan)
+    captures = list(dict.fromkeys(keys))
+    values[0] = len(captures)
+    if len(captures) < (4 if policy == "split" else 3):
+        return "insufficient_captures", values
     directions = np.array(
         [
             pixels_to_camera_rays(camera, pixel[None])[0] @ rotation
             for camera, pixel, rotation in zip(cameras, pixels, rotations, strict=True)
         ]
     )
-    distance = float(np.median(np.linalg.norm(np.asarray(point.xyz) - centers, axis=1)))
+    distance = float(np.median(np.linalg.norm(np.asarray(xyz) - centers, axis=1)))
     if not np.isfinite(distance) or distance <= 0:
         return "invalid_geometry", values
-    original_projection = project_and_jacobian(point.xyz, centers, rotations, cameras)
+    original_projection = project_and_jacobian(xyz, centers, rotations, cameras)
     if original_projection is None:
         return "invalid_original_projection", values
     original_errors = np.linalg.norm(original_projection[0] - pixels, axis=1)
@@ -203,7 +213,7 @@ def assess_point(point, views, records, *, relative_budget, pixel_sigma, cross_l
         return "original_reprojection", values
     if policy == "full_track":
         return assess_full_track(
-            point,
+            xyz,
             centers,
             rotations,
             cameras,
@@ -236,7 +246,7 @@ def assess_point(point, views, records, *, relative_budget, pixel_sigma, cross_l
             return "degenerate_split", values
         split_difference = max(split_difference, float(np.linalg.norm(fits[0] - fits[1]) / distance))
         for fit, mask in zip(fits, (half, ~half), strict=True):
-            original_difference = max(original_difference, float(np.linalg.norm(fit - point.xyz) / distance))
+            original_difference = max(original_difference, float(np.linalg.norm(fit - xyz) / distance))
             projection = project_and_jacobian(fit, centers, rotations, cameras)
             if projection is None:
                 return "invalid_projection", values

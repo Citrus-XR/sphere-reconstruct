@@ -406,3 +406,56 @@ def test_publication_rejects_camera_deletion_or_uncleaned_export(
         publication.publisher.execute(publication.args, {})
     _assert_originals_restored(publication)
     assert _job(publication)[0] == "failed"
+
+
+def _geometry_publication(publication):
+    import importlib
+
+    publisher = importlib.import_module("publish_geometry_repair")
+    project = publication.args.project
+    binaries = ("cameras.bin", "images.bin", "frames.bin", "rigs.bin", "points3D.bin")
+    source_hashes = {}
+    for stage in ("reconstruct", "cleanup_sparse"):
+        directory = project / stage / "sparse/0"
+        directory.mkdir(parents=True, exist_ok=True)
+        for name in binaries:
+            path = directory / name
+            if not path.exists():
+                path.write_bytes(name.encode())
+            source_hashes[str(path.resolve())] = sha256_bytes(path.read_bytes())
+    catalog = project / "extract_features/input_spec.json"
+    catalog.parent.mkdir()
+    catalog.write_text("{}")
+    source_hashes[str(catalog.resolve())] = sha256_bytes(catalog.read_bytes())
+    report = {"strategy": "verified_local_pose_and_track_refit", "other_poses_unchanged": True,
+              "intrinsics_unchanged": True, "source_hashes": source_hashes,
+              "output_hashes": {name: sha256_bytes(name.encode()) for name in binaries}}
+    report_path = publication.args.candidate / "report.json"
+    report_path.write_text(json.dumps(report))
+    return publisher, report, report_path
+
+
+def test_geometry_publication_rejects_incomplete_source_provenance(publication):
+    publisher, report, path = _geometry_publication(publication)
+    report["source_hashes"].pop(next(iter(report["source_hashes"])))
+    path.write_text(json.dumps(report))
+    with pytest.raises(ValueError, match="provenance"):
+        publisher.execute(publication.args, {})
+    assert _job(publication) is None
+
+
+def test_geometry_publication_rejects_input_changed_after_pose_validation(publication):
+    publisher, report, _ = _geometry_publication(publication)
+    Path(next(iter(report["source_hashes"]))).write_bytes(b"changed")
+    with pytest.raises(ValueError, match="input changed"):
+        publisher.execute(publication.args, {})
+    assert _job(publication) is None
+
+
+def test_geometry_publication_rejects_changed_candidate_before_touching_project(publication):
+    publisher, _, _ = _geometry_publication(publication)
+    (publication.args.candidate / "sparse/0/frames.bin").write_bytes(b"stale frame poses")
+    with pytest.raises(ValueError, match="output changed: frames.bin"):
+        publisher.execute(publication.args, {})
+    assert _job(publication) is None
+    _assert_originals_restored(publication)
