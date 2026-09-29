@@ -17,6 +17,7 @@ from sphere_reconstruct.imaging.camera_geometry import camera_rays_to_pixels
 from sphere_reconstruct.pipeline.stage import ProgressReporter, StageContext
 from sphere_reconstruct.stages.cleanup_sparse import (
     CleanupSparse,
+    _assessment_workers,
     _filter_reconstruction,
     _find_trajectory_outliers,
     _remove_trajectory_outlier_images,
@@ -70,6 +71,31 @@ def test_mixed_cleanup_keeps_constrained_geometry_and_removes_uncertain_depth(tm
     with np.load(tmp_path / "point_assessment.npz") as assessment:
         assert assessment["point_ids"].tolist() == [1, 2]
         assert assessment["reasons"].tolist() == ["keep", "conditional_uncertainty"]
+
+
+def test_parallel_assessment_preserves_order_and_results(tmp_path):
+    first, records = mixed_model()
+    second, _ = mixed_model()
+    (tmp_path / "one").mkdir()
+    (tmp_path / "many").mkdir()
+    sequential = _filter_reconstruction(context(tmp_path / "one", assessment_workers=1), first, records)
+    parallel = _filter_reconstruction(context(tmp_path / "many", assessment_workers=2), second, records)
+    assert {key: value for key, value in parallel.items() if key != "assessment_workers"} == {
+        key: value for key, value in sequential.items() if key != "assessment_workers"
+    }
+    with np.load(tmp_path / "one/point_assessment.npz") as expected, np.load(
+        tmp_path / "many/point_assessment.npz"
+    ) as actual:
+        for key in ("point_ids", "columns", "reasons"):
+            np.testing.assert_array_equal(actual[key], expected[key])
+        np.testing.assert_allclose(actual["metrics"], expected["metrics"], rtol=0, atol=0)
+
+
+def test_assessment_workers_auto_and_validation():
+    assert _assessment_workers(1) == 1
+    assert _assessment_workers(0) >= 1
+    with pytest.raises(ValueError, match="assessment_workers"):
+        CleanupSparse().normalize_params({"assessment_workers": -1})
 
 
 def test_trajectory_removal_assesses_short_tracks_and_reports_final_counts(tmp_path, monkeypatch):
@@ -313,7 +339,7 @@ def test_stage_exports_complete_model_and_declares_metadata_dependency(
     )
     manifest = CleanupSparse().execute(ctx)
     assert any(ref.path == "extract_features/input_spec.json" for ref in manifest.inputs)
-    assert manifest.impl_version == "2.4"
+    assert manifest.impl_version == "2.5"
     loaded = model.read_model(output / "sparse" / "0")
     assert len(loaded.points3D) == (1 if enabled else 2)
     assert loaded.cameras == original_model.cameras

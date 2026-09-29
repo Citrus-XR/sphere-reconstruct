@@ -47,6 +47,10 @@ def geometry(reconstruction):
             "rotation": np.asarray(model.qvec_to_rotation(image.qvec)),
             "center": np.asarray(image.camera_center),
             "camera": reconstruction.cameras[image.camera_id],
+            "rays": pixels_to_camera_rays(
+                reconstruction.cameras[image.camera_id],
+                np.asarray([[point.x, point.y] for point in image.points2D]),
+            ),
         }
         for image in reconstruction.images.values()
     }
@@ -144,13 +148,15 @@ def assess_full_track(
         local = np.einsum("nij,nj->ni", rotations[heldout], fit - centers[heldout])
         if not np.all(np.isfinite(local)) or np.any(local[:, 2] <= 0):
             return "invalid_leave_one_out_projection", values
-        selected_cameras = [camera for camera, selected in zip(cameras, heldout, strict=True) if selected]
-        predicted = np.array(
-            [
-                camera_rays_to_pixels(camera, ray[None])[0]
-                for camera, ray in zip(selected_cameras, local, strict=True)
-            ]
-        )
+        predicted = np.empty((int(heldout.sum()), 2), dtype=np.float64)
+        for camera_id in sorted({camera.camera_id for camera in cameras}):
+            selected = heldout & np.asarray([camera.camera_id == camera_id for camera in cameras])
+            selected_heldout = selected[heldout]
+            if selected_heldout.any():
+                predicted[selected_heldout] = camera_rays_to_pixels(
+                    next(camera for camera in cameras if camera.camera_id == camera_id),
+                    local[selected_heldout],
+                )
         errors.extend(np.linalg.norm(predicted - pixels[heldout], axis=1).tolist())
     values[2:5] = [max(differences), np.percentile(errors, 95), max(errors)]
     if not np.all(np.isfinite(values)):
@@ -180,12 +186,17 @@ def assess_point(point, views, records, *, relative_budget, pixel_sigma, cross_l
     )
     return assess_observations(
         point.xyz, centers, rotations, cameras, pixels, keys,
+        directions=np.array([
+            views[image_id]["rays"][point_index] @ rotation
+            for (image_id, point_index), rotation in zip(observations, rotations, strict=True)
+        ]),
         relative_budget=relative_budget, pixel_sigma=pixel_sigma, cross_limit=cross_limit, policy=policy,
     )
 
 
 def assess_observations(
-    xyz, centers, rotations, cameras, pixels, keys, *, relative_budget, pixel_sigma, cross_limit, policy="split",
+    xyz, centers, rotations, cameras, pixels, keys, *, directions=None,
+    relative_budget, pixel_sigma, cross_limit, policy="split",
 ):
     """独立 capture 単位で検証する。Binary model と pycolmap refit の共通評価。"""
     if policy not in {"split", "full_track"}:
@@ -195,12 +206,11 @@ def assess_observations(
     values[0] = len(captures)
     if len(captures) < (4 if policy == "split" else 3):
         return "insufficient_captures", values
-    directions = np.array(
-        [
-            pixels_to_camera_rays(camera, pixel[None])[0] @ rotation
+    if directions is None:
+        directions = np.array([
+            pixels_to_camera_rays(camera, pixel)[0] @ rotation
             for camera, pixel, rotation in zip(cameras, pixels, rotations, strict=True)
-        ]
-    )
+        ])
     distance = float(np.median(np.linalg.norm(np.asarray(xyz) - centers, axis=1)))
     if not np.isfinite(distance) or distance <= 0:
         return "invalid_geometry", values

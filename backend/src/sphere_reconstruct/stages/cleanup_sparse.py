@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 import shutil
 from collections import Counter, defaultdict
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 
@@ -31,15 +33,20 @@ from . import similarity_transform
 @register
 class CleanupSparse(Stage):
     name = StageName.CLEANUP_SPARSE
-    impl_version = "2.4"
+    impl_version = "2.5"
 
     def normalize_params(self, raw: dict) -> dict:
         values = {
             "relative_error": float(raw.get("relative_error", 0.02)),
             "pixel_sigma": float(raw.get("pixel_sigma", 1.0)),
             "max_cross_error": float(raw.get("max_cross_error", 2.0)),
+            "assessment_workers": int(raw.get("assessment_workers", 1)),
         }
         for key, value in values.items():
+            if key == "assessment_workers":
+                if value < 0:
+                    raise ValueError("assessment_workers must be >= 0")
+                continue
             if not math.isfinite(value) or value <= 0:
                 raise ValueError(f"{key} must be finite and positive")
         max_preview_points = int(raw.get("max_preview_points", 500_000))
@@ -185,27 +192,36 @@ def _filter_reconstruction(
     counts = Counter()
     metrics = np.full((len(points), len(FULL_TRACK_COLUMNS)), np.nan)
     reasons = []
-    for index, point in enumerate(points):
-        reason, values = assess_point(
-            point,
-            views,
-            records,
-            relative_budget=ctx.params["relative_error"],
-            pixel_sigma=ctx.params["pixel_sigma"],
-            cross_limit=ctx.params["max_cross_error"],
-            policy="full_track",
+    workers = _assessment_workers(ctx.params["assessment_workers"])
+    batches = _assessment_batches(points, workers)
+    if workers == 1:
+        batches = [points]
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="sparse-assess") as executor:
+        results = executor.map(
+            _assess_batch,
+            batches,
+            (views for _ in batches),
+            (records for _ in batches),
+            (ctx.params["relative_error"] for _ in batches),
+            (ctx.params["pixel_sigma"] for _ in batches),
+            (ctx.params["max_cross_error"] for _ in batches),
         )
-        metrics[index] = values
-        reasons.append(reason)
-        counts[reason] += 1
-        if reason == "keep":
-            retained.add(point.point3D_id)
-        ctx.progress.tick(
-            0.03 + 0.70 * (index + 1) / len(points),
-            message=f"verify sparse tracks {index + 1}/{len(points)}",
-            key="log.cleanup_sparse_assess",
-            args={"cur": index + 1, "tot": len(points), "kept": len(retained)},
-        )
+        processed = 0
+        for batch_results in results:
+            for point, reason, values in batch_results:
+                index = processed
+                metrics[index] = values
+                reasons.append(reason)
+                counts[reason] += 1
+                if reason == "keep":
+                    retained.add(point.point3D_id)
+                processed += 1
+            ctx.progress.tick(
+                0.03 + 0.70 * processed / len(points),
+                message=f"verify sparse tracks {processed}/{len(points)}",
+                key="log.cleanup_sparse_assess",
+                args={"cur": processed, "tot": len(points), "kept": len(retained)},
+            )
     np.savez_compressed(
         ctx.stage_out_dir / "point_assessment.npz",
         point_ids=np.asarray([point.point3D_id for point in points], dtype=np.uint64),
@@ -247,7 +263,40 @@ def _filter_reconstruction(
         "camera_models": sorted({camera.model for camera in reconstruction.cameras.values()}),
         "original_geometry_retained": True,
         "added_points": 0,
+        "assessment_workers": workers,
     }
+
+
+def _assessment_workers(configured: int) -> int:
+    """选择评分线程数；0 表示自动，限制上限避免小型机器过度切换。"""
+    if configured < 0:
+        raise ValueError("assessment_workers must be >= 0")
+    if configured:
+        return configured
+    return min(32, max(1, os.cpu_count() or 1))
+
+
+def _assessment_batches(points, workers: int):
+    batch_size = max(64, min(2048, math.ceil(len(points) / max(1, workers * 8))))
+    return [points[start : start + batch_size] for start in range(0, len(points), batch_size)]
+
+
+def _assess_batch(points, views, records, relative_error, pixel_sigma, cross_limit):
+    return [
+        (
+            point,
+            *assess_point(
+                point,
+                views,
+                records,
+                relative_budget=relative_error,
+                pixel_sigma=pixel_sigma,
+                cross_limit=cross_limit,
+                policy="full_track",
+            ),
+        )
+        for point in points
+    ]
 
 
 _SEQUENCE_NAME = re.compile(r"(?:frame|image|img)[_-]?\d+", re.IGNORECASE)

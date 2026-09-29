@@ -14,6 +14,8 @@
 
 `cleanup_sparse/point_assessment.npz` に point ID、metric column、判定理由を記録し、`cleanup_sparse.json` と manifest に理由別件数、削除した image / capture 数、trajectory 判定、observation がゼロの残存画像数を保存する。Trajectory outlier の image pose を先に除き、短くなった track も含めて点を評価する。capture 数が最低 3 未満の点は `insufficient_captures` として記録して除去し、assessment と最終 sparse model の点数を一致させる。残存 point / image の双方向 association を検証してから書き出す。削除 image を参照する `frames.bin` の camera data ID を除き、残存 image がない frame は削除する。保持 frame の rig pose・他 sensor 参照と rig calibration は保存する。保持 point の XYZ / RGB、残存 observation、camera pose / intrinsics は変更せず、scene-aligned model から直接 export できる。点の安定性評価は `colmap/point_stability.py`、trajectory 評価は `colmap/trajectory_quality.py` に集約する。旧 distance / angle filter は重ねて適用しない。
 
+点の判定は `assessment_workers` で CPU thread batch を指定できる。既定値は 1 で、観測 ray の一度だけの前計算を使う。`0` は最大 32 thread か logical CPU 数の小さい方を自動選択するが、小さい行列を大量に処理するため CPU によっては 1 より遅くなる。判定結果は元の point ID 順に並べて保存するため、thread 数を変えても保持集合と `point_assessment.npz` は変わらない。GPU は現状の小行列・魚眼投影を個別に CUDA へ送ると転送コストが勝つため既定にしない。GPU backend を追加する場合は、投影・Jacobian・ray triangulation をまとまった batch tensor として実装し、CPU 版との同一判定回帰を通してから切り替える。
+
 旧 cleanup の UI 編集値は起動時に server DB で新設定へ移行する。保存済み enable 状態や他 Step の数値は保持する。Triangulation preset 名は七つの実値から導出し、別保存されていた名称は DB から除去する。以前の実行 manifest と成果物は当時の記録として保持し、再実行時は実装 version `2.4` と新 parameter / input hash により旧 cache を採用しない。再実行するまで既存 export / training の内容は変わらない。Sparse reconstruction の未指定値は [厳格 preset](setup-gpu.md#incremental-mapper-の三角測量設定) になり、明示的に保存した各値は上書きしない。
 
 ## Split policy の判定条件
@@ -124,10 +126,10 @@ python scripts/export_strict_sparse.py <project> <original-output> --policy orig
 python scripts/export_strict_sparse.py <project> <split-output> --policy split --relative-error 0.02 --pixel-sigma 1 --max-cross-error 2
 python scripts/export_strict_sparse.py <project> <full-track-output> --policy full_track --relative-error 0.02 --pixel-sigma 1 --max-cross-error 2
 python scripts/compare_sparse_cleanup.py <project>/reconstruct/sparse/0 <split-output>/export_dataset/sparse/0 <full-track-output>/export_dataset/sparse/0 --output <comparison>/coverage.json
-python scripts/benchmark_lfs_training.py <lfs-executable> <dataset> <training-output> --iterations 30000 --max-cap 1000000 --detach --timelapse-every 5000 --timelapse-images <image-name-1> --timelapse-images <image-name-2>
+python scripts/benchmark_lfs_training.py <lfs-executable> <dataset> <training-output> --iterations 30000 --max-cap 1000000 --mask-mode segment --detach --timelapse-every 5000 --timelapse-images <image-name-1> --timelapse-images <image-name-2>
 ```
 
-`--timelapse-images` は画像ごとに繰り返す。後続 job の `--wait-for <previous-output>/status.json` は前 job が成功した場合だけ開始し、失敗は後続 job も失敗として記録する。
+上記 command は記録済み比較条件の `segment` を明示する。現在の benchmark default は `ignore` であり、この変更前の比較結果と混同しない。`--timelapse-images` は画像ごとに繰り返す。後続 job の `--wait-for <previous-output>/status.json` は前 job が成功した場合だけ開始し、失敗は後続 job も失敗として記録する。
 
 各 training directory の `project.licht` は完走した工程、`splat_30000.ply` は最終 Gaussian。最終比較の `index.html` は元 RGB・Training mask・四群の画面と元 pixel crop へのリンクをまとめる。`comparison.json` は全画像と crop の score、性能記録、Gaussian geometry 要約を持つ。元 RGB / mask の file identity または hash、render の元解像度を照合してから生成する。
 
@@ -152,6 +154,6 @@ Cleanup output は以下の構成になる。
 
 LFStudio では `export_dataset` 自体を開く。`points.ply` は残した点、`removed_points.ply` は除去した点の比較用である。RGB と training mask は既存 exporter と同じ materialization / decode validation を使用し、画像は元の full resolution、mask は Feature ではなく Training の成果物を使う。同じ filesystem では hardlink を使うため、export 内の image / mask を直接上書き編集しない。LFStudio の通常の training output は別 file に保存される。
 
-Viewer / training では native fisheye 用に GUT を有効、undistort を無効、mask mode を `segment` にする。この export に training hyperparameter の変更は含めない。点の除去で training 後の浮遊 Gaussian が必ず消えるとは限らない。
+現在の Viewer / training 推奨は native fisheye 用に GUT を有効、undistort を無効、mask mode を `ignore` にする。Mask は未観測・遮蔽領域の除外であり、`segment` の透明化 penalty を適用しない。上記の完了済み比較は記載どおり `segment` 条件の結果である。点の除去で training 後の浮遊 Gaussian が必ず消えるとは限らない。
 
 出力検査では binary model を再読込し、camera 不変性と point / image 双方向 track を確認する。全 registered image と training mask の decode、寸法と camera model の対応、元 model と関連 manifest の fingerprint も検査する。
